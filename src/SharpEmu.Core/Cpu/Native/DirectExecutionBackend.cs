@@ -217,8 +217,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private nint _guestReturnStub;
 
 	private nint _workerAbortStub;
-	private nint _vehManagedEntryLock;
-
 	private uint _workerDoneEventTlsIndex = uint.MaxValue;
 
 	private uint _tbbAbortEligibleTlsIndex = uint.MaxValue;
@@ -1117,14 +1115,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			throw new OutOfMemoryException("Failed to allocate host stack slot storage");
 		}
-		_vehManagedEntryLock = (nint)VirtualAlloc(null, 64u, 12288u, 4u);
-		if (_vehManagedEntryLock == 0)
-		{
-			throw new OutOfMemoryException("Failed to allocate VEH managed-entry lock");
-		}
-		// owner (nint) + depth (int); recursive — nested VEH on same thread must reenter.
-		*(nint*)_vehManagedEntryLock = 0;
-		*(int*)(_vehManagedEntryLock + sizeof(nint)) = 0;
 		_unresolvedReturnStub = CreateUnresolvedReturnStub();
 		_guestReturnStub = CreateGuestReturnStub();
 		if (_guestReturnStub == 0)
@@ -2598,14 +2588,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return (nint)ptr;
 	}
 
-	private unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
+	internal unsafe nint CreateExceptionHandlerTrampoline(nint managedHandler)
 	{
 		// Live VEH trampoline used by SetupExceptionHandler. Must pre-filter
 		// FastFail / CLR / MSVC C++ / stack-overflow the same way as
 		// WindowsFaultHandling.CreateHandlerThunk: entering managed VEH while
 		// the thread is in cooperative GC mode fail-fasts with
 		// "UnmanagedCallersOnly method from managed code" (tLT18–22).
-		// Extra headroom for native tbb abort + recursive managed-entry spinlock.
+		// Extra headroom for native worker abort and FastFail diagnostics.
 		const uint stubSize = 2048u;
 		void* ptr = VirtualAlloc(null, stubSize, 12288u, 64u);
 		if (ptr == null)
@@ -2932,67 +2922,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		// Allocate Win64 shadow space (0x28) aligned to 16 bytes before calling into managed code or Win32 APIs.
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
 		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28); // sub rsp, 0x28
-		// Serialize managed VEH entry (recursive spinlock). Concurrent UnmanagedCallersOnly
-		// FailFast was the tLTQ silent mid-TBB pattern (enter without abort breadcrumb).
-		// Lock layout: [0]=owner UniqueThread (nint), [8]=depth (int).
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xB9);
-		*(nint*)(code + offset) = _vehManagedEntryLock;
-		offset += sizeof(nint); // mov r9, lock*
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x4C);
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x14);
-		EmitByte(code, ref offset, 0x25); EmitUInt32(code, ref offset, 0x48u); // mov r10, gs:[0x48]
-		int hostAcquireSpin = offset;
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [r9]
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xD0); // cmp rax, r10
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int hostMineJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0); // test rax, rax
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-		int hostPauseJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4D); // REX.W | REX.R | REX.B (r10, [r9])
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB1); EmitByte(code, ref offset, 0x11); // lock cmpxchg [r9], r10
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-		int hostRetryJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xC7);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x08);
-		EmitUInt32(code, ref offset, 1u); // mov dword [r9+8], 1
-		EmitByte(code, ref offset, 0xE9);
-		int hostGotJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		int hostPauseOffset = offset;
-		EmitByte(code, ref offset, 0xF3); EmitByte(code, ref offset, 0x90); // pause
-		EmitByte(code, ref offset, 0xE9);
-		int hostPauseBackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		int hostMineOffset = offset;
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xFF);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x08); // inc dword [r9+8]
-		int hostGotOffset = offset;
-		*(int*)(code + hostMineJump) = hostMineOffset - (hostMineJump + sizeof(int));
-		*(int*)(code + hostPauseJump) = hostPauseOffset - (hostPauseJump + sizeof(int));
-		*(int*)(code + hostRetryJump) = hostAcquireSpin - (hostRetryJump + sizeof(int));
-		*(int*)(code + hostGotJump) = hostGotOffset - (hostGotJump + sizeof(int));
-		*(int*)(code + hostPauseBackJump) = hostAcquireSpin - (hostPauseBackJump + sizeof(int));
+		// Never hold a process-wide native lock across reverse P/Invoke: the
+		// handler may wait for GC or a resource owned by another faulting thread.
+		// Keep native exception filtering and per-thread recursion protection.
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
 		*(nint*)(code + offset) = managedHandler;
 		offset += sizeof(nint);
 		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xB9);
-		*(nint*)(code + offset) = _vehManagedEntryLock;
-		offset += sizeof(nint); // mov r9, lock*
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xFF);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x08); // dec dword [r9+8]
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-		int hostStillJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xC7);
-		EmitByte(code, ref offset, 0x01); EmitUInt32(code, ref offset, 0u); // mov qword [r9], 0
-		int hostStillOffset = offset;
-		*(int*)(code + hostStillJump) = hostStillOffset - (hostStillJump + sizeof(int));
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE4); // mov rsp, r12
 		EmitByte(code, ref offset, 0xE9);
 		int hostRestoreJump = offset;
@@ -3019,64 +2956,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitUInt32(code, ref offset, 0u);
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xDC); // mov rsp, r11
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xB9);
-		*(nint*)(code + offset) = _vehManagedEntryLock;
-		offset += sizeof(nint); // mov r9, lock*
-		EmitByte(code, ref offset, 0x65); EmitByte(code, ref offset, 0x4C);
-		EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x14);
-		EmitByte(code, ref offset, 0x25); EmitUInt32(code, ref offset, 0x48u); // mov r10, gs:[0x48]
-		int guestAcquireSpin = offset;
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x8B); EmitByte(code, ref offset, 0x01); // mov rax, [r9]
-		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x39); EmitByte(code, ref offset, 0xD0); // cmp rax, r10
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x84);
-		int guestMineJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x85); EmitByte(code, ref offset, 0xC0);
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-		int guestPauseJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0xF0); EmitByte(code, ref offset, 0x4D); // REX.W | REX.R | REX.B (r10, [r9])
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0xB1); EmitByte(code, ref offset, 0x11); // lock cmpxchg [r9], r10
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-		int guestRetryJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xC7);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x08);
-		EmitUInt32(code, ref offset, 1u);
-		EmitByte(code, ref offset, 0xE9);
-		int guestGotJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		int guestPauseOffset = offset;
-		EmitByte(code, ref offset, 0xF3); EmitByte(code, ref offset, 0x90);
-		EmitByte(code, ref offset, 0xE9);
-		int guestPauseBackJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		int guestMineOffset = offset;
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xFF);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x08);
-		int guestGotOffset = offset;
-		*(int*)(code + guestMineJump) = guestMineOffset - (guestMineJump + sizeof(int));
-		*(int*)(code + guestPauseJump) = guestPauseOffset - (guestPauseJump + sizeof(int));
-		*(int*)(code + guestRetryJump) = guestAcquireSpin - (guestRetryJump + sizeof(int));
-		*(int*)(code + guestGotJump) = guestGotOffset - (guestGotJump + sizeof(int));
-		*(int*)(code + guestPauseBackJump) = guestAcquireSpin - (guestPauseBackJump + sizeof(int));
 		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xE9); // mov rcx, r13
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
 		*(nint*)(code + offset) = managedHandler;
 		offset += sizeof(nint);
 		EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xB9);
-		*(nint*)(code + offset) = _vehManagedEntryLock;
-		offset += sizeof(nint);
-		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0xFF);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x08); // dec dword [r9+8]
-		EmitByte(code, ref offset, 0x0F); EmitByte(code, ref offset, 0x85);
-		int guestStillJump = offset;
-		EmitUInt32(code, ref offset, 0u);
-		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xC7);
-		EmitByte(code, ref offset, 0x01); EmitUInt32(code, ref offset, 0u);
-		int guestStillOffset = offset;
-		*(int*)(code + guestStillJump) = guestStillOffset - (guestStillJump + sizeof(int));
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83); EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x28);
 		EmitByte(code, ref offset, 0xE9);
 		int guestRestoreJump = offset;
@@ -7330,11 +7214,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			VirtualFree((void*)_hostRspSlotStorage, 0u, 32768u);
 			_hostRspSlotStorage = 0;
-		}
-		if (_vehManagedEntryLock != 0)
-		{
-			VirtualFree((void*)_vehManagedEntryLock, 0u, 32768u);
-			_vehManagedEntryLock = 0;
 		}
 		if (_workerAbortStack != 0)
 		{

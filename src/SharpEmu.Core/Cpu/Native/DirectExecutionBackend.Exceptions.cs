@@ -1417,16 +1417,7 @@ public sealed partial class DirectExecutionBackend
 	{
 		value = 0;
 		if (address < 65536) return false;
-		if (OperatingSystem.IsWindows())
-		{
-			if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
-				mbi.State != MEM_COMMIT ||
-				!IsReadableProtection(mbi.Protect))
-			{
-				return false;
-			}
-		}
-		else
+		if (!OperatingSystem.IsWindows())
 		{
 			return TryReadStackU64(address, out value);
 		}
