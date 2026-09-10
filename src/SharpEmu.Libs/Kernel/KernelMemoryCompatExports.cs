@@ -4919,6 +4919,12 @@ public static partial class KernelMemoryCompatExports
             return false;
         }
 
+        if (KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace) &&
+            addressSpace.TryCommitRange(address, length))
+        {
+            return true;
+        }
+
         Span<byte> probe = stackalloc byte[1];
         return ctx.Memory.TryRead(address, probe) &&
                ctx.Memory.TryRead(address + length - 1, probe);
