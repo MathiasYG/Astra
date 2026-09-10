@@ -8692,8 +8692,13 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 SelectExportUserDataRegister(state.ShRegisters),
                 out var exportState,
                 out error,
-                userDataScalarRegisterBase: NggUserDataScalarRegisterBase) ||
-            !Gen5ShaderScalarEvaluator.TryEvaluate(
+                userDataScalarRegisterBase: NggUserDataScalarRegisterBase))
+        {
+            return false;
+        }
+
+        var baseVertex = GetBaseVertex(state, exportState);
+        if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
                 out var exportEvaluation,
@@ -8704,6 +8709,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     state,
                     vertexCount,
                     indexed,
+                    baseVertex,
                     out var depthVertexRecords)
                         ? depthVertexRecords
                         : null))
@@ -8852,7 +8858,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             AttributeCount: 0,
             vertexCount,
             state.InstanceCount,
-            GetBaseVertex(state),
+            baseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             exportEvaluation.GlobalMemoryBindings,
@@ -8907,6 +8913,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        var baseVertex = GetBaseVertex(state, exportState);
+
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
@@ -8918,6 +8926,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     state,
                     vertexCount,
                     indexed,
+                    baseVertex,
                     out var vertexRecords)
                         ? vertexRecords
                         : null))
@@ -9364,7 +9373,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             GetInterpolatedAttributeCount(pixelState),
             vertexCount,
             state.InstanceCount,
-            GetBaseVertex(state),
+            baseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
@@ -9981,14 +9990,28 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         AgcIndexHelpers.Decode(state.IndexSize);
 
     /// <summary>
-    /// ResolveVertexOffset for the common UC path: GE_INDX_OFFSET is the
-    /// DrawIndexed vertexOffset / DrawAuto firstVertex. Embedded-fetch SGPR
-    /// fallback is not required when the game latches this register (GTA UI).
+    /// ResolveVertexOffset: GE_INDX_OFFSET is the DrawIndexed vertexOffset /
+    /// DrawAuto firstVertex. When it is not latched, embedded fetch shaders
+    /// carry the same offset in a user SGPR used by their index prolog.
     /// </summary>
-    private static int GetBaseVertex(SubmittedDcbState state) =>
-        state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset)
-            ? unchecked((int)indexOffset)
-            : 0;
+    private static int GetBaseVertex(
+        SubmittedDcbState state,
+        Gen5ShaderState exportState)
+    {
+        if (state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset))
+        {
+            return unchecked((int)indexOffset);
+        }
+
+        if (!Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+                exportState,
+                out var embeddedOffset))
+        {
+            return 0;
+        }
+
+        return embeddedOffset;
+    }
 
     private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
@@ -10045,9 +10068,10 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         SubmittedDcbState state,
         uint drawCount,
         bool indexed,
+        int resolvedBaseVertex,
         out uint recordCount)
     {
-        var baseVertex = (uint)Math.Max(GetBaseVertex(state), 0);
+        var baseVertex = (uint)Math.Max(resolvedBaseVertex, 0);
         recordCount = Math.Max(
             baseVertex + drawCount,
             Math.Max(state.InstanceCount, 1u));
