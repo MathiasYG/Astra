@@ -8697,7 +8697,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        // Embedded fetch prologs add their own base to gl_VertexID.  Keep the
+        // host draw offset at zero in that case; otherwise Vulkan applies the
+        // same first-vertex adjustment a second time.
         var baseVertex = GetBaseVertex(state, exportState);
+        var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
@@ -8709,7 +8713,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     state,
                     vertexCount,
                     indexed,
-                    baseVertex,
+                    recordBaseVertex,
                     out var depthVertexRecords)
                         ? depthVertexRecords
                         : null))
@@ -8913,7 +8917,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        // Embedded fetch prologs add their own base to gl_VertexID.  Keep the
+        // host draw offset at zero in that case; otherwise Vulkan applies the
+        // same first-vertex adjustment a second time.
         var baseVertex = GetBaseVertex(state, exportState);
+        var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
 
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
@@ -8926,7 +8934,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     state,
                     vertexCount,
                     indexed,
-                    baseVertex,
+                    recordBaseVertex,
                     out var vertexRecords)
                         ? vertexRecords
                         : null))
@@ -9998,19 +10006,40 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         SubmittedDcbState state,
         Gen5ShaderState exportState)
     {
+        if (Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+                exportState,
+                out _))
+        {
+            // The translated vertex shader already adds this value to
+            // gl_VertexID, so passing it through CmdDrawIndexed would double it.
+            return 0;
+        }
+
         if (state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset))
         {
             return unchecked((int)indexOffset);
         }
 
-        if (!Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+        return 0;
+    }
+
+    private static int GetVertexRecordBaseVertex(
+        SubmittedDcbState state,
+        Gen5ShaderState exportState)
+    {
+        if (Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
                 exportState,
                 out var embeddedOffset))
         {
-            return 0;
+            return embeddedOffset;
         }
 
-        return embeddedOffset;
+        if (state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset))
+        {
+            return unchecked((int)indexOffset);
+        }
+
+        return 0;
     }
 
     private static GuestIndexBuffer? CreateGuestIndexBuffer(
