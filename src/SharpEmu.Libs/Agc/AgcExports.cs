@@ -1488,6 +1488,7 @@ public static partial class AgcExports
         uint VertexCount,
         uint InstanceCount,
         int BaseVertex,
+        int VertexBufferBaseVertex,
         GuestIndexBuffer? IndexBuffer,
         IReadOnlyList<TranslatedImageBinding> Textures,
         IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
@@ -5340,7 +5341,9 @@ public static partial class AgcExports
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffers(pendingComposite);
                     var vertexBuffers =
-                        CreateGuestVertexBuffers(pendingComposite.VertexInputs);
+                        CreateGuestVertexBuffers(
+                            pendingComposite.VertexInputs,
+                            pendingComposite.VertexBufferBaseVertex);
                     ProvideRenderTargetInitialData(ctx, pendingDisplayTarget);
                     GuestGpu.Current.SubmitOffscreenTranslatedDraw(
                         pendingComposite.PixelShader,
@@ -8268,7 +8271,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             var globalMemoryBuffers =
                 CreateTranslatedDrawGlobalBuffers(depthOnlyDraw);
             var vertexBuffers =
-                CreateGuestVertexBuffers(depthOnlyDraw.VertexInputs);
+                CreateGuestVertexBuffers(
+                    depthOnlyDraw.VertexInputs,
+                    depthOnlyDraw.VertexBufferBaseVertex);
             var renderState = depthOnlyDraw.RenderState;
             if (activeDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
             {
@@ -8463,7 +8468,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 var sharedGlobalMemoryBuffers =
                     CreateTranslatedDrawGlobalBuffers(translatedDraw);
                 var sharedVertexBuffers =
-                    CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                    CreateGuestVertexBuffers(
+                        translatedDraw.VertexInputs,
+                        translatedDraw.VertexBufferBaseVertex);
                 TraceRectListVertices(translatedDraw, sharedVertexBuffers);
                 TraceGrassDrawVertices(translatedDraw, sharedTextures, sharedVertexBuffers);
                 TraceDrawCompact(
@@ -8520,7 +8527,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffers(translatedDraw);
                     var vertexBuffers =
-                        CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                        CreateGuestVertexBuffers(
+                            translatedDraw.VertexInputs,
+                            translatedDraw.VertexBufferBaseVertex);
                     var renderState = translatedDraw.RenderState;
                     if (translatedDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
                     {
@@ -8701,6 +8710,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         // host draw offset at zero in that case; otherwise Vulkan applies the
         // same first-vertex adjustment a second time.
         var baseVertex = GetBaseVertex(state, exportState);
+        var vertexBufferBaseVertex = GetVertexBufferBaseVertex(exportState);
         var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
@@ -8863,6 +8873,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             vertexCount,
             state.InstanceCount,
             baseVertex,
+            vertexBufferBaseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             exportEvaluation.GlobalMemoryBindings,
@@ -8921,6 +8932,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         // host draw offset at zero in that case; otherwise Vulkan applies the
         // same first-vertex adjustment a second time.
         var baseVertex = GetBaseVertex(state, exportState);
+        var vertexBufferBaseVertex = GetVertexBufferBaseVertex(exportState);
         var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
 
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
@@ -9382,6 +9394,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             vertexCount,
             state.InstanceCount,
             baseVertex,
+            vertexBufferBaseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
@@ -10043,6 +10056,19 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
 
         return 0;
     }
+
+    /// <summary>
+    /// Resolve the record offset for host vertex attributes when the guest
+    /// shader applies its first-vertex value itself. The host draw stays at
+    /// vertex zero so gl_VertexID remains relative, while the buffer binding
+    /// starts at the guest record selected by the fetch prolog.
+    /// </summary>
+    private static int GetVertexBufferBaseVertex(Gen5ShaderState exportState) =>
+        Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+            exportState,
+            out var embeddedOffset)
+                ? embeddedOffset
+                : 0;
 
     private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
@@ -11348,8 +11374,10 @@ private static long _indirectDrawProbeCount;
     }
 
     private static IReadOnlyList<GuestVertexBuffer> CreateGuestVertexBuffers(
-        IReadOnlyList<Gen5VertexInputBinding> bindings)
+        IReadOnlyList<Gen5VertexInputBinding> bindings,
+        int baseVertex)
     {
+        var baseRecord = baseVertex > 0 ? checked((uint)baseVertex) : 0;
         var buffers = new GuestVertexBuffer[bindings.Count];
         for (var index = 0; index < bindings.Count; index++)
         {
@@ -11365,7 +11393,8 @@ private static long _indirectDrawProbeCount;
                 binding.Data,
                 binding.DataLength,
                 binding.DataPooled,
-                binding.PerInstance);
+                binding.PerInstance,
+                baseRecord);
         }
 
         return buffers;

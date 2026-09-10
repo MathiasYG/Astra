@@ -3677,6 +3677,7 @@ internal static unsafe class VulkanVideoPresenter
             public uint Stride;
             public uint OffsetBytes;
             public bool PerInstance;
+            public uint BaseRecord;
         }
 
         private const Format DepthFormat = Format.D32Sfloat;
@@ -10777,6 +10778,7 @@ internal static unsafe class VulkanVideoPresenter
                 Stride = guestBuffer.Stride,
                 OffsetBytes = guestBuffer.OffsetBytes,
                 PerInstance = guestBuffer.PerInstance,
+                BaseRecord = guestBuffer.BaseRecord,
             };
         }
 
@@ -10795,6 +10797,7 @@ internal static unsafe class VulkanVideoPresenter
             Stride = guestBuffer.Stride,
             OffsetBytes = guestBuffer.OffsetBytes,
             PerInstance = guestBuffer.PerInstance,
+            BaseRecord = guestBuffer.BaseRecord,
         };
 
         private VkBuffer CreateHostBuffer(
@@ -11033,13 +11036,11 @@ internal static unsafe class VulkanVideoPresenter
                 _ => Format.R32Sfloat,
             };
 
-        // Guest vertex uploads start at BaseAddress, while OffsetBytes is the
-        // attribute's location within that captured stream. Keep the Vulkan
-        // binding at the start of the upload and carry the offset on the
-        // attribute description. Applying OffsetBytes to both places doubles
-        // it for interleaved streams (and is especially visible when several
-        // attributes alias one VkBuffer).
-        private static ulong GetVertexBindingOffset(VertexBufferResource vertexBuffer) => 0;
+        // OffsetBytes selects the field within each interleaved record. Some
+        // guest fetch prologs apply firstVertex to their own vertex ID, so the
+        // Vulkan draw stays relative and the host stream starts at BaseRecord.
+        private static ulong GetVertexBindingOffset(VertexBufferResource vertexBuffer) =>
+            (ulong)vertexBuffer.BaseRecord * vertexBuffer.Stride;
 
         private static uint GetDrawVertexCount(
             uint primitiveType,
