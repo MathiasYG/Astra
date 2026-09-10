@@ -520,7 +520,18 @@ internal static partial class Program
             return false;
         }
 
-        string[] childArgs = [MitigatedChildFlag, .. args];
+        string[] childArgs;
+        var commandLineArgs = Environment.GetCommandLineArgs();
+        var entryAssembly = commandLineArgs.Length != 0 ? commandLineArgs[0] : null;
+        if (Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(entryAssembly))
+        {
+            childArgs = [entryAssembly, MitigatedChildFlag, .. args];
+        }
+        else
+        {
+            childArgs = [MitigatedChildFlag, .. args];
+        }
 
         var commandLine = BuildCommandLine(processPath, childArgs);
         var startupInfoEx = new STARTUPINFOEX();
