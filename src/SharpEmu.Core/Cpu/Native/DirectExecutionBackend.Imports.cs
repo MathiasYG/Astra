@@ -1890,7 +1890,8 @@ public sealed partial class DirectExecutionBackend
 			"n88vx3C5nW8" or // gettimeofday
 			"-2IRUCO--PM" or // clock_gettime
 			"0V5nU-Z6t4U" or // sceKernelGetProcessTime
-			"aI6lQW5v57k";   // sceKernelGetProcessTimeCounter
+			"aI6lQW5v57k" or // sceKernelGetProcessTimeCounter
+			"yH17Q6NWtVg";   // sceUserServiceGetEvent
 
 	private void ResetImportLoopPattern()
 	{
