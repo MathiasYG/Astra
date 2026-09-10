@@ -14590,7 +14590,12 @@ GuestImageWriteTracker.Track(
 
         if (shRegistersAddress == 0 || registerCount < 2)
         {
-            return false;
+            TraceCreateShader(
+                0,
+                headerAddress,
+                codeAddress,
+                $"skip-pgm-patch type={shaderType} shRegs=0x{shRegistersAddress:X16} regCount={registerCount}");
+            return true;
         }
 
         // Type bytes follow the Prospero half/fused enum used by fuse-shader
@@ -14619,9 +14624,10 @@ GuestImageWriteTracker.Track(
             _ => 0u,
         };
 
-        // GTA V Enhanced hull shaders (type 5) put RSRC1/RSRC2 (0x10A/0x10B) at
-        // the front of the SH default table; PGM_LO/HI sit elsewhere (or are
-        // filled later via SetShRegisterDirect).
+        // Some shader headers (e.g. GTA V Enhanced hull shaders, GS front shaders,
+        // or UE4 mesh/task/vertex shaders where type=8 or user data registers are placed first)
+        // omit PGM_LO/HI from the default SH table. Still succeed: the code VA
+        // lives at ShaderCodeOffset and later binder paths republish it.
         if (!TryFindShaderProgramRegisterPair(
                 ctx,
                 shRegistersAddress,
@@ -14634,28 +14640,12 @@ GuestImageWriteTracker.Track(
                 out var foundHi))
         {
             TryReadUInt32(ctx, shRegistersAddress, out var firstLo);
-            // GTA V Enhanced HS headers start at RSRC1/RSRC2 (0x10A/0x10B) and
-            // omit PGM_LO/HI from the default table. Still succeed: the code VA
-            // lives at ShaderCodeOffset and later binder paths republish it.
-            // GS front headers can likewise start at RSRC1_GS (0x8A) instead of
-            // PGM_LO_GS (0x88) - same deal, skip the patch here.
-            if ((shaderType == HsFrontShaderType && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs) ||
-                (shaderType == GsFrontShaderType && firstLo is SpiShaderPgmRsrc1Gs or SpiShaderPgmLoGs))
-            {
-                TraceCreateShader(
-                    0,
-                    headerAddress,
-                    codeAddress,
-                    $"skip-pgm-patch type={shaderType} first_lo=0x{firstLo:X8}");
-                return true;
-            }
-
             TraceCreateShader(
                 0,
                 headerAddress,
                 codeAddress,
-                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
-            return false;
+                $"skip-pgm-patch type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
+            return true;
         }
 
         var loValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
