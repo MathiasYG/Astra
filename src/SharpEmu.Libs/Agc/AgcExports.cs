@@ -3583,6 +3583,23 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "43WJ08sSugE",
+        ExportName = "sceAgcDcbWaitOnAddressGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbWaitOnAddressGetSize(CpuContext ctx)
+    {
+        var size = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = size switch
+        {
+            0 => 14u * sizeof(uint),
+            1 => 16u * sizeof(uint),
+            _ => 0,
+        };
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "u2T2DiA5hRI",
         ExportName = "sceAgcDcbStallCommandBufferParser",
         Target = Generation.Gen5,

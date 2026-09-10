@@ -1625,6 +1625,7 @@ public sealed partial class DirectExecutionBackend
 			"UZbQjYAwwXM" or // sceAgcCbSetShRegistersDirect
 			"pFLArOT53+w" or // sceAgcDcbSetShRegisterDirect
 			"QhPDD513V0w" or // sceAgcDcbSetShRegisterDirectGetSize
+			"43WJ08sSugE" or // sceAgcDcbWaitOnAddressGetSize
 			"JrtiDtKeS38" or // sceAgcAcbResetQueue
 			"cFazmnXpJOE" or // sceAgcAcbEventWrite
 			"KT-hTp-Ch14" or // sceAgcAcbAcquireMem
