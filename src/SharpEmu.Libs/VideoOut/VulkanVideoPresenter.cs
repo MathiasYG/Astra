@@ -11033,18 +11033,13 @@ internal static unsafe class VulkanVideoPresenter
                 _ => Format.R32Sfloat,
             };
 
-        private static ulong GetVertexBindingOffset(VertexBufferResource vertexBuffer)
-        {
-            if (vertexBuffer.OffsetBytes < vertexBuffer.Size)
-            {
-                return vertexBuffer.OffsetBytes;
-            }
-
-            TraceVulkanShader(
-                $"vk.vertex_offset_oob loc={vertexBuffer.Location} " +
-                $"offset={vertexBuffer.OffsetBytes} size={vertexBuffer.Size}");
-            return 0;
-        }
+        // Guest vertex uploads start at BaseAddress, while OffsetBytes is the
+        // attribute's location within that captured stream. Keep the Vulkan
+        // binding at the start of the upload and carry the offset on the
+        // attribute description. Applying OffsetBytes to both places doubles
+        // it for interleaved streams (and is especially visible when several
+        // attributes alias one VkBuffer).
+        private static ulong GetVertexBindingOffset(VertexBufferResource vertexBuffer) => 0;
 
         private static uint GetDrawVertexCount(
             uint primitiveType,
