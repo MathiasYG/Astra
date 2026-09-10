@@ -9998,9 +9998,11 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         AgcIndexHelpers.Decode(state.IndexSize);
 
     /// <summary>
-    /// ResolveVertexOffset: GE_INDX_OFFSET is the DrawIndexed vertexOffset /
-    /// DrawAuto firstVertex. When it is not latched, embedded fetch shaders
-    /// carry the same offset in a user SGPR used by their index prolog.
+    /// Resolve the Vulkan host vertex offset. GE_INDX_OFFSET is the
+    /// DrawIndexed vertexOffset / DrawAuto firstVertex when the translated
+    /// shader does not contain an embedded fetch prolog. Embedded prologs add
+    /// their user-SGPR offset to gl_VertexID themselves, so the host offset
+    /// must remain zero in that case.
     /// </summary>
     private static int GetBaseVertex(
         SubmittedDcbState state,
