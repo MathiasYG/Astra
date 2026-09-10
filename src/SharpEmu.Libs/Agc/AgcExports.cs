@@ -2919,6 +2919,25 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RShRegsIndirect, "sh");
 
     [SysAbiExport(
+        Nid = "pFLArOT53+w",
+        ExportName = "sceAgcDcbSetShRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegisterDirect(CpuContext ctx) =>
+        DcbSetRegisterDirect(ctx, ItSetShReg, "sh");
+
+    [SysAbiExport(
+        Nid = "QhPDD513V0w",
+        ExportName = "sceAgcDcbSetShRegisterDirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegisterDirectGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "hvUfkUIQcOE",
         ExportName = "sceAgcDcbSetUcRegistersIndirect",
         Target = Generation.Gen5,
