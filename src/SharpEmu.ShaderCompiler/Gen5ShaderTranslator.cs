@@ -2293,7 +2293,11 @@ public static class Gen5ShaderTranslator
             {
                 var extra = words[1];
                 var vectorAddress = extra & 0xFF;
-                var vectorData = (extra >> 8) & 0xFF;
+                // FLAT/GLOBAL encodes the load destination in the high byte
+                // of the second dword.  MUBUF uses bits [15:8] instead, so
+                // sharing that extraction here silently clobbers the wrong
+                // VGPR range for GLOBAL_LOAD_* instructions.
+                var vectorData = (extra >> 24) & 0xFF;
                 var scalarAddress = (extra >> 16) & 0x7F;
                 var usesFlatAddress = opcode.StartsWith(
                     "Flat",

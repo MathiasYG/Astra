@@ -102,6 +102,53 @@ public sealed class Gen5FlatMemoryTests
             ReadSpirvOpcodes(compiled.Spirv));
     }
 
+    [Fact]
+    public void GlobalLoadUsesHighByteForVectorDestination()
+    {
+        var memory = new TestCpuMemory(ShaderAddress, 0x4000);
+        uint[] words =
+        [
+            // global_load_dwordx4 v[8:11], v9, s[16:17]
+            0xDC388000,
+            0x08100009,
+            SEndpgm,
+        ];
+        var shader = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                shader.AsSpan(index * sizeof(uint)),
+                words[index]);
+        }
+        Assert.True(memory.TryWrite(ShaderAddress, shader));
+
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                ctx,
+                ShaderAddress,
+                out var program,
+                out var decodeError),
+            decodeError);
+
+        var instruction = Assert.Single(
+            program.Instructions,
+            item => item.Opcode == "GlobalLoadDwordx4");
+        var control = Assert.IsType<Gen5GlobalMemoryControl>(
+            instruction.Control);
+        Assert.Equal(9u, control.VectorAddress);
+        Assert.Equal(8u, control.VectorData);
+        Assert.Equal(16u, control.ScalarAddress);
+        Assert.Equal(
+            [
+                Gen5Operand.Vector(8),
+                Gen5Operand.Vector(9),
+                Gen5Operand.Vector(10),
+                Gen5Operand.Vector(11),
+            ],
+            instruction.Destinations);
+    }
+
     private static IReadOnlyList<ushort> ReadSpirvOpcodes(byte[] spirv)
     {
         Assert.Equal(0, spirv.Length % sizeof(uint));
