@@ -191,7 +191,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Присоединяйтесь к сообществу, получайте поддержку и следите за разработкой.",
   "About.GithubButton": "Участвовать в разработке на GitHub!",
-  "About.DiscordComingSoon": "Скоро",
+  "About.DiscordButton": "Присоединяйтесь к нашему Discord!",
 
   "Updater.Auto.Label": "Проверять обновления при запуске",
   "Updater.Auto.Desc": "Проверяет GitHub без задержки запуска.",

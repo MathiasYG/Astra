@@ -1623,6 +1623,9 @@ public sealed partial class DirectExecutionBackend
 			"LtTouSCZjHM" or // sceAgcCbNop
 			"k3GhuSNmBLU" or // sceAgcCbDispatch
 			"UZbQjYAwwXM" or // sceAgcCbSetShRegistersDirect
+			"pFLArOT53+w" or // sceAgcDcbSetShRegisterDirect
+			"QhPDD513V0w" or // sceAgcDcbSetShRegisterDirectGetSize
+			"43WJ08sSugE" or // sceAgcDcbWaitOnAddressGetSize
 			"JrtiDtKeS38" or // sceAgcAcbResetQueue
 			"cFazmnXpJOE" or // sceAgcAcbEventWrite
 			"KT-hTp-Ch14" or // sceAgcAcbAcquireMem
@@ -1880,13 +1883,17 @@ public sealed partial class DirectExecutionBackend
 		return elapsedTicks >= (long)(_importLoopGuardSeconds * Stopwatch.Frequency);
 	}
 
-	private static bool IsImportLoopGuardBoundary(string nid) =>
+	internal static bool IsImportLoopGuardBoundary(string nid) =>
 		nid is
 			"1jfXLRVzisc" or // sceKernelUsleep
 			"WKAXJ4XBPQ4" or // scePthreadCondWait
 			"BmMjYxmew1w" or // scePthreadCondTimedwait
 			"Op8TBGY5KHg" or // pthread_cond_wait
-			"27bAgiJmOh0";   // pthread_cond_timedwait
+			"27bAgiJmOh0" or // pthread_cond_timedwait
+			"n88vx3C5nW8" or // gettimeofday
+			"-2IRUCO--PM" or // clock_gettime
+			"0V5nU-Z6t4U" or // sceKernelGetProcessTime
+			"aI6lQW5v57k";   // sceKernelGetProcessTimeCounter
 
 	private void ResetImportLoopPattern()
 	{

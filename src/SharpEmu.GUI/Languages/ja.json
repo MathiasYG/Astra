@@ -160,7 +160,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "コミュニティに参加して、サポートを受けたり開発を追いかけたりしましょう。",
   "About.GithubButton": "GitHubで貢献しよう！",
-  "About.DiscordComingSoon": "近日公開",
+  "About.DiscordButton": "Discordに参加しよう！",
   "Updater.Auto.Label": "起動時にアップデートを確認",
   "Updater.Auto.Desc": "起動を遅らせずにGitHubへ確認します。",
   "Updater.Label": "アップデート",

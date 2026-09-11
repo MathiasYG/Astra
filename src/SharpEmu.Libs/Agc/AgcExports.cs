@@ -1488,6 +1488,7 @@ public static partial class AgcExports
         uint VertexCount,
         uint InstanceCount,
         int BaseVertex,
+        int VertexBufferBaseVertex,
         GuestIndexBuffer? IndexBuffer,
         IReadOnlyList<TranslatedImageBinding> Textures,
         IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
@@ -2919,6 +2920,25 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RShRegsIndirect, "sh");
 
     [SysAbiExport(
+        Nid = "pFLArOT53+w",
+        ExportName = "sceAgcDcbSetShRegisterDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegisterDirect(CpuContext ctx) =>
+        DcbSetRegisterDirect(ctx, ItSetShReg, "sh");
+
+    [SysAbiExport(
+        Nid = "QhPDD513V0w",
+        ExportName = "sceAgcDcbSetShRegisterDirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegisterDirectGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "hvUfkUIQcOE",
         ExportName = "sceAgcDcbSetUcRegistersIndirect",
         Target = Generation.Gen5,
@@ -3561,6 +3581,23 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "43WJ08sSugE",
+        ExportName = "sceAgcDcbWaitOnAddressGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbWaitOnAddressGetSize(CpuContext ctx)
+    {
+        var size = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = size switch
+        {
+            0 => 14u * sizeof(uint),
+            1 => 16u * sizeof(uint),
+            _ => 0,
+        };
+        return (int)ctx[CpuRegister.Rax];
     }
 
     [SysAbiExport(
@@ -5304,7 +5341,9 @@ public static partial class AgcExports
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffers(pendingComposite);
                     var vertexBuffers =
-                        CreateGuestVertexBuffers(pendingComposite.VertexInputs);
+                        CreateGuestVertexBuffers(
+                            pendingComposite.VertexInputs,
+                            pendingComposite.VertexBufferBaseVertex);
                     ProvideRenderTargetInitialData(ctx, pendingDisplayTarget);
                     GuestGpu.Current.SubmitOffscreenTranslatedDraw(
                         pendingComposite.PixelShader,
@@ -8232,7 +8271,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             var globalMemoryBuffers =
                 CreateTranslatedDrawGlobalBuffers(depthOnlyDraw);
             var vertexBuffers =
-                CreateGuestVertexBuffers(depthOnlyDraw.VertexInputs);
+                CreateGuestVertexBuffers(
+                    depthOnlyDraw.VertexInputs,
+                    depthOnlyDraw.VertexBufferBaseVertex);
             var renderState = depthOnlyDraw.RenderState;
             if (activeDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
             {
@@ -8427,7 +8468,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 var sharedGlobalMemoryBuffers =
                     CreateTranslatedDrawGlobalBuffers(translatedDraw);
                 var sharedVertexBuffers =
-                    CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                    CreateGuestVertexBuffers(
+                        translatedDraw.VertexInputs,
+                        translatedDraw.VertexBufferBaseVertex);
                 TraceRectListVertices(translatedDraw, sharedVertexBuffers);
                 TraceGrassDrawVertices(translatedDraw, sharedTextures, sharedVertexBuffers);
                 TraceDrawCompact(
@@ -8484,7 +8527,9 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     var globalMemoryBuffers =
                         CreateTranslatedDrawGlobalBuffers(translatedDraw);
                     var vertexBuffers =
-                        CreateGuestVertexBuffers(translatedDraw.VertexInputs);
+                        CreateGuestVertexBuffers(
+                            translatedDraw.VertexInputs,
+                            translatedDraw.VertexBufferBaseVertex);
                     var renderState = translatedDraw.RenderState;
                     if (translatedDepthTarget.ReadOnly && renderState.Depth.WriteEnable)
                     {
@@ -8656,8 +8701,18 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                 SelectExportUserDataRegister(state.ShRegisters),
                 out var exportState,
                 out error,
-                userDataScalarRegisterBase: NggUserDataScalarRegisterBase) ||
-            !Gen5ShaderScalarEvaluator.TryEvaluate(
+                userDataScalarRegisterBase: NggUserDataScalarRegisterBase))
+        {
+            return false;
+        }
+
+        // Embedded fetch prologs add their own base to gl_VertexID.  Keep the
+        // host draw offset at zero in that case; otherwise Vulkan applies the
+        // same first-vertex adjustment a second time.
+        var baseVertex = GetBaseVertex(state, exportState);
+        var vertexBufferBaseVertex = GetVertexBufferBaseVertex(exportState);
+        var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
+        if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
                 out var exportEvaluation,
@@ -8668,6 +8723,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     state,
                     vertexCount,
                     indexed,
+                    recordBaseVertex,
                     out var depthVertexRecords)
                         ? depthVertexRecords
                         : null))
@@ -8816,7 +8872,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             AttributeCount: 0,
             vertexCount,
             state.InstanceCount,
-            GetBaseVertex(state),
+            baseVertex,
+            vertexBufferBaseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             exportEvaluation.GlobalMemoryBindings,
@@ -8871,6 +8928,13 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             return false;
         }
 
+        // Embedded fetch prologs add their own base to gl_VertexID.  Keep the
+        // host draw offset at zero in that case; otherwise Vulkan applies the
+        // same first-vertex adjustment a second time.
+        var baseVertex = GetBaseVertex(state, exportState);
+        var vertexBufferBaseVertex = GetVertexBufferBaseVertex(exportState);
+        var recordBaseVertex = GetVertexRecordBaseVertex(state, exportState);
+
         if (!Gen5ShaderScalarEvaluator.TryEvaluate(
                 ctx,
                 exportState,
@@ -8882,6 +8946,7 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
                     state,
                     vertexCount,
                     indexed,
+                    recordBaseVertex,
                     out var vertexRecords)
                         ? vertexRecords
                         : null))
@@ -9328,7 +9393,8 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
             GetInterpolatedAttributeCount(pixelState),
             vertexCount,
             state.InstanceCount,
-            GetBaseVertex(state),
+            baseVertex,
+            vertexBufferBaseVertex,
             indexed ? CreateGuestIndexBuffer(ctx, state, vertexCount) : null,
             textures,
             globalMemoryBindings,
@@ -9945,14 +10011,64 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         AgcIndexHelpers.Decode(state.IndexSize);
 
     /// <summary>
-    /// ResolveVertexOffset for the common UC path: GE_INDX_OFFSET is the
-    /// DrawIndexed vertexOffset / DrawAuto firstVertex. Embedded-fetch SGPR
-    /// fallback is not required when the game latches this register (GTA UI).
+    /// Resolve the Vulkan host vertex offset. GE_INDX_OFFSET is the
+    /// DrawIndexed vertexOffset / DrawAuto firstVertex when the translated
+    /// shader does not contain an embedded fetch prolog. Embedded prologs add
+    /// their user-SGPR offset to gl_VertexID themselves, so the host offset
+    /// must remain zero in that case.
     /// </summary>
-    private static int GetBaseVertex(SubmittedDcbState state) =>
-        state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset)
-            ? unchecked((int)indexOffset)
-            : 0;
+    private static int GetBaseVertex(
+        SubmittedDcbState state,
+        Gen5ShaderState exportState)
+    {
+        if (Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+                exportState,
+                out _))
+        {
+            // The translated vertex shader already adds this value to
+            // gl_VertexID, so passing it through CmdDrawIndexed would double it.
+            return 0;
+        }
+
+        if (state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset))
+        {
+            return unchecked((int)indexOffset);
+        }
+
+        return 0;
+    }
+
+    private static int GetVertexRecordBaseVertex(
+        SubmittedDcbState state,
+        Gen5ShaderState exportState)
+    {
+        if (Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+                exportState,
+                out var embeddedOffset))
+        {
+            return embeddedOffset;
+        }
+
+        if (state.UcRegisters.TryGetValue(GeIndxOffset, out var indexOffset))
+        {
+            return unchecked((int)indexOffset);
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Resolve the record offset for host vertex attributes when the guest
+    /// shader applies its first-vertex value itself. The host draw stays at
+    /// vertex zero so gl_VertexID remains relative, while the buffer binding
+    /// starts at the guest record selected by the fetch prolog.
+    /// </summary>
+    private static int GetVertexBufferBaseVertex(Gen5ShaderState exportState) =>
+        Gen5ShaderTranslator.TryGetEmbeddedFetchVertexOffset(
+            exportState,
+            out var embeddedOffset)
+                ? embeddedOffset
+                : 0;
 
     private static GuestIndexBuffer? CreateGuestIndexBuffer(
         CpuContext ctx,
@@ -10009,9 +10125,10 @@ var renderTargets = GetRenderTargets(state.CxRegisters);
         SubmittedDcbState state,
         uint drawCount,
         bool indexed,
+        int resolvedBaseVertex,
         out uint recordCount)
     {
-        var baseVertex = (uint)Math.Max(GetBaseVertex(state), 0);
+        var baseVertex = (uint)Math.Max(resolvedBaseVertex, 0);
         recordCount = Math.Max(
             baseVertex + drawCount,
             Math.Max(state.InstanceCount, 1u));
@@ -11257,8 +11374,10 @@ private static long _indirectDrawProbeCount;
     }
 
     private static IReadOnlyList<GuestVertexBuffer> CreateGuestVertexBuffers(
-        IReadOnlyList<Gen5VertexInputBinding> bindings)
+        IReadOnlyList<Gen5VertexInputBinding> bindings,
+        int baseVertex)
     {
+        var baseRecord = baseVertex > 0 ? checked((uint)baseVertex) : 0;
         var buffers = new GuestVertexBuffer[bindings.Count];
         for (var index = 0; index < bindings.Count; index++)
         {
@@ -11274,7 +11393,8 @@ private static long _indirectDrawProbeCount;
                 binding.Data,
                 binding.DataLength,
                 binding.DataPooled,
-                binding.PerInstance);
+                binding.PerInstance,
+                baseRecord);
         }
 
         return buffers;
@@ -14590,7 +14710,12 @@ GuestImageWriteTracker.Track(
 
         if (shRegistersAddress == 0 || registerCount < 2)
         {
-            return false;
+            TraceCreateShader(
+                0,
+                headerAddress,
+                codeAddress,
+                $"skip-pgm-patch type={shaderType} shRegs=0x{shRegistersAddress:X16} regCount={registerCount}");
+            return true;
         }
 
         // Type bytes follow the Prospero half/fused enum used by fuse-shader
@@ -14619,9 +14744,10 @@ GuestImageWriteTracker.Track(
             _ => 0u,
         };
 
-        // GTA V Enhanced hull shaders (type 5) put RSRC1/RSRC2 (0x10A/0x10B) at
-        // the front of the SH default table; PGM_LO/HI sit elsewhere (or are
-        // filled later via SetShRegisterDirect).
+        // Some shader headers (e.g. GTA V Enhanced hull shaders, GS front shaders,
+        // or UE4 mesh/task/vertex shaders where type=8 or user data registers are placed first)
+        // omit PGM_LO/HI from the default SH table. Still succeed: the code VA
+        // lives at ShaderCodeOffset and later binder paths republish it.
         if (!TryFindShaderProgramRegisterPair(
                 ctx,
                 shRegistersAddress,
@@ -14634,28 +14760,12 @@ GuestImageWriteTracker.Track(
                 out var foundHi))
         {
             TryReadUInt32(ctx, shRegistersAddress, out var firstLo);
-            // GTA V Enhanced HS headers start at RSRC1/RSRC2 (0x10A/0x10B) and
-            // omit PGM_LO/HI from the default table. Still succeed: the code VA
-            // lives at ShaderCodeOffset and later binder paths republish it.
-            // GS front headers can likewise start at RSRC1_GS (0x8A) instead of
-            // PGM_LO_GS (0x88) - same deal, skip the patch here.
-            if ((shaderType == HsFrontShaderType && firstLo is SpiShaderPgmRsrc1Hs or SpiShaderPgmLoHs) ||
-                (shaderType == GsFrontShaderType && firstLo is SpiShaderPgmRsrc1Gs or SpiShaderPgmLoGs))
-            {
-                TraceCreateShader(
-                    0,
-                    headerAddress,
-                    codeAddress,
-                    $"skip-pgm-patch type={shaderType} first_lo=0x{firstLo:X8}");
-                return true;
-            }
-
             TraceCreateShader(
                 0,
                 headerAddress,
                 codeAddress,
-                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
-            return false;
+                $"skip-pgm-patch type={shaderType} expected_lo=0x{expectedLo:X8} first_lo=0x{firstLo:X8}");
+            return true;
         }
 
         var loValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);

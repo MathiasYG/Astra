@@ -153,7 +153,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Participe da comunidade, obtenha suporte e acompanhe o desenvolvimento.",
   "About.GithubButton": "Contribua no GitHub!",
-  "About.DiscordComingSoon": "Em breve",
+  "About.DiscordButton": "Junte-se ao nosso Discord!",
 
   "Library.Context.GameSettings": "Configurações do jogo…",
   "Options.Env.WritableApp0.Desc": "Permite que os jogos criem e gravem arquivos dentro da própria pasta de instalação.\nNecessário para dumps não empacotados que gravam seus saves ou configurações em /app0.",

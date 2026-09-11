@@ -16,6 +16,18 @@ SPDX-License-Identifier: GPL-2.0-or-later
 ---
 
 <p align="center">
+  <a href="https://discord.gg/zdTuUU9Uwn">
+    <img src="https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord">
+  </a>
+</p>
+
+<p align="center">
+  <strong>Join our official Discord server for development updates, compatibility discussions, support, and community chat.</strong>
+</p>
+
+---
+
+<p align="center">
   <a href="#support">
     <img src="https://img.shields.io/badge/Support-GitHub%20Sponsors%20%26%20Crypto-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Support SharpEmu">
   </a>

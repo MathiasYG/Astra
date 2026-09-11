@@ -193,7 +193,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Liitu kogukonnaga, saa tuge ja jälgi arendust.",
   "About.GithubButton": "Löö GitHubis kaasa!",
-  "About.DiscordComingSoon": "Tulekul",
+  "About.DiscordButton": "Liitu meie Discordiga!",
 
   "Updater.Auto.Label": "Kontrolli värskendusi käivitamisel",
   "Updater.Auto.Desc": "Kontrollib GitHubist värskendusi käivitamist viivitamata.",

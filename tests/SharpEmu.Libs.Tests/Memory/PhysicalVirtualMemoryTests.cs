@@ -60,6 +60,25 @@ public sealed class PhysicalVirtualMemoryTests
     }
 
     [Fact]
+    public void TryCommitRangeCommitsEveryPageInReserveOnlyMapping()
+    {
+        using var host = new LazyZeroedHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+
+        var address = memory.AllocateAt(0, (4UL << 30) + 0x1000, executable: false);
+        host.CommitCalls.Clear();
+
+        Assert.True(memory.TryCommitRange(address + 0x1000, 0x3000));
+        Assert.Equal(
+            [
+                (address + 0x1000, 0x1000UL, HostPageProtection.ReadWrite),
+                (address + 0x2000, 0x1000UL, HostPageProtection.ReadWrite),
+                (address + 0x3000, 0x1000UL, HostPageProtection.ReadWrite),
+            ],
+            host.CommitCalls);
+    }
+
+    [Fact]
     public void TryCopyHandlesOverlappingIdentityMappedRanges()
     {
         using var host = new LazyZeroedHostMemory();

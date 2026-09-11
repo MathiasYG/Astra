@@ -642,6 +642,11 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true),
             (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true),
             (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true),
+            // Retail packages may keep application PRX files beside eboot.bin
+            // (for example, native middleware shipped at the app root). Index
+            // those modules too so their imports are available when the guest
+            // requests them through sceKernelLoadStartModule.
+            (Path: ebootDirectory, StartAtBoot: false),
             // Unity native plugins are loaded later through sceKernelLoadStartModule. Map
             // them up front so the HLE loader can return a real module handle and dlsym
             // can resolve their exports, but defer DT_INIT until the guest requests them.

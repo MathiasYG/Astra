@@ -3677,6 +3677,7 @@ internal static unsafe class VulkanVideoPresenter
             public uint Stride;
             public uint OffsetBytes;
             public bool PerInstance;
+            public uint BaseRecord;
         }
 
         private const Format DepthFormat = Format.D32Sfloat;
@@ -10777,6 +10778,7 @@ internal static unsafe class VulkanVideoPresenter
                 Stride = guestBuffer.Stride,
                 OffsetBytes = guestBuffer.OffsetBytes,
                 PerInstance = guestBuffer.PerInstance,
+                BaseRecord = guestBuffer.BaseRecord,
             };
         }
 
@@ -10795,6 +10797,7 @@ internal static unsafe class VulkanVideoPresenter
             Stride = guestBuffer.Stride,
             OffsetBytes = guestBuffer.OffsetBytes,
             PerInstance = guestBuffer.PerInstance,
+            BaseRecord = guestBuffer.BaseRecord,
         };
 
         private VkBuffer CreateHostBuffer(
@@ -11033,18 +11036,11 @@ internal static unsafe class VulkanVideoPresenter
                 _ => Format.R32Sfloat,
             };
 
-        private static ulong GetVertexBindingOffset(VertexBufferResource vertexBuffer)
-        {
-            if (vertexBuffer.OffsetBytes < vertexBuffer.Size)
-            {
-                return vertexBuffer.OffsetBytes;
-            }
-
-            TraceVulkanShader(
-                $"vk.vertex_offset_oob loc={vertexBuffer.Location} " +
-                $"offset={vertexBuffer.OffsetBytes} size={vertexBuffer.Size}");
-            return 0;
-        }
+        // OffsetBytes selects the field within each interleaved record. Some
+        // guest fetch prologs apply firstVertex to their own vertex ID, so the
+        // Vulkan draw stays relative and the host stream starts at BaseRecord.
+        private static ulong GetVertexBindingOffset(VertexBufferResource vertexBuffer) =>
+            (ulong)vertexBuffer.BaseRecord * vertexBuffer.Stride;
 
         private static uint GetDrawVertexCount(
             uint primitiveType,

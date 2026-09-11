@@ -153,7 +153,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Rejoignez la communauté, obtenez de l’aide et suivez le développement.",
   "About.GithubButton": "Contribuer sur GitHub !",
-  "About.DiscordComingSoon": "Bientôt disponible",
+  "About.DiscordButton": "Rejoignez notre Discord !",
 
   "Library.Context.GameSettings": "Paramètres du jeu…",
   "Options.Env.WritableApp0.Desc": "Autoriser les jeux à créer et écrire des fichiers dans leur dossier d’installation.\nNécessaire pour les dumps non empaquetés qui écrivent leurs sauvegardes ou leur configuration sous /app0.",

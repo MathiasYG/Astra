@@ -836,6 +836,18 @@ public static partial class Gen5SpirvTranslator
                             Ext(37, _floatType, high, right)));
                     break;
                 }
+                case "VSadU32":
+                {
+                    // Unsigned absolute difference cannot overflow when it is
+                    // expressed as max(a, b) - min(a, b).
+                    var left = GetRawSource(instruction, 0);
+                    var right = GetRawSource(instruction, 1);
+                    var accumulator = GetRawSource(instruction, 2);
+                    var maximum = Ext(41, _uintType, left, right);
+                    var minimum = Ext(38, _uintType, left, right);
+                    result = IAdd(ISubU(maximum, minimum), accumulator);
+                    break;
+                }
                 case "VCubeidF32":
                     result = EmitCubeCoordinate(instruction, CubeCoordinate.Id);
                     break;

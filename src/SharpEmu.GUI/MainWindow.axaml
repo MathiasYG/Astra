@@ -1342,12 +1342,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       Foreground="{StaticResource SettingsDescriptionBrush}"
                                       TextWrapping="Wrap" />
                           </StackPanel>
-                          <TextBlock Grid.Column="2"
-                                     x:Name="DiscordComingSoonText"
-                                     Text="{Binding [About.DiscordComingSoon], Source={x:Static local:Localization.Instance}}"
-                                     FontSize="12"
-                                     Foreground="{StaticResource MutedBrush}"
-                                     VerticalAlignment="Center" />
+                          <Button Grid.Column="2"
+                                  x:Name="DiscordButton"
+                                  Classes="ghost"
+                                  Content="{Binding [About.DiscordButton], Source={x:Static local:Localization.Instance}}"
+                                  VerticalAlignment="Center" />
                         </Grid>
                       </Border>
                     </StackPanel>

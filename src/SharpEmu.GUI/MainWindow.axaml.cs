@@ -360,6 +360,15 @@ public partial class MainWindow : Window
             });
         };
 
+        DiscordButton.Click += (_, _) =>
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "https://discord.com/invite/zdTuUU9Uwn",
+                UseShellExecute = true
+            });
+        };
+
         LatestCommitHashText.Click += (_, _) =>
         {
             if (string.IsNullOrWhiteSpace(_latestCommitSha))

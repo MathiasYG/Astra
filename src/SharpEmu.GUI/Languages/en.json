@@ -193,7 +193,7 @@
   "About.Discord.Label": "Discord",
   "About.Discord.Desc": "Join the community, get support and follow development.",
   "About.GithubButton": "Contribute in GitHub!",
-  "About.DiscordComingSoon": "Coming soon",
+  "About.DiscordButton": "Join our Discord!",
 
   "Updater.Auto.Label": "Check for updates on startup",
   "Updater.Auto.Desc": "Checks GitHub without delaying startup.",

@@ -51,7 +51,8 @@ internal static partial class MetalVideoPresenter
                     var candidate = vertexBuffers[prior];
                     if (candidate.BaseAddress == buffer.BaseAddress &&
                         candidate.Stride == buffer.Stride &&
-                        candidate.Length == buffer.Length)
+                        candidate.Length == buffer.Length &&
+                        candidate.BaseRecord == buffer.BaseRecord)
                     {
                         slots[index] = slots[prior];
                         shared = true;
@@ -981,7 +982,11 @@ internal static partial class MetalVideoPresenter
             // selects the field inside the interleaved vertex; the bind
             // offset is just the arena slice.
             MetalNative.SendSetBuffer(
-                encoder, selSetVertexBuffer, buffer, (nuint)offset, vertexSlots[index]);
+                encoder,
+                selSetVertexBuffer,
+                buffer,
+                (nuint)offset + (nuint)vertexBuffer.BindingOffsetBytes,
+                vertexSlots[index]);
         }
     }
 
