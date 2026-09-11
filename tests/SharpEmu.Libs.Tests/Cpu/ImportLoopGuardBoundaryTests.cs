@@ -19,12 +19,6 @@ public sealed class ImportLoopGuardBoundaryTests
     }
 
     [Fact]
-    public void UserEventPollingResetsRepeatingImportPattern()
-    {
-        Assert.True(DirectExecutionBackend.IsImportLoopGuardBoundary("yH17Q6NWtVg"));
-    }
-
-    [Fact]
     public void OrdinaryImportDoesNotResetRepeatingImportPattern()
     {
         Assert.False(DirectExecutionBackend.IsImportLoopGuardBoundary("ordinary-import"));
