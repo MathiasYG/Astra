@@ -70,6 +70,31 @@ public sealed class Gen5SpirvAtomicTranslationTests
     }
 
     [Fact]
+    public void BufferFloatMin_UsesCompareExchangeLoop()
+    {
+        // BUFFER_ATOMIC_FMIN v1, off, s[0:3].
+        var opcodes = CompileComputeOpcodes(
+            [0xE0FC0000, 0x80000100],
+            BufferDescriptorRegisters());
+
+        Assert.Contains((ushort)SpirvOp.AtomicCompareExchange, opcodes);
+        Assert.Contains((ushort)SpirvOp.ExtInst, opcodes);
+        Assert.Contains((ushort)SpirvOp.LoopMerge, opcodes);
+    }
+
+    [Fact]
+    public void VffbhU32_UsesUnsignedMostSignificantBitSearch()
+    {
+        // V_FFBH_U32 v2, v1.
+        var opcodes = CompileComputeOpcodes(
+            [0x7E000000u | (2u << 17) | (0x39u << 9) | 257u],
+            new Dictionary<uint, uint>());
+
+        Assert.Contains((ushort)SpirvOp.ExtInst, opcodes);
+        Assert.Contains((ushort)SpirvOp.Select, opcodes);
+    }
+
+    [Fact]
     public void DataShareAtomics_EmitAtomicOpcodes()
     {
         // DS_ADD_RTN_U32 v3, v0, v1; DS_CMPST_RTN_B32 v3, v0, v1, v2; DS_MAX_U32 v0, v1.

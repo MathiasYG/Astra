@@ -87,6 +87,28 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void BufferAtomicFmin_DecodesAsFloatAtomic()
+    {
+        // BUFFER_ATOMIC_FMIN v1, off, s[0:3].
+        var instruction = DecodeSingle(0xE0FC0000, 0x00000100);
+
+        Assert.Equal("BufferAtomicFmin", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
+    }
+
+    [Fact]
+    public void VffbhU32_DecodesAsLeadingZeroCount()
+    {
+        // V_FFBH_U32 v2, v1.
+        var instruction = DecodeSingle(
+            0x7E000000u | (2u << 17) | (0x39u << 9) | 257u);
+
+        Assert.Equal("VFfbhU32", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(2) }, instruction.Destinations);
+    }
+
+    [Fact]
     public void ImageAtomicAdd_KeepsDataRegisterAsDestination()
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc

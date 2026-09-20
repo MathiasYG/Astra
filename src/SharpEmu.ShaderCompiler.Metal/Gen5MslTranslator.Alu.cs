@@ -376,6 +376,8 @@ public static partial class Gen5MslTranslator
                 "VBcntU32B32" => $"(popcount({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}))",
                 "VFfblB32" =>
                     $"(({RawSource(instruction, 0)}) == 0u ? 0xFFFFFFFFu : (uint)ctz({RawSource(instruction, 0)}))",
+                "VFfbhU32" =>
+                    $"(({RawSource(instruction, 0)}) == 0u ? 0xFFFFFFFFu : (uint)clz({RawSource(instruction, 0)}))",
 
                 // ---- wave / lane ----
                 // mbcnt reads the mask dword the guest passes (no cross-lane
