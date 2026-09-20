@@ -101,6 +101,29 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            if (instruction.Opcode is "VLshlrevB64" or "VLshrrevB64")
+            {
+                if (instruction.Destinations.Count < 2 ||
+                    instruction.Destinations[1].Kind != Gen5OperandKind.VectorRegister ||
+                    instruction.Destinations[1].Value != destination + 1 ||
+                    instruction.Sources.Count < 2)
+                {
+                    error = $"{instruction.Opcode} expects a VGPR pair destination, a shift count, and a 64-bit source";
+                    return false;
+                }
+
+                // The first source is the six-bit shift count; the second is
+                // the adjacent VGPR/SGPR pair being shifted.
+                var shift = Widen(BitwiseAnd(GetRawSource(instruction, 0), UInt(63)));
+                var source = GetRawSource64(instruction, 1);
+                var shifted = instruction.Opcode == "VLshlrevB64"
+                    ? ShiftLeftLogical64(source, shift)
+                    : ShiftRightLogical64(source, shift);
+                StoreV(destination, Narrow(shifted));
+                StoreV(destination + 1, Narrow(ShiftRightLogical64(shifted, ULong(32))));
+                return true;
+            }
+
             if (instruction.Opcode is "VMovrelsB32" or "VMovreldB32" or
                 "VMovrelsdB32" or "VMovrelsd2B32")
             {

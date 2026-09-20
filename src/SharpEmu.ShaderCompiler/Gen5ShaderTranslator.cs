@@ -1133,6 +1133,8 @@ public static partial class Gen5ShaderTranslator
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
             0x378 => "VPermlanex16B32",
+            0x2FF => "VLshlrevB64",
+            0x300 => "VLshrrevB64",
             _ => $"Vop3Raw{opcode:X3}",
         };
 
@@ -2105,7 +2107,9 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
-                destinations = [Gen5Operand.Vector(word & 0xFF)];
+                destinations = opcode is "VLshlrevB64" or "VLshrrevB64"
+                    ? [Gen5Operand.Vector(word & 0xFF), Gen5Operand.Vector((word & 0xFF) + 1)]
+                    : [Gen5Operand.Vector(word & 0xFF)];
                 if (opcode == "VReadlaneB32")
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the

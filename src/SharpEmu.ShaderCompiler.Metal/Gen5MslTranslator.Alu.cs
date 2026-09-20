@@ -45,6 +45,31 @@ public static partial class Gen5MslTranslator
                 return TryEmitVectorCompare(instruction, out error);
             }
 
+            if (instruction.Opcode is "VLshlrevB64" or "VLshrrevB64")
+            {
+                if (instruction.Destinations.Count < 2 ||
+                    instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister ||
+                    instruction.Destinations[1].Kind != Gen5OperandKind.VectorRegister ||
+                    instruction.Destinations[1].Value != instruction.Destinations[0].Value + 1 ||
+                    instruction.Sources.Count < 2)
+                {
+                    error = $"{instruction.Opcode} expects a VGPR pair destination, a shift count, and a 64-bit source";
+                    return false;
+                }
+
+                var destination = instruction.Destinations[0].Value;
+                var shift = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
+                var source = Temp("ulong", RawSource64(instruction, 1));
+                var shifted = Temp(
+                    "ulong",
+                    instruction.Opcode == "VLshlrevB64"
+                        ? $"{source} << (ulong){shift}"
+                        : $"{source} >> (ulong){shift}");
+                StoreVector(destination, $"(uint){shifted}");
+                StoreVector(destination + 1, $"(uint)({shifted} >> 32)");
+                return true;
+            }
+
             switch (instruction.Opcode)
             {
                 case "VReadfirstlaneB32":
