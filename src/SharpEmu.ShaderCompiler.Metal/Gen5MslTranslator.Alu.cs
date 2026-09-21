@@ -1067,6 +1067,13 @@ public static partial class Gen5MslTranslator
                 return TryEmitScalarCompare(instruction, out error);
             }
 
+            if (instruction.Opcode == "SSetregB32")
+            {
+                // S_SETREG changes shader mode state (for example FP mode),
+                // which has no direct MSL representation.
+                return true;
+            }
+
             if (instruction.Destinations.Count == 0 ||
                 instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
             {

@@ -774,9 +774,9 @@ public static partial class Gen5ShaderTranslator
             0x0C => "SCmpkGeU32",
             0x0D => "SCmpkLtU32",
             0x0E => "SCmpkLeU32",
+            0x13 => "SSetregB32",
             0x0F => "SAddkI32",
             0x10 => "SMulkI32",
-            0x13 => "SSetregB32",
             // RDNA2 uses four SOPK forms to wait for one counter.
             // The selected counter does not change the translated operation.
             0x17 or 0x18 or 0x19 or 0x1A => "SWaitcnt",
@@ -1865,6 +1865,8 @@ public static partial class Gen5ShaderTranslator
                 }
                 else if (opcode == "SSetregB32")
                 {
+                    // The SOPK SDST field selects the scalar data source; the
+                    // encoded immediate identifies the hardware register field.
                     sources =
                     [
                         Gen5Operand.Scalar((word >> 16) & 0x7F),

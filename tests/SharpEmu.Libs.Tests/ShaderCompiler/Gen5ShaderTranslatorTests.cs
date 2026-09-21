@@ -107,7 +107,7 @@ public sealed class Gen5ShaderTranslatorTests
     }
 
     [Fact]
-    public void SopkSetregB32DecodesScalarSourceWithoutDestination()
+    public void SopkSetregB32DecodesScalarSourceAndRegisterControl()
     {
         var memory = new FakeCpuMemory(ProgramAddress, 0x100);
         Span<byte> code = stackalloc byte[2 * sizeof(uint)];
@@ -133,6 +133,36 @@ public sealed class Gen5ShaderTranslatorTests
         Assert.Equal(5u, instruction.Sources[0].Value);
         Assert.Equal(Gen5OperandKind.EncodedConstant, instruction.Sources[1].Kind);
         Assert.Equal(0x1234u, instruction.Sources[1].Value);
+    }
+
+    [Fact]
+    public void SopkSetregB32DecodesOtherScalarRegisterAndControl()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        Span<byte> code = stackalloc byte[2 * sizeof(uint)];
+        var instructionWord = 0x80000000u | (0x73u << 23) | (28u << 16) | 0x0213u;
+        BinaryPrimitives.WriteUInt32LittleEndian(code, instructionWord);
+        BinaryPrimitives.WriteUInt32LittleEndian(code[sizeof(uint)..], 0xBF810000u);
+        Assert.True(memory.TryWrite(ProgramAddress, code));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal("SSetregB32", instruction.Opcode);
+        Assert.Empty(instruction.Destinations);
+        Assert.Equal(
+            [
+                Gen5Operand.Scalar(28),
+                new Gen5Operand(Gen5OperandKind.EncodedConstant, 0x0213),
+            ],
+            instruction.Sources);
     }
 
     [Fact]
