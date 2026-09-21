@@ -1483,8 +1483,9 @@ public static partial class Gen5ShaderTranslator
 
     private static bool DecodeMimg(uint word, out string name, out uint sizeDwords, out string error)
     {
-        // RDNA2 MIMG OP[7] is bit 0 while OP[6:0] occupies bits 24:18.
-        // Ignoring bit 0 aliases 0xE6/0xE7 BVH operations to 0x66/0x67.
+        // RDNA2 stores MIMG opcode bit 7 in word0 bit 0 while bits 18:24 hold
+        // bits 0:6. Ignoring bit 0 aliases BVH opcodes 0xE6/0xE7 to reserved
+        // values 0x66/0x67 and rejects valid ray-query instructions.
         var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
         sizeDwords = 2 + ((word >> 1) & 0x3);
         error = string.Empty;
@@ -1578,7 +1579,10 @@ public static partial class Gen5ShaderTranslator
             _ => string.Empty,
         };
 
-        return FinishDecode(name, $"unknown-mimg op=0x{opcode:X2}", out error);
+        return FinishDecode(
+            name,
+            $"unknown-mimg op=0x{opcode:X2} word=0x{word:X8}",
+            out error);
     }
 
     private static bool DecodeVintrp(uint word, out string name, out uint sizeDwords, out string error)
@@ -2496,7 +2500,10 @@ public static partial class Gen5ShaderTranslator
                 }
 
                 imageSources.Add(Gen5Operand.Scalar(scalarResource));
-                imageSources.Add(Gen5Operand.Scalar(scalarSampler));
+                if (!opcode.StartsWith("ImageBvh", StringComparison.Ordinal))
+                {
+                    imageSources.Add(Gen5Operand.Scalar(scalarSampler));
+                }
                 sources = imageSources;
                 destinations = opcode.StartsWith("ImageStore", StringComparison.Ordinal)
                     ? []

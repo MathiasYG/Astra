@@ -25,9 +25,9 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
-                // Metal has no bound representation of GFX10's raw BVH
-                // descriptor in this backend. Preserve the hardware miss
-                // fallback used by the Vulkan path and keep the shader valid.
+                // Metal has no portable image-BVH operation or bound raw GFX10
+                // BVH descriptor. Emit the defined conservative miss result
+                // without a sampler access, matching the Vulkan path.
                 for (uint component = 0; component < 4; component++)
                 {
                     StoreVector(image.VectorData + component, "0u");

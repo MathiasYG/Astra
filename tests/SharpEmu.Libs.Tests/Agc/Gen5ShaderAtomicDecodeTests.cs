@@ -123,6 +123,32 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void ImageBvhIntersectRay_DecodesOpcodeBitSevenAndFourResults()
+    {
+        // IMAGE_BVH_INTERSECT_RAY is MIMG opcode 0xE6. GFX10 stores its
+        // high opcode bit in word0 bit 0, so the low field alone is 0x66.
+        var instruction = DecodeSingle(0xF1980001, 0x00000400);
+
+        Assert.Equal("ImageBvhIntersectRay", instruction.Opcode);
+        Assert.Equal(
+            new[]
+            {
+                Gen5Operand.Vector(4),
+                Gen5Operand.Vector(5),
+                Gen5Operand.Vector(6),
+                Gen5Operand.Vector(7),
+            },
+            instruction.Destinations);
+        Assert.Equal(
+            new[]
+            {
+                Gen5Operand.Vector(0),
+                Gen5Operand.Scalar(0),
+            },
+            instruction.Sources);
+    }
+
+    [Fact]
     public void DsAddU32_HasAddressAndDataSourcesButNoDestination()
     {
         // DS_ADD_U32 v0, v1
