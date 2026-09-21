@@ -1088,6 +1088,7 @@ public static partial class Gen5ShaderTranslator
             0x14A => "VBfiB32",
             0x14E => "VAlignbitB32",
             0x14B => "VFmaF32",
+            0x14F => "VAlignbyteB32",
             0x151 => "VMin3F32",
             0x152 => "VMin3I32",
             0x153 => "VMin3U32",

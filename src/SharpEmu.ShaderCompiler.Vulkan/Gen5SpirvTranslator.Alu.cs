@@ -786,6 +786,35 @@ public static partial class Gen5SpirvTranslator
                     result = IAdd(shifted, GetRawSource(instruction, 2));
                     break;
                 }
+                case "VAlignbyteB32":
+                {
+                    // V_ALIGNBYTE treats S0 as the high half and S1 as the
+                    // low half of a 64-bit value, then returns the low 32
+                    // bits after a byte-granular logical right shift.
+                    var byteShift = BitwiseAnd(GetRawSource(instruction, 2), UInt(31));
+                    var shift = _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _uintType,
+                        byteShift,
+                        UInt(8));
+                    var wide = Pair64(
+                        GetRawSource(instruction, 1),
+                        GetRawSource(instruction, 0));
+                    var shift64 = Widen(shift);
+                    var shifted = ShiftRightLogical64(wide, shift64);
+                    var inRange = _module.AddInstruction(
+                        SpirvOp.ULessThan,
+                        _boolType,
+                        shift64,
+                        ULong(64));
+                    result = Narrow(_module.AddInstruction(
+                        SpirvOp.Select,
+                        _ulongType,
+                        inRange,
+                        shifted,
+                        ULong(0)));
+                    break;
+                }
                 case "VXadU32":
                     result = IAdd(
                         BitwiseXor(GetRawSource(instruction, 0), GetRawSource(instruction, 1)),

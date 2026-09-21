@@ -325,6 +325,10 @@ public static partial class Gen5MslTranslator
                     $"((({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)})) << (({RawSource(instruction, 2)}) & 31u))",
                 "VLshlAddU32" =>
                     $"((({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u)) + ({RawSource(instruction, 2)}))",
+                "VAlignbyteB32" =>
+                    $"(uint)((((ulong)({RawSource(instruction, 0)}) << 32ul) | " +
+                    $"(ulong)({RawSource(instruction, 1)})) >> " +
+                    $"(((ulong)({RawSource(instruction, 2)}) & 31ul) * 8ul))",
                 "VMinU32" => $"min({RawSource(instruction, 0)}, {RawSource(instruction, 1)})",
                 "VMaxU32" => $"max({RawSource(instruction, 0)}, {RawSource(instruction, 1)})",
                 "VMinI32" =>
