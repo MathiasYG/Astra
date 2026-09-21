@@ -496,7 +496,11 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
-            var memoryOpcode = control.UsesFlatAddress ? "Global" + instruction.Opcode["Flat".Length..] : instruction.Opcode;
+            var memoryOpcode = control.UsesFlatAddress
+                ? "Global" + instruction.Opcode["Flat".Length..]
+                : instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal)
+                    ? "Global" + instruction.Opcode["Scratch".Length..]
+                    : instruction.Opcode;
             var address = control.UsesFlatAddress || control.ScalarAddress >= 125
                 ? $"(ulong)v[{control.VectorAddress}] | ((ulong)v[{control.VectorAddress + 1}] << 32)"
                 : $"{Scalar64Expression(control.ScalarAddress)} + (ulong)v[{control.VectorAddress}]";

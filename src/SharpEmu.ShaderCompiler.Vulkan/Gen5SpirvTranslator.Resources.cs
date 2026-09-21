@@ -873,7 +873,16 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var memoryOpcode = control.UsesFlatAddress ? "Global" + instruction.Opcode["Flat".Length..] : instruction.Opcode;
+            if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
+            {
+                return TryEmitScratchMemory(instruction, control, memoryIndex, out error);
+            }
+
+            var memoryOpcode = control.UsesFlatAddress
+                ? "Global" + instruction.Opcode["Flat".Length..]
+                : instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal)
+                    ? "Global" + instruction.Opcode["Scratch".Length..]
+                    : instruction.Opcode;
             uint address;
             if (control.UsesFlatAddress || control.ScalarAddress >= 125)
             {

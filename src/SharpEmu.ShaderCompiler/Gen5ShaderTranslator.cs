@@ -2281,6 +2281,9 @@ public static partial class Gen5ShaderTranslator
                 var usesFlatAddress = opcode.StartsWith(
                     "Flat",
                     StringComparison.Ordinal);
+                // Scratch and global operations share the encoded scalar/vector
+                // address form. Canonicalize Scratch to the generic device-address
+                // lowering until private-scratch storage has a backend representation.
                 var usesScratchAddress = opcode.StartsWith(
                     "Scratch",
                     StringComparison.Ordinal);
