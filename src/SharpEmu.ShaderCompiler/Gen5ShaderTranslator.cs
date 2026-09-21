@@ -2108,7 +2108,9 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
-                destinations = opcode is "VLshlrevB64" or "VLshrrevB64"
+                destinations = opcode.StartsWith("VCmp", StringComparison.Ordinal)
+                    ? []
+                    : opcode is "VLshlrevB64" or "VLshrrevB64"
                     ? [Gen5Operand.Vector(word & 0xFF), Gen5Operand.Vector((word & 0xFF) + 1)]
                     : [Gen5Operand.Vector(word & 0xFF)];
                 if (opcode == "VReadlaneB32")
