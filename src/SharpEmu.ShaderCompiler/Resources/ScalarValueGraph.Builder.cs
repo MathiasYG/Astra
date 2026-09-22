@@ -1103,6 +1103,8 @@ public sealed partial class ScalarValueGraph
                 }
                 case "VMadU32U24":
                     return Binary(ScalarOperation.IAdd32, Binary(ScalarOperation.IMul32, Low24(Source(0)), Low24(Source(1))), Source(2));
+                case "VMadI32I24":
+                    return Binary(ScalarOperation.IAdd32, Binary(ScalarOperation.IMul32, SignedLow24(Source(0)), SignedLow24(Source(1))), Source(2));
                 case "VLshlrevB32":
                     return Shift(Source(1), Source(0), ScalarOperation.ShiftLeft32);
                 case "VLshrrevB32":

@@ -313,6 +313,8 @@ public static partial class Gen5MslTranslator
                     AsUInt($"mulhi(as_type<int>({RawSource(instruction, 0)}), as_type<int>({RawSource(instruction, 1)}))"),
                 "VMadU32U24" =>
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFFFu)) + ({RawSource(instruction, 2)}))",
+                "VMadI32I24" =>
+                    $"({EmitSignedMultiply24(instruction)} + ({RawSource(instruction, 2)}))",
                 "VMadU32U16" =>
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFu)) + ({RawSource(instruction, 2)}))",
                 "VAdd3U32" =>

@@ -1081,6 +1081,7 @@ public static partial class Gen5ShaderTranslator
             0x12B => "VFmacF32",
             0x12F => "VCvtPkrtzF16F32",
             0x141 => "VMadF32",
+            0x142 => "VMadI32I24",
             0x143 => "VMadU32U24",
             0x144 => "VCubeidF32",
             0x145 => "VCubescF32",

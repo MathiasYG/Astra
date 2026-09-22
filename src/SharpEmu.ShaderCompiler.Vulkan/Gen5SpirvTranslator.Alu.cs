@@ -709,6 +709,28 @@ public static partial class Gen5SpirvTranslator
                         GetRawSource(instruction, 2));
                     break;
                 }
+                case "VMadI32I24":
+                {
+                    var left = _module.AddInstruction(
+                        SpirvOp.BitFieldSExtract,
+                        _intType,
+                        Bitcast(_intType, GetRawSource(instruction, 0)),
+                        UInt(0),
+                        UInt(24));
+                    var right = _module.AddInstruction(
+                        SpirvOp.BitFieldSExtract,
+                        _intType,
+                        Bitcast(_intType, GetRawSource(instruction, 1)),
+                        UInt(0),
+                        UInt(24));
+                    var product = _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _uintType,
+                        Bitcast(_uintType, left),
+                        Bitcast(_uintType, right));
+                    result = IAdd(product, GetRawSource(instruction, 2));
+                    break;
+                }
                 case "VMadU32U16":
                 {
                     var left = BitwiseAnd(
