@@ -1069,6 +1069,7 @@ public static partial class Gen5ShaderTranslator
             : opcode switch
         {
             0x0B5 => "VCmpxNeI64",
+            0x0F5 => "VCmpxNeU64",
             0x101 => "VCndmaskB32",
             0x103 => "VAddF32",
             0x104 => "VSubF32",
@@ -2281,17 +2282,11 @@ public static partial class Gen5ShaderTranslator
                 var usesFlatAddress = opcode.StartsWith(
                     "Flat",
                     StringComparison.Ordinal);
-                // Scratch and global operations share the encoded scalar/vector
-                // address form. Canonicalize Scratch to the generic device-address
-                // lowering until private-scratch storage has a backend representation.
-                var usesScratchAddress = opcode.StartsWith(
-                    "Scratch",
-                    StringComparison.Ordinal);
+                // Keep scratch opcodes visible to resource planning and backend
+                // lowering so they are not mistaken for device-address accesses.
                 var memoryOpcode = usesFlatAddress
                     ? "Global" + opcode["Flat".Length..]
-                    : usesScratchAddress
-                        ? "Global" + opcode["Scratch".Length..]
-                        : opcode;
+                    : opcode;
                 var dwordCount = memoryOpcode switch
                 {
                     "GlobalLoadUbyte" or
@@ -2318,6 +2313,14 @@ public static partial class Gen5ShaderTranslator
                     "GlobalStoreDwordx2" => 2u,
                     "GlobalStoreDwordx3" => 3u,
                     "GlobalStoreDwordx4" => 4u,
+                    "ScratchLoadDword" => 1u,
+                    "ScratchLoadDwordx2" => 2u,
+                    "ScratchLoadDwordx3" => 3u,
+                    "ScratchLoadDwordx4" => 4u,
+                    "ScratchStoreDword" => 1u,
+                    "ScratchStoreDwordx2" => 2u,
+                    "ScratchStoreDwordx3" => 3u,
+                    "ScratchStoreDwordx4" => 4u,
                     _ => 0u,
                 };
                 sources = usesFlatAddress
@@ -2335,9 +2338,12 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Scalar(scalarAddress),
                     ];
-                var isLoad = memoryOpcode.StartsWith("GlobalLoad", StringComparison.Ordinal);
-                var isStore = memoryOpcode.StartsWith("GlobalStore", StringComparison.Ordinal);
-                var isAtomic = memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal);
+                var isLoad = memoryOpcode.StartsWith("GlobalLoad", StringComparison.Ordinal) ||
+                    memoryOpcode.StartsWith("ScratchLoad", StringComparison.Ordinal);
+                var isStore = memoryOpcode.StartsWith("GlobalStore", StringComparison.Ordinal) ||
+                    memoryOpcode.StartsWith("ScratchStore", StringComparison.Ordinal);
+                var isAtomic = memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal) ||
+                    memoryOpcode.StartsWith("ScratchAtomic", StringComparison.Ordinal);
                 var globallyCoherent = ((word >> 16) & 1) != 0;
                 if (isStore || isAtomic)
                 {

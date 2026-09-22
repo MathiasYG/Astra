@@ -1512,6 +1512,30 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             var left = Temp("ulong", RawSource64(instruction, 0));
+            if (instruction.Opcode is "SSetpcB64" or "SSwappcB64")
+            {
+                if (instruction.Opcode == "SSwappcB64")
+                {
+                    if (instruction.Destinations.Count == 0 ||
+                        instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+                    {
+                        error = "missing scalar destination for SSwappcB64";
+                        return false;
+                    }
+
+                    var (baseLow, baseHigh) = ShaderBaseWords();
+                    var next = Temp(
+                        "ulong",
+                        $"(((ulong){baseLow} | ((ulong){baseHigh} << 32)) + " +
+                        $"{instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint))}ul)");
+                    StoreScalar64(instruction.Destinations[0].Value, next);
+                }
+
+                // The dispatcher resolves the dynamic target after this
+                // instruction; S_SETPC itself has no SGPR destination.
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
                 var oldExec = Temp("ulong", Scalar64Expression(ExecLoRegister));

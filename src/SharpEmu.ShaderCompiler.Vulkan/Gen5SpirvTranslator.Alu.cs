@@ -2736,6 +2736,29 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             var left = GetRawSource64(instruction, 0);
+            if (instruction.Opcode is "SSetpcB64" or "SSwappcB64")
+            {
+                if (instruction.Opcode == "SSwappcB64")
+                {
+                    if (instruction.Destinations.Count == 0 ||
+                        instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+                    {
+                        error = "missing scalar destination for SSwappcB64";
+                        return false;
+                    }
+
+                    var (baseLow, baseHigh) = LoadShaderBase();
+                    var next = IAdd64(
+                        Pair64(baseLow, baseHigh),
+                        ULong(instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint))));
+                    StoreS64(instruction.Destinations[0].Value, next);
+                }
+
+                // The dispatcher updates the compact block PC after this
+                // instruction. S_SETPC itself has no SGPR destination.
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
                 var oldExec = BooleanToWaveMask(Load(_boolType, _exec));

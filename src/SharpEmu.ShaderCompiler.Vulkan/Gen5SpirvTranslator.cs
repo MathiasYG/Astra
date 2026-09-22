@@ -1350,6 +1350,11 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (IsDynamicControl(terminator.Opcode))
+            {
+                return TryEmitDynamicControl(blocks, terminator, out error);
+            }
+
             if (fallthrough == uint.MaxValue)
             {
                 Store(_programActive, _module.ConstantBool(false));
@@ -1359,6 +1364,57 @@ public static partial class Gen5SpirvTranslator
                 Store(_programCounter, UInt(fallthrough));
             }
 
+            return true;
+        }
+
+        private bool TryEmitDynamicControl(
+            IReadOnlyList<ShaderBlock> blocks,
+            Gen5ShaderInstruction instruction,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count == 0)
+            {
+                error = $"missing scalar 64-bit target for {instruction.Opcode}";
+                return false;
+            }
+
+            // S_SETPC/ S_SWAPPC receive an absolute code address. The dispatcher
+            // uses compact block indices, so resolve both forms that appear in
+            // practice: the shader-base-relative PC returned by S_GETPC and the
+            // already-relative offset used when no shader-base binding exists.
+            var target = GetRawSource64(instruction, 0);
+            var (baseLow, baseHigh) = LoadShaderBase();
+            var shaderBase = Pair64(baseLow, baseHigh);
+            var selected = UInt(uint.MaxValue);
+            for (var index = blocks.Count - 1; index >= 0; index--)
+            {
+                var start = blocks[index].StartPc;
+                var absolute = IAdd64(shaderBase, ULong(start));
+                var absoluteMatch = _module.AddInstruction(
+                    SpirvOp.IEqual,
+                    _boolType,
+                    target,
+                    absolute);
+                var relativeMatch = _module.AddInstruction(
+                    SpirvOp.IEqual,
+                    _boolType,
+                    target,
+                    ULong(start));
+                var matches = _module.AddInstruction(
+                    SpirvOp.LogicalOr,
+                    _boolType,
+                    absoluteMatch,
+                    relativeMatch);
+                selected = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    matches,
+                    UInt((uint)index),
+                    selected);
+            }
+
+            Store(_programCounter, selected);
             return true;
         }
 
@@ -6438,6 +6494,9 @@ public static partial class Gen5SpirvTranslator
             opcode == "SBranch" ||
             opcode.StartsWith("SCbranch", StringComparison.Ordinal);
 
+        private static bool IsDynamicControl(string opcode) =>
+            opcode is "SSetpcB64" or "SSwappcB64";
+
         private static bool TryGetBranchTargetPc(
             Gen5ShaderInstruction instruction,
             out uint targetPc)
@@ -6480,7 +6539,9 @@ public static partial class Gen5SpirvTranslator
                     leaders.Add(targetPc);
                 }
 
-                if ((IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm") &&
+                if ((IsBranch(instruction.Opcode) ||
+                     IsDynamicControl(instruction.Opcode) ||
+                     instruction.Opcode == "SEndpgm") &&
                     index + 1 < instructions.Count)
                 {
                     leaders.Add(instructions[index + 1].Pc);

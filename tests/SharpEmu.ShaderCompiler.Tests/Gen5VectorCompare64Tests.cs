@@ -27,6 +27,18 @@ public sealed class Gen5VectorCompare64Tests
     }
 
     [Fact]
+    public void DecodeVop3Unsigned64Compare()
+    {
+        var instruction = Decode(0xD4F5007E, 0x00020E80);
+
+        Assert.Equal("VCmpxNeU64", instruction.Opcode);
+        Assert.Empty(instruction.Destinations);
+        Assert.Equal(
+            new[] { Gen5Operand.Source(128), Gen5Operand.Vector(7), Gen5Operand.Scalar(0) },
+            instruction.Sources);
+    }
+
+    [Fact]
     public void CompilesOnBothBackends()
     {
         var request = Request(
@@ -34,6 +46,24 @@ public sealed class Gen5VectorCompare64Tests
                 Vop3(
                     0,
                     "VCmpxNeI64",
+                    0,
+                    Gen5Operand.Source(128),
+                    Gen5Operand.Vector(7),
+                    Gen5Operand.Scalar(0)),
+                EndProgram(8)));
+
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
+    }
+
+    [Fact]
+    public void UnsignedCompilesOnBothBackends()
+    {
+        var request = Request(
+            Program(
+                Vop3(
+                    0,
+                    "VCmpxNeU64",
                     0,
                     Gen5Operand.Source(128),
                     Gen5Operand.Vector(7),
