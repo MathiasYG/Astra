@@ -3579,19 +3579,6 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
-            if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
-            {
-                // There is no portable SPIR-V image-BVH primitive in this
-                // backend. Model the defined conservative miss result rather
-                // than binding a sampler or silently dropping the operation.
-                for (var component = 0u; component < 4; component++)
-                {
-                    StoreV(image.VectorData + component, UInt(0));
-                }
-
-                return true;
-            }
-
             if (instruction.Opcode == "ImageGetResinfo")
             {
                 var sizeComponentCount = ImageCoordinateComponentCount(resource);
