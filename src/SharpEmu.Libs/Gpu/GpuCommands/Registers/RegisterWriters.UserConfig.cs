@@ -10,6 +10,8 @@ internal static partial class RegisterWriters
 {
     public static void FillUserConfig(RegisterPacketWriter?[] direct, RegisterWriter?[] indirect)
     {
+        // CP_VGT_GSPRIM_COUNT_HI is a read-only hardware counter.
+        indirect[CpVgtGsPrimCountHi] = IgnoreEntry;
         direct[VgtPrimitiveType] = PrimitiveTypePacket;
         direct[VgtIndexType] = IndexTypePacket;
         direct[VgtObjectId] = ObjectIdPacket;

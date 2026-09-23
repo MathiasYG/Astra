@@ -42,6 +42,60 @@ public sealed class ScalarValueGraphTests
     }
 
     [Fact]
+    public void NullPlanningAddressReadProducesZeroDescriptorWord()
+    {
+        var program = Program(
+            MoveScalar(0, 4, 0),
+            MoveScalar(4, 5, 0),
+            ScalarLoad(8, 4, destination: 8, immediateOffset: 0x20),
+            MoveScalar(12, 9, 0),
+            MoveScalar(16, 10, 16),
+            MoveScalar(20, 11, 0),
+            BufferLoad(24, 8),
+            EndProgram(28));
+        var plan = Extract(program);
+
+        Assert.Single(plan.TableReads);
+        Assert.True(plan.Memory.Find(8)!.PlanningOnly);
+        Assert.True(RuntimeValueEvaluator.FlattenResourceTable(
+            plan,
+            Inputs([], readMemory: static (ulong _, out uint word) =>
+            {
+                word = 0;
+                return false;
+            }),
+            out var table));
+        Assert.Equal([0u], table);
+    }
+
+    [Fact]
+    public void UndefinedPlanningAddressReadProducesZeroDescriptorWord()
+    {
+        var program = Program(
+            MoveScalar(0, 4, 0),
+            Sop1(4, "SMovB32", 5, Gen5Operand.Source(NullOperand)),
+            ScalarLoad(8, 4, destination: 8, immediateOffset: 0x20),
+            MoveScalar(12, 9, 0),
+            MoveScalar(16, 10, 16),
+            MoveScalar(20, 11, 0),
+            BufferLoad(24, 8),
+            EndProgram(28));
+        var plan = Extract(program);
+
+        Assert.Single(plan.TableReads);
+        Assert.True(plan.Memory.Find(8)!.PlanningOnly);
+        Assert.True(RuntimeValueEvaluator.FlattenResourceTable(
+            plan,
+            Inputs([], readMemory: static (ulong _, out uint word) =>
+            {
+                word = 0;
+                return false;
+            }),
+            out var table));
+        Assert.Equal([0u], table);
+    }
+
+    [Fact]
     public void RawScalarComponentAlignment()
     {
         var program = Program(

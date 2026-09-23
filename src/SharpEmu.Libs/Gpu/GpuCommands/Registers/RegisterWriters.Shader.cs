@@ -28,6 +28,15 @@ internal static partial class RegisterWriters
 
     public static void FillShader(RegisterPacketWriter?[] direct, RegisterWriter?[] indirect)
     {
+        // Offsets 0x000-0x005 are the reserved prefix of the SH-register aperture;
+        // the first mapped shader register is SPI_SHADER_PACE_ID_PS at 0x006.
+        // The interpreter retains the raw writes in its register bank, but these
+        // reserved addresses do not publish typed shader state.
+        for (var offset = 0u; offset < SpiShaderPaceIdPs; offset++)
+        {
+            indirect[offset] = IgnoreEntry;
+        }
+
         for (var slot = 0u; slot < GraphicsUserScalarCount; slot++)
         {
             direct[SpiShaderUserDataPs0 + slot] = PixelUserScalarsPacket;

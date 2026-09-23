@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.ShaderCompiler;
 
@@ -28,6 +29,7 @@ public static partial class AgcExports
     private const ulong ShaderNumInputSemanticsOffset = 0x50;
     private const ulong ShaderNumOutputSemanticsOffset = 0x56;
     private const ulong ShaderTypeOffset = 0x5A;
+    private const ulong ShaderNumCxRegistersOffset = 0x5B;
     private const ulong ShaderNumShRegistersOffset = 0x5C;
     private const int ShaderStructBytes = 0x60;
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
@@ -1315,5 +1317,192 @@ public static partial class AgcExports
 
         Console.Error.WriteLine(
             $"[LOADER][TRACE] agc.create_shader dst=0x{destinationAddress:X16} header=0x{headerAddress:X16} code=0x{codeAddress:X16} {detail}");
+    }
+
+    // The geometry-shader occupancy arithmetic is adapted from a GPL-2.0-only implementation.
+    [SysAbiExport(
+        Nid = "NKIzURsgV7I",
+        ExportName = "sceAgcGetGsOversubscription",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int GetGsOversubscription(CpuContext ctx)
+    {
+        var registersAddress = ctx[CpuRegister.Rdi];
+        var geometryShaderAddress = ctx[CpuRegister.Rsi];
+        var budget = (uint)ctx[CpuRegister.Rdx];
+        ctx.GetXmmRegister(0, out var factorBits, out _);
+        var factor = BitConverter.UInt32BitsToSingle((uint)factorBits);
+
+        if (registersAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        uint userConfigValue = 0;
+        uint shaderResourceValue = 0;
+        if (budget == uint.MaxValue)
+        {
+            userConfigValue = 0x7FF;
+            shaderResourceValue = 0x007F_0000;
+        }
+        else if (budget != 0)
+        {
+            if (geometryShaderAddress == 0)
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            if (geometryShaderAddress > ulong.MaxValue - ShaderNumCxRegistersOffset ||
+                !TryReadUInt64(ctx, geometryShaderAddress + ShaderCxRegistersOffset, out var cxRegistersAddress) ||
+                !TryReadUInt64(ctx, geometryShaderAddress + ShaderSpecialsOffset, out var specialsAddress) ||
+                !TryReadByte(ctx, geometryShaderAddress + ShaderNumCxRegistersOffset, out var cxRegisterCount))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            if (cxRegistersAddress == 0 || specialsAddress == 0 || cxRegisterCount == 0)
+            {
+                return SetReturn(ctx, IncompleteShaderRegistersResult);
+            }
+
+            if ((ulong)cxRegisterCount > (ulong.MaxValue - cxRegistersAddress) / sizeof(ulong) ||
+                specialsAddress > ulong.MaxValue - ShaderSpecialVgtShaderStagesEnOffset - sizeof(ulong))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            if (!TryReadUInt32(ctx, specialsAddress + ShaderSpecialVgtShaderStagesEnOffset + sizeof(uint), out var shaderStagesEnable) ||
+                !TryReadShaderRegisterValue(ctx, cxRegistersAddress, cxRegisterCount, ContextRegisterOffset.VgtGsOnchipCntl, out var onChipControl) ||
+                !TryReadShaderRegisterValue(ctx, cxRegistersAddress, cxRegisterCount, ContextRegisterOffset.GeNggSubgroupCntl, out var subgroupControl) ||
+                !TryReadShaderRegisterValue(ctx, cxRegistersAddress, cxRegisterCount, ContextRegisterOffset.SpiVsOutConfig, out var vertexOutputConfiguration) ||
+                !TryReadShaderRegisterValue(ctx, cxRegistersAddress, cxRegisterCount, ContextRegisterOffset.PaClVsOutCntl, out var vertexOutputControl) ||
+                !TryReadShaderRegisterValue(ctx, cxRegistersAddress, cxRegisterCount, ContextRegisterOffset.GeMaxOutputPerSubgroup, out var maxOutputPerSubgroup))
+            {
+                return SetReturn(ctx, IncompleteShaderRegistersResult);
+            }
+
+            var outputWords = ((maxOutputPerSubgroup & 0x3FFu) + 31u) >> 5;
+            if (outputWords == 0)
+            {
+                return SetReturn(ctx, IncompleteShaderRegistersResult);
+            }
+
+            if (!float.IsFinite(factor) || factor < 0)
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            var baseLimits = CalculateGsOccupancyLimits(
+                onChipControl,
+                subgroupControl,
+                vertexOutputConfiguration,
+                vertexOutputControl,
+                outputWords,
+                shaderStagesEnable,
+                vertexCapacity: 1024,
+                exportCapacity: 128);
+            var expandedLimits = CalculateGsOccupancyLimits(
+                onChipControl,
+                subgroupControl,
+                vertexOutputConfiguration,
+                vertexOutputControl,
+                outputWords,
+                shaderStagesEnable,
+                vertexCapacity: 2048,
+                exportCapacity: 382);
+
+            var baseMinimum = Math.Min(baseLimits.Vertex, baseLimits.ExportCount);
+            var limitShift = (shaderStagesEnable & VgtShaderStagesGsW32EnBit) != 0 ? 5 : 6;
+            var expandedLimit = Math.Min(
+                Math.Min(expandedLimits.Vertex, expandedLimits.ExportCount),
+                Math.Min(budget >> limitShift, 1024u));
+            var headroom = expandedLimit > baseMinimum ? expandedLimit - baseMinimum : 0;
+            var targetValue = MathF.FusedMultiplyAdd(factor, headroom, baseMinimum);
+            if (!float.IsFinite(targetValue) || targetValue >= 4_294_967_296f)
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            var target = (uint)targetValue;
+            if (target > baseMinimum)
+            {
+                const uint FullPcOversubscription = 0x7FF;
+                const uint FullShaderOversubscription = 0x007F_0000;
+                if (target < baseLimits.ExportCount)
+                {
+                    var range = Math.Max(expandedLimits.Vertex - baseLimits.Vertex, 1u);
+                    var value = (uint)Math.Min(
+                        (((ulong)(target - baseLimits.Vertex)) << 10) / range,
+                        1024UL);
+                    value = Math.Max(value, 1u);
+                    userConfigValue = ((value << 1) - 1) & FullPcOversubscription;
+                    shaderResourceValue |= FullShaderOversubscription;
+                }
+                else
+                {
+                    var range = Math.Max(expandedLimits.ExportCount - baseLimits.ExportCount, 1u);
+                    var value = (uint)Math.Min(
+                        ((ulong)(target - baseLimits.ExportCount) * 127) / range,
+                        127UL);
+                    userConfigValue |= FullPcOversubscription;
+                    shaderResourceValue = (shaderResourceValue & ~FullShaderOversubscription) | (value << 16);
+                }
+            }
+        }
+
+        Span<byte> result = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt32LittleEndian(result, UserConfigRegisterOffset.ParameterOversubscription);
+        BinaryPrimitives.WriteUInt32LittleEndian(result[sizeof(uint)..], userConfigValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(result[(2 * sizeof(uint))..], ShaderRegisterOffset.SpiShaderPgmRsrc4Gs);
+        BinaryPrimitives.WriteUInt32LittleEndian(result[(3 * sizeof(uint))..], shaderResourceValue);
+        if (!ctx.Memory.TryWrite(registersAddress, result))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private readonly record struct GsOccupancyLimits(uint Vertex, uint ExportCount);
+
+    private static GsOccupancyLimits CalculateGsOccupancyLimits(
+        uint onChipControl,
+        uint subgroupControl,
+        uint vertexOutputConfiguration,
+        uint vertexOutputControl,
+        uint outputWords,
+        uint shaderStagesEnable,
+        uint vertexCapacity,
+        uint exportCapacity)
+    {
+        var subgroupWork = ((((onChipControl >> 11) & 0x7FFu) * (subgroupControl & 0x1FFu)) + 31) >> 5;
+        var waves = Math.Max(subgroupWork, outputWords);
+        if ((shaderStagesEnable & VgtShaderStagesGsW32EnBit) == 0)
+        {
+            waves >>= 1;
+        }
+        waves = Math.Max(waves, 1u);
+
+        var exports = 1u + ((vertexOutputControl >> 21) & 1u) + ((vertexOutputControl >> 22) & 1u) +
+                      ((vertexOutputControl >> 23) & 1u);
+        var exportLimit = (exportCapacity / exports) * 4;
+        var vertexLimit = (vertexOutputConfiguration & 0x80) != 0
+            ? 2048u
+            : vertexCapacity / (((vertexOutputConfiguration >> 2) & 0xF) + 1);
+
+        return new GsOccupancyLimits(waves * (vertexLimit / outputWords), waves * (exportLimit / outputWords));
+    }
+
+    private static bool TryReadShaderRegisterValue(
+        CpuContext ctx,
+        ulong registersAddress,
+        int registerCount,
+        uint registerOffset,
+        out uint value)
+    {
+        value = 0;
+        return TryFindShaderRegister(ctx, registersAddress, registerCount, registerOffset, 0, out var entryAddress) &&
+               TryReadUInt32(ctx, entryAddress + sizeof(uint), out value);
     }
 }

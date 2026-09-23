@@ -2237,6 +2237,11 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
+                if (specialized.DynamicDescriptor)
+                {
+                    return TryEmitDynamicBufferMemory(instruction, control, out error);
+                }
+
                 stride = UInt(specialized.PackedStride & 0x3FFF);
                 descriptorFormat = specialized.DescriptorFormat;
                 descriptorWord3 = UInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
@@ -3496,11 +3501,9 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
-                // The host path does not expose Vulkan ray-query or an
-                // acceleration-structure descriptor for GFX10's raw BVH
-                // texture. Return a deterministic miss instead of rejecting
-                // the complete compute shader. The instruction always writes
-                // four DWORD result registers.
+                // This backend has no portable SPIR-V image-BVH primitive.
+                // Model the defined conservative miss without resolving a
+                // regular image descriptor; the instruction writes four DWORDs.
                 for (uint component = 0; component < 4; component++)
                 {
                     StoreV(image.VectorData + component, UInt(0));

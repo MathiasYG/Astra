@@ -213,7 +213,7 @@ internal sealed class ShaderProgramCache
         {
             if (!ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out var materializationFailure, captureIndirectImageFailure))
             {
-                var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16}.";
+                var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} failure={materializationFailure}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);
                 throw SubmissionScheduler.Fatal(message);
@@ -592,7 +592,10 @@ internal sealed class ShaderProgramCache
         for (var index = 0; index < buffers.Length; index++)
         {
             var buffer = info.Buffers[index];
-            buffers[index] = new BufferResourceInfo(buffer.Read, buffer.Written, buffer.Atomic, buffer.Formatted, buffer.Scalar, buffer.MaxByteExtent, buffer.PackedStride);
+            buffers[index] = new BufferResourceInfo(buffer.Read, buffer.Written, buffer.Atomic, buffer.Formatted, buffer.Scalar, buffer.MaxByteExtent, buffer.PackedStride)
+            {
+                DynamicDescriptor = buffer.DynamicDescriptor,
+            };
         }
 
         var images = new ImageResourceInfo[info.Images.Count];

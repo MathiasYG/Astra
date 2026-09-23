@@ -19,15 +19,22 @@ public readonly record struct ImageSpecialization(
     uint IndirectSearchIterations,
     bool Cube);
 
+public readonly record struct SamplerSpecialization(
+    uint IndirectRoot,
+    uint IndirectMappingOffset,
+    uint IndirectSearchIterations);
+
 // The module-affecting resource state of one draw. Addresses and descriptor payloads
 // stay in the snapshot, so they never create a permutation.
 public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
 {
     public List<BufferSpecialization> Buffers { get; init; } = [];
     public List<ImageSpecialization> Images { get; init; } = [];
+    public List<SamplerSpecialization> Samplers { get; init; } = [];
 
     public bool Equals(ResourceSpecialization? other) =>
-        other is not null && Buffers.SequenceEqual(other.Buffers) && Images.SequenceEqual(other.Images);
+        other is not null && Buffers.SequenceEqual(other.Buffers) && Images.SequenceEqual(other.Images) &&
+        Samplers.SequenceEqual(other.Samplers);
 
     public override bool Equals(object? obj) => Equals(obj as ResourceSpecialization);
 
@@ -44,10 +51,15 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
             hash.Add(image);
         }
 
+        foreach (var sampler in Samplers)
+        {
+            hash.Add(sampler);
+        }
+
         return hash.ToHashCode();
     }
 
-    public ResourceSpecialization Clone() => new() { Buffers = [.. Buffers], Images = [.. Images] };
+    public ResourceSpecialization Clone() => new() { Buffers = [.. Buffers], Images = [.. Images], Samplers = [.. Samplers] };
 
     // The specialization of a plan before any draw: raw buffers and the tracked image classes.
     public static ResourceSpecialization Default(ShaderResourceInfo info) => new()
@@ -58,6 +70,8 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
             image.Dimension == ImageDimension.Unknown ? ImageDimension.Dim2D : image.Dimension,
             image.MipCount, image.ConversionFormat, image.ShaderSwizzle,
             image.IndirectRoot, image.IndirectMappingOffset, image.IndirectSearchIterations, image.Cube)).ToList(),
+        Samplers = info.Samplers.Select(sampler => new SamplerSpecialization(
+            sampler.IndirectRoot, sampler.IndirectMappingOffset, sampler.IndirectSearchIterations)).ToList(),
     };
 }
 

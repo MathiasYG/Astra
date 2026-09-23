@@ -492,7 +492,7 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.RectangleListLegacy:
                 if (!autoDraw)
                 {
-                    throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
+                    return false;
                 }
 
                 topology = PrimitiveTopology.TriangleStrip;

@@ -31,7 +31,10 @@ public readonly record struct BufferResourceInfo(
     bool Formatted,
     bool Scalar,
     uint MaxByteExtent,
-    uint PackedStride);
+    uint PackedStride)
+{
+    public bool DynamicDescriptor { get; init; }
+}
 
 // How a compiled program uses one image resource.
 public readonly record struct ImageResourceInfo(ImageResourceClass Class, bool Written);

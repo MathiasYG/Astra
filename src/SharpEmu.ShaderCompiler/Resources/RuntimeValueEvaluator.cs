@@ -204,6 +204,17 @@ public sealed class RuntimeValueEvaluator
 
         var memory = _plan.Memory[value.MemoryIndex];
         var handle = value.Operands[0];
+        // Planning-only scalar-address loads describe a descriptor-table walk,
+        // rather than an execution-time guest dereference. A shader can carry an
+        // uninitialised/null address through that walk; the corresponding table
+        // word is the defined zero descriptor value. Keep ordinary reads strict.
+        if (value.Kind == ScalarValueKind.ScalarAddressWord && memory.PlanningOnly &&
+            handle.Operands.Length >= 2 && handle.Operands.Any(operand => operand.IsUndefined))
+        {
+            result = 0;
+            return true;
+        }
+
         if (handle.Operands.Length < 2 ||
             !EvaluateWide(handle.Operands[0], out var low) ||
             !EvaluateWide(handle.Operands[1], out var high) ||
@@ -247,6 +258,18 @@ public sealed class RuntimeValueEvaluator
             {
                 return false;
             }
+        }
+
+        // A zero device address is the null descriptor representation used by
+        // resource tables. Planned scalar-address reads only populate the
+        // flattened descriptor table; when their handle is null, the guest
+        // load contributes the zero dword of that descriptor. Keep ordinary
+        // (non-planning) device-address loads strict so a real null pointer
+        // dereference remains an evaluation failure.
+        if (value.Kind == ScalarValueKind.ScalarAddressWord && memory.PlanningOnly && baseAddress == 0)
+        {
+            result = 0;
+            return true;
         }
 
         if (_inputs.ReadMemory is null || !_inputs.ReadMemory(address, out var word))

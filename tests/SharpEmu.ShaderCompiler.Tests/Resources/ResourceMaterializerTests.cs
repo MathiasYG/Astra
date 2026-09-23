@@ -223,6 +223,41 @@ public sealed class ResourceMaterializerTests
     }
 
     [Fact]
+    public void IndirectImage_UsesSynchronizedReaderWhenCleanReadIsUnavailable()
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
+        uint[] userData = [0x1000, 224 << 16, 2, 0, 0x2000, 16 << 16, 4, 0, 7];
+        var memory = ResourceTrackerTests.LinearMemory();
+        ResourceTrackerTests.WriteImage(memory, 0x2000, ResourceTrackerTests.ImageDescriptor());
+        var cleanReads = 0;
+        var synchronizedReads = 0;
+
+        bool ReadClean(ulong address, out uint word)
+        {
+            cleanReads++;
+            word = 0;
+            return false;
+        }
+
+        bool ReadSynchronized(ulong address, out uint word)
+        {
+            synchronizedReads++;
+            return memory.Read(address, out word);
+        }
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(
+            plan,
+            Inputs(userData, readMemory: ReadSynchronized, readCleanMemory: ReadClean),
+            ref snapshot,
+            ref specialization));
+        Assert.True(cleanReads > 0);
+        Assert.True(synchronizedReads > 0);
+        Assert.Equal(ResourceTrackerTests.ImageDescriptor(), snapshot.Images[0]);
+    }
+
+    [Fact]
     public void MixedSampler_DuplicatesTheCorrectSnapshot()
     {
         var instructions = new List<Gen5ShaderInstruction>();

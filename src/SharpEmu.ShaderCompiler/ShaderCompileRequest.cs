@@ -81,6 +81,7 @@ public sealed class ShaderCompileRequest
         IndirectOffsetKeyMemoryIndices = plan.IndirectImages.Where(access => access.KeyIsAddressOffset)
             .Select(access => access.Key.MemoryIndex).ToHashSet();
         IndirectRootByMemoryIndex = plan.IndirectImages.ToDictionary(access => access.MemoryIndex, access => access.Key.MemoryIndex);
+        IndirectSamplerRootByMemoryIndex = plan.IndirectSamplers.ToDictionary(access => access.MemoryIndex, access => access.Key.MemoryIndex);
 
         var writtenSlots = new Dictionary<int, uint>();
         foreach (var range in plan.DeviceAddressRanges)
@@ -126,6 +127,9 @@ public sealed class ShaderCompileRequest
 
     // Indirect image accesses: memory index → the memory index of the key read.
     public IReadOnlyDictionary<int, int> IndirectRootByMemoryIndex { get; }
+
+    // Indirect sampler accesses: memory index → the memory index of the key read.
+    public IReadOnlyDictionary<int, int> IndirectSamplerRootByMemoryIndex { get; }
 
     // Written device-address accesses: memory index → the flattened slot of their range.
     public IReadOnlyDictionary<int, uint> WrittenRangeSlotByMemoryIndex { get; }

@@ -108,6 +108,18 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void BvhImageQueriesDoNotRequireDescriptorTracking()
+    {
+        var plan = Extract(Program(
+            Image(0, "ImageBvhIntersectRay", 0),
+            EndProgram(8)));
+
+        Assert.Null(plan.Memory.Find(0));
+        Assert.Empty(plan.Info.Images);
+        Assert.Empty(plan.Info.Samplers);
+    }
+
+    [Fact]
     public void SamplerWithDivergentBits_IsRejected()
     {
         var program = Program(
@@ -123,6 +135,51 @@ public sealed class ResourceTrackerTests
         var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
         Assert.Contains("not a valid runtime value", error.Message);
         Assert.Contains("pc=0x00000200", error.Message);
+    }
+
+    [Fact]
+    public void MixedImageDescriptorFromScalarBufferLoadIsRuntimeMaterialized()
+    {
+        var program = Program(
+            MoveScalar(0, 0, 0x1000),
+            MoveScalar(4, 1, 0),
+            MoveScalar(8, 2, 1),
+            MoveScalar(12, 3, 0),
+            ScalarBufferLoad(20, 0, destination: 16, count: 4, dynamicOffsetRegister: 8),
+            MoveScalar(24, 20, 0x20),
+            MoveScalar(28, 21, Format32x4Float << 20),
+            MoveScalar(32, 22, 3 | (3 << 14)),
+            MoveScalar(36, 23, IdentitySwizzle | (ImageType2D << 28)),
+            Image(40, "ImageSample", 16, 24),
+            EndProgram(48));
+
+        var plan = Extract(program);
+        var image = Assert.Single(plan.Info.Images);
+        var source = plan.DescriptorSources[(int)image.Source];
+        Assert.Equal(ScalarValueKind.ScalarBufferWord, source.Dwords[0].Kind);
+        Assert.Equal(ScalarValueKind.ScalarBufferWord, source.Dwords[3].Kind);
+        Assert.True(source.Dwords[4].IsConstant);
+    }
+
+    [Fact]
+    public void R128ImageIgnoresClobberedUpperDescriptorWords()
+    {
+        var program = Program(
+            MoveScalar(0, 16, 0x20),
+            MoveScalar(4, 17, Format32x4Float << 20),
+            MoveScalar(8, 18, 3 | (3 << 14)),
+            MoveScalar(12, 19, IdentitySwizzle | (ImageType2D << 28)),
+            Image(16, "ImageStore", 16, r128: true),
+            EndProgram(24));
+
+        var plan = Extract(program);
+        var source = plan.DescriptorSources[(int)Assert.Single(plan.Info.Images).Source];
+        Assert.Equal(8, source.Dwords.Length);
+        Assert.All(source.Dwords.Skip(4), value =>
+        {
+            Assert.True(value.IsConstant);
+            Assert.Equal(0u, value.ConstantU32);
+        });
     }
 
     private static uint[] StorageDescriptorUserData(uint mipBase, uint mipLast) =>

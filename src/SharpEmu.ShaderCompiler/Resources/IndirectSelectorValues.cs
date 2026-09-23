@@ -154,7 +154,7 @@ public sealed class IndirectSelectorValues
             if (instruction.Control is Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 } or
                 Gen5Vop3Control { Clamp: true } or Gen5Vop3Control { OutputModifier: not 0 } or Gen5Vop3Control { OperandSelect: not 0 } or
                 Gen5SdwaControl or Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl) return null;
-            if (instruction.Opcode is "SFF1I32B32" or "VFfblB32")
+            if (instruction.Opcode is "SFF1I32B32" or "VFfbhU32" or "VFfblB32")
             {
                 HasBitScan = true;
                 return new(Values: Enumerable.Range(0, 32).Select(value => (uint)value).Append(uint.MaxValue).ToArray());

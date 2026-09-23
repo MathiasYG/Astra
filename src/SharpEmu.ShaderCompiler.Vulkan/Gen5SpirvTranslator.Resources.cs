@@ -79,6 +79,9 @@ public static partial class Gen5SpirvTranslator
         private uint _physicalUintPointer;
         private uint _deviceEntryScratch;
         private uint _deviceWordScratch;
+        private uint _scratch;
+        private uint _scratchElementPointer;
+        private uint _scratchDwordCount;
         private uint _pushDataBlockPointer;
         private uint _wordRuntimeArray;
         private uint _addressRuntimeArray;
@@ -213,6 +216,21 @@ public static partial class Gen5SpirvTranslator
                 _module.AddName(_deviceWordScratch, "deviceAddressWord");
                 _interfaces.Add(_deviceEntryScratch);
                 _interfaces.Add(_deviceWordScratch);
+            }
+
+            if (request.Program.Instructions.Any(static instruction =>
+                    instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal)))
+            {
+                _scratchDwordCount = Math.Max(request.ScratchDwords, 1u);
+                var scratchArrayType = _module.TypeArray(_uintType, _scratchDwordCount);
+                var scratchPointer = _module.TypePointer(SpirvStorageClass.Private, scratchArrayType);
+                _scratchElementPointer = _module.TypePointer(SpirvStorageClass.Private, _uintType);
+                _scratch = _module.AddGlobalVariable(
+                    scratchPointer,
+                    SpirvStorageClass.Private,
+                    _module.ConstantNull(scratchArrayType));
+                _module.AddName(_scratch, "guestScratch");
+                _interfaces.Add(_scratch);
             }
 
             foreach (var memoryIndex in request.IndirectKeyMemoryIndices)
@@ -537,6 +555,18 @@ public static partial class Gen5SpirvTranslator
             return Load(_uintType, _deviceWordScratch);
         }
 
+        // Dynamic buffer descriptors carry their own byte footprint, so fixed
+        // storage-buffer bounds cannot be used. Resolve the address only when the
+        // descriptor range check and page-table lookup both succeed.
+        private uint LoadDeviceDword(uint address64, uint allowed)
+        {
+            var (pointer, valid) = ResolveDeviceAddress(address64);
+            Store(_deviceWordScratch, UInt(0));
+            EmitConditional(LogicalAnd(allowed, valid), () =>
+                Store(_deviceWordScratch, _module.AddInstruction(SpirvOp.Load, _uintType, DeviceWordPointer(pointer), 2u, 4u)));
+            return Load(_uintType, _deviceWordScratch);
+        }
+
         private void StoreDeviceDword(uint address64, uint value, uint allowed)
         {
             var (pointer, valid) = ResolveDeviceAddress(address64);
@@ -569,15 +599,25 @@ public static partial class Gen5SpirvTranslator
         // An unaligned dword assembled from the two aligned dwords it spans.
         private uint LoadUnalignedDeviceWord(uint address64, uint byteCount)
         {
+            return LoadUnalignedDeviceWord(address64, byteCount, null);
+        }
+
+        private uint LoadUnalignedDeviceWord(uint address64, uint byteCount, uint? allowed)
+        {
             var alignment = Narrow(And64(address64, ULong(3)));
             var aligned = And64(address64, ULong(~3ul));
             var shift = ShiftLeftLogical(alignment, UInt(3));
-            var low = LoadDeviceDword(aligned);
+            var low = allowed is { } range
+                ? LoadDeviceDword(aligned, range)
+                : LoadDeviceDword(aligned);
             var crosses = _module.AddInstruction(SpirvOp.UGreaterThan, _boolType, IAdd(alignment, UInt(byteCount)), UInt(4));
             Store(_deviceWordScratch, UInt(0));
             EmitConditional(crosses, () =>
             {
-                var high = LoadDeviceDword(IAdd64(aligned, ULong(4)));
+                var highAddress = IAdd64(aligned, ULong(4));
+                var high = allowed is { } range
+                    ? LoadDeviceDword(highAddress, range)
+                    : LoadDeviceDword(highAddress);
                 Store(_deviceWordScratch, high);
             });
             var highWord = Load(_uintType, _deviceWordScratch);
@@ -592,8 +632,22 @@ public static partial class Gen5SpirvTranslator
 
         private uint LoadSubdwordDeviceValue(uint address64, uint previous, uint byteCount, bool signExtend, bool d16, bool d16High)
         {
+            return LoadSubdwordDeviceValue(address64, previous, byteCount, signExtend, d16, d16High, null);
+        }
+
+        private uint LoadSubdwordDeviceValue(
+            uint address64,
+            uint previous,
+            uint byteCount,
+            bool signExtend,
+            bool d16,
+            bool d16High,
+            uint? allowed)
+        {
             var width = byteCount * 8;
-            var raw = BitwiseAnd(LoadUnalignedDeviceWord(address64, byteCount), UInt(byteCount == 1 ? 0xFFu : 0xFFFFu));
+            var raw = BitwiseAnd(
+                LoadUnalignedDeviceWord(address64, byteCount, allowed),
+                UInt(byteCount == 1 ? 0xFFu : 0xFFFFu));
             if (signExtend)
             {
                 raw = Bitcast(
@@ -736,6 +790,72 @@ public static partial class Gen5SpirvTranslator
         }
 
         // ---- global memory ----
+
+        private uint ScratchPointer(uint address)
+        {
+            var dword = ShiftRightLogical(address, UInt(2));
+            var index = _module.AddInstruction(SpirvOp.UMod, _uintType, dword, UInt(_scratchDwordCount));
+            return _module.AddInstruction(
+                SpirvOp.AccessChain,
+                _scratchElementPointer,
+                _scratch,
+                index);
+        }
+
+        private bool TryEmitScratchMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5GlobalMemoryControl control,
+            int memoryIndex,
+            out string error)
+        {
+            error = string.Empty;
+            if (_scratch == 0 || _scratchDwordCount == 0)
+            {
+                error = "scratch storage was not declared";
+                return false;
+            }
+
+            var address = LoadV(control.VectorAddress);
+            if (control.ScalarAddress < 125)
+            {
+                address = IAdd(address, LoadS(control.ScalarAddress));
+            }
+
+            address = IAdd(address, UInt(unchecked((uint)control.OffsetBytes)));
+            var entry = _request.Memory[memoryIndex];
+            if (instruction.Opcode.StartsWith("ScratchStore", StringComparison.Ordinal))
+            {
+                EmitExecConditional(() =>
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        var elementAddress = index == 0
+                            ? address
+                            : IAdd(address, UInt(index * sizeof(uint)));
+                        Store(ScratchPointer(elementAddress), LoadV(control.SourceVectorRegister + index));
+                    }
+                });
+                return true;
+            }
+
+            if (instruction.Opcode.StartsWith("ScratchLoad", StringComparison.Ordinal))
+            {
+                EmitExecConditional(() =>
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        var elementAddress = index == 0
+                            ? address
+                            : IAdd(address, UInt(index * sizeof(uint)));
+                        StoreV(control.DestinationVectorRegister + index, Load(_uintType, ScratchPointer(elementAddress)));
+                    }
+                });
+                return true;
+            }
+
+            error = $"unsupported scratch opcode {instruction.Opcode} (memory={memoryIndex}, bits={entry.DataBits})";
+            return false;
+        }
 
         private bool TryEmitLayoutGlobalMemory(Gen5ShaderInstruction instruction, Gen5GlobalMemoryControl control, out string error)
         {
@@ -984,6 +1104,242 @@ public static partial class Gen5SpirvTranslator
 
         // ---- buffers ----
 
+        private uint LoadDynamicGfx10BufferFormatComponent(
+            uint elementAddress64,
+            uint byteAddress,
+            uint descriptorSize,
+            uint dataFormat,
+            uint numberFormat,
+            int component,
+            out uint componentInBounds)
+        {
+            var byteOffset = UInt(0);
+            var bitOffset = UInt(0);
+            var bitCount = UInt(0);
+
+            void SetLayout(uint format, uint bytes, uint bits, uint count)
+            {
+                var matches = _module.AddInstruction(SpirvOp.IEqual, _boolType, dataFormat, UInt(format));
+                byteOffset = _module.AddInstruction(SpirvOp.Select, _uintType, matches, UInt(bytes), byteOffset);
+                bitOffset = _module.AddInstruction(SpirvOp.Select, _uintType, matches, UInt(bits), bitOffset);
+                bitCount = _module.AddInstruction(SpirvOp.Select, _uintType, matches, UInt(count), bitCount);
+            }
+
+            foreach (var layout in Gfx10UnifiedFormat.ComponentLayouts)
+            {
+                if (layout.Component == (uint)component)
+                {
+                    SetLayout(layout.DataFormat, layout.ByteOffset, layout.BitOffset, layout.BitCount);
+                }
+            }
+
+            var componentBytes = ShiftRightLogical(
+                IAdd(IAdd(bitOffset, bitCount), UInt(7)),
+                UInt(3));
+            var componentLastByte = _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, bitCount, UInt(0)),
+                UInt(0),
+                _module.AddInstruction(SpirvOp.ISub, _uintType, componentBytes, UInt(1)));
+            var componentEnd = IAdd(Widen(byteAddress), Widen(IAdd(byteOffset, componentLastByte)));
+            componentInBounds = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, bitCount, UInt(0)),
+                ULessThanEqual64(componentEnd, Widen(descriptorSize)));
+
+            var packed = LoadUnalignedDeviceWord(
+                IAdd64(elementAddress64, Widen(byteOffset)),
+                1,
+                componentInBounds);
+            var raw = _module.AddInstruction(SpirvOp.BitFieldUExtract, _uintType, packed, bitOffset, bitCount);
+            var converted = ConvertGfx10BufferComponent(raw, bitCount, numberFormat, dataFormat);
+            var valid = _module.AddInstruction(SpirvOp.INotEqual, _boolType, bitCount, UInt(0));
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                valid,
+                converted,
+                component == 3 ? Gfx10FormatOne(numberFormat) : UInt(0));
+        }
+
+        private void EmitDynamicBufferFormatLoad(
+            uint address64,
+            uint byteAddress,
+            uint descriptorSize,
+            uint descriptorWord3,
+            uint vectorData,
+            uint componentCount)
+        {
+            var unifiedFormat = BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F));
+            var (dataFormat, numberFormat) = DecodeGfx10BufferFormat(unifiedFormat);
+            var canonical = new uint[4];
+            var componentBounds = new uint[4];
+            for (var component = 0; component < canonical.Length; component++)
+            {
+                canonical[component] = LoadDynamicGfx10BufferFormatComponent(
+                    address64, byteAddress, descriptorSize, dataFormat, numberFormat, component,
+                    out componentBounds[component]);
+            }
+
+            var selectors = new uint[componentCount];
+            var inBounds = IsDescriptorBound(descriptorWord3);
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(destination * 3)), UInt(7));
+                selectors[destination] = selector;
+                var selectedInBounds = _module.ConstantBool(true);
+                for (uint component = 0; component < 4; component++)
+                {
+                    selectedInBounds = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _boolType,
+                        _module.AddInstruction(SpirvOp.IEqual, _boolType, selector, UInt(component + 4)),
+                        componentBounds[component],
+                        selectedInBounds);
+                }
+
+                inBounds = _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, inBounds, selectedInBounds);
+            }
+
+            var one = Gfx10FormatOne(numberFormat);
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = selectors[destination];
+                var constant = SelectUInt(selector, 1, one, UInt(0));
+                var value = constant;
+                value = SelectUInt(selector, 4, canonical[0], value);
+                value = SelectUInt(selector, 5, canonical[1], value);
+                value = SelectUInt(selector, 6, canonical[2], value);
+                value = SelectUInt(selector, 7, canonical[3], value);
+                StoreV(vectorData + destination, _module.AddInstruction(SpirvOp.Select, _uintType, inBounds, value, constant));
+            }
+        }
+
+        // A runtime descriptor array may load a buffer descriptor into scalar
+        // registers. Keep those words in the scalar file and use the descriptor's
+        // address/stride/record count to access guest memory through the generic
+        // device-address page table.
+        private bool TryEmitDynamicBufferMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            error = string.Empty;
+            var isSubdwordLoad = TryGetSubdwordLoadInfo(
+                instruction.Opcode,
+                out var loadByteCount,
+                out var loadSignExtend,
+                out var loadD16,
+                out var loadD16High);
+            var isSubdwordStore = TryGetSubdwordStoreInfo(
+                instruction.Opcode,
+                out var storeByteCount,
+                out var storeSourceShift);
+            var isFormattedLoad = instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal);
+            var isDwordTransfer = instruction.Opcode.StartsWith("BufferLoadDword", StringComparison.Ordinal) ||
+                instruction.Opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal);
+            if (control.Typed || (!isDwordTransfer && !isSubdwordLoad && !isSubdwordStore && !isFormattedLoad))
+            {
+                error = $"unsupported dynamic buffer opcode {instruction.Opcode}";
+                return false;
+            }
+
+            var scalarBase = control.ScalarResource;
+            var descriptorWord1 = LoadS(scalarBase + 1);
+            var descriptorWord3 = LoadS(scalarBase + 3);
+            var stride = BitwiseAnd(ShiftRightLogical(descriptorWord1, UInt(16)), UInt(0x3FFF));
+            var records = Widen(LoadS(scalarBase + 2));
+            var stridedSize = _module.AddInstruction(SpirvOp.IMul, _ulongType, Widen(stride), records);
+            var size = _module.AddInstruction(
+                SpirvOp.Select,
+                _ulongType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, stride, UInt(0)),
+                records,
+                stridedSize);
+            var scalarOffset = instruction.Sources.Count > 2
+                ? GetRawSource(instruction, 2)
+                : UInt(0);
+            var vectorIndex = control.IndexEnabled ? LoadV(control.VectorAddress) : UInt(0);
+            var vectorOffset = control.OffsetEnabled
+                ? LoadV(control.VectorAddress + (control.IndexEnabled ? 1u : 0u))
+                : UInt(0);
+            var byteAddress = IAdd(UInt(unchecked((uint)control.OffsetBytes)), scalarOffset);
+            byteAddress = IAdd(byteAddress, vectorOffset);
+            byteAddress = IAdd(byteAddress, _module.AddInstruction(SpirvOp.IMul, _uintType, vectorIndex, stride));
+            var transferBytes = isSubdwordLoad
+                ? loadByteCount
+                : isSubdwordStore
+                    ? storeByteCount
+                    : isFormattedLoad
+                        ? 0u
+                        : control.DwordCount * sizeof(uint);
+            var end = IAdd(Widen(byteAddress), ULong(transferBytes));
+            var allowed = ULessThanEqual64(end, size);
+            var baseHigh = BitwiseAnd(descriptorWord1, UInt(0xFFFF));
+            var baseAddress = Pair64(LoadS(scalarBase), baseHigh);
+            var address = IAdd64(baseAddress, Widen(byteAddress));
+            var store = instruction.Opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal);
+
+            EmitExecConditional(() =>
+            {
+                if (isFormattedLoad)
+                {
+                    EmitDynamicBufferFormatLoad(
+                        address,
+                        byteAddress,
+                        size,
+                        descriptorWord3,
+                        control.VectorData,
+                        control.DwordCount);
+                    return;
+                }
+
+                if (isSubdwordLoad)
+                {
+                    StoreV(
+                        control.VectorData,
+                        LoadSubdwordDeviceValue(
+                            address,
+                            LoadV(control.VectorData),
+                            loadByteCount,
+                            loadSignExtend,
+                            loadD16,
+                            loadD16High,
+                            allowed));
+                    return;
+                }
+
+                if (isSubdwordStore)
+                {
+                    StoreDeviceBytes(
+                        address,
+                        LoadV(control.VectorData),
+                        storeByteCount,
+                        storeSourceShift,
+                        allowed);
+                    return;
+                }
+
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    var componentAddress = index == 0
+                        ? address
+                        : IAdd64(address, ULong((ulong)index * sizeof(uint)));
+                    if (store)
+                    {
+                        StoreDeviceDword(componentAddress, LoadV(control.VectorData + index), allowed);
+                    }
+                    else
+                    {
+                        StoreV(control.VectorData + index, LoadDeviceDword(componentAddress, allowed));
+                    }
+                }
+            });
+            return true;
+        }
+
         private bool TryResolveLayoutBuffer(uint pc, out int bindingIndex, out BufferResource resource)
         {
             bindingIndex = -1;
@@ -1179,6 +1535,14 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
+                if (request.IndirectSamplerRootByMemoryIndex.TryGetValue(memoryIndex, out var samplerKeyMemoryIndex) &&
+                    samplerIndex < info.Samplers.Count && info.Samplers[(int)samplerIndex].IndirectSearchIterations != 0)
+                {
+                    var samplerInfo = info.Samplers[(int)samplerIndex];
+                    samplerIndex = SelectIndirectSamplerCandidate(samplerInfo, samplerKeyMemoryIndex,
+                        (uint)samplerInfo.IndirectResources.Count);
+                }
+
                 var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(samplerIndex));
                 var sampler = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
@@ -1244,6 +1608,36 @@ public static partial class Gen5SpirvTranslator
             // The mapping holds candidate-local indices: the root's candidate list in order.
             var mapped = LoadFlattenedWord(IAdd(foundSlot, UInt(1)));
             var inRange = LogicalAnd(found, _module.AddInstruction(SpirvOp.ULessThan, _boolType, mapped, UInt(candidateCount)));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inRange, mapped, UInt(0));
+        }
+
+        private uint SelectIndirectSamplerCandidate(SamplerResource samplerInfo, int keyMemoryIndex, uint candidateCount)
+        {
+            var key = _indirectKeyScratch.TryGetValue(keyMemoryIndex, out var scratch) ? Load(_uintType, scratch) : UInt(0);
+            var mapping = UInt(samplerInfo.IndirectMappingOffset);
+            var count = LoadFlattenedWord(mapping);
+            var low = UInt(0);
+            var high = count;
+            for (uint iteration = 0; iteration < samplerInfo.IndirectSearchIterations; iteration++)
+            {
+                var span = _module.AddInstruction(SpirvOp.ISub, _uintType, high, low);
+                var middle = IAdd(low, ShiftRightLogical(span, UInt(1)));
+                var probeSlot = IAdd(IAdd(mapping, UInt(1)), ShiftLeftLogical(middle, UInt(1)));
+                var probeKey = LoadFlattenedWord(probeSlot);
+                var moveUp = LogicalAnd(
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, probeKey, key),
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, low, high));
+                low = _module.AddInstruction(SpirvOp.Select, _uintType, moveUp, IAdd(middle, UInt(1)), low);
+                high = _module.AddInstruction(SpirvOp.Select, _uintType, moveUp, high, middle);
+            }
+
+            var foundSlot = IAdd(IAdd(mapping, UInt(1)), ShiftLeftLogical(low, UInt(1)));
+            var found = LogicalAnd(
+                _module.AddInstruction(SpirvOp.ULessThan, _boolType, low, count),
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, LoadFlattenedWord(foundSlot), key));
+            var mapped = LoadFlattenedWord(IAdd(foundSlot, UInt(1)));
+            var inRange = LogicalAnd(found,
+                _module.AddInstruction(SpirvOp.ULessThan, _boolType, mapped, UInt(candidateCount)));
             return _module.AddInstruction(SpirvOp.Select, _uintType, inRange, mapped, UInt(0));
         }
 

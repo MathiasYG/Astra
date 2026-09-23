@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -255,5 +256,146 @@ public sealed class AgcDirectShaderRegisterTests
             out string? error) => throw new NotSupportedException();
         public bool TryRaiseGuestException(CpuContext callerContext, ulong threadHandle, ulong handler, int exceptionType,
             out string? error) => throw new NotSupportedException();
+    }
+}
+
+public sealed class AgcGsOversubscriptionTests
+{
+    private const ulong BaseAddress = 0x3_1000_0000;
+    private const int MemorySize = 0x1000;
+    private const ulong OutputAddress = BaseAddress + 0x100;
+    private const ulong ShaderAddress = BaseAddress + 0x200;
+    private const ulong CxRegistersAddress = BaseAddress + 0x300;
+    private const ulong SpecialsAddress = BaseAddress + 0x700;
+    private const int IncompleteShaderRegistersResult = unchecked((int)0x8A6C0005);
+
+    [Fact]
+    public void GetGsOversubscription_ZeroBudgetWritesZeroRegistersWithoutShader()
+    {
+        var (context, memory) = CreateContext(0, 0);
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, manager.Dispatch("NKIzURsgV7I", context));
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+        AssertOutput(memory, 0, 0);
+    }
+
+    [Fact]
+    public void GetGsOversubscription_MaximumBudgetRequestsFullOversubscription()
+    {
+        var (context, memory) = CreateContext(uint.MaxValue, 0);
+        var manager = CreateManager();
+
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, manager.Dispatch("NKIzURsgV7I", context));
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+        AssertOutput(memory, 0x7FF, 0x007F_0000);
+    }
+
+    [Theory]
+    [InlineData(0x1C, 1023u, 0x007F_0000u)]
+    [InlineData(0x00, 0x7FFu, 0x0020_0000u)]
+    public void GetGsOversubscription_ComputesVertexAndExportLimitedModes(
+        uint vertexOutputConfiguration,
+        uint expectedUserConfig,
+        uint expectedShaderResources)
+    {
+        var (context, memory) = CreateContext(32_768, ShaderAddress);
+        WriteShaderRegisters(memory, vertexOutputConfiguration);
+        context.SetXmmRegister(0, BitConverter.SingleToUInt32Bits(0.5f), 0);
+
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, CreateManager().Dispatch("NKIzURsgV7I", context));
+        AssertOutput(memory, expectedUserConfig, expectedShaderResources);
+    }
+
+    [Fact]
+    public void GetGsOversubscription_RejectsMissingRequiredShaderRegister()
+    {
+        var (context, memory) = CreateContext(32_768, ShaderAddress);
+        WriteShaderRegisters(memory, vertexOutputConfiguration: 0, includeMaxOutput: false);
+        context.SetXmmRegister(0, BitConverter.SingleToUInt32Bits(0.5f), 0);
+
+        Assert.Equal((OrbisGen2Result)IncompleteShaderRegistersResult, CreateManager().Dispatch("NKIzURsgV7I", context));
+        Assert.Equal(unchecked((ulong)IncompleteShaderRegistersResult), context[CpuRegister.Rax]);
+    }
+
+    private static (CpuContext Context, FakeCpuMemory Memory) CreateContext(uint budget, ulong shaderAddress)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        WriteUInt64(memory, ShaderAddress + 0x18, CxRegistersAddress);
+        WriteUInt64(memory, ShaderAddress + 0x28, SpecialsAddress);
+        Assert.True(memory.TryWrite(ShaderAddress + 0x5B, [5]));
+        WriteUInt32(memory, SpecialsAddress + 0x0C, 1u << 22);
+
+        var context = new CpuContext(memory, Generation.Gen5)
+        {
+            [CpuRegister.Rdi] = OutputAddress,
+            [CpuRegister.Rsi] = shaderAddress,
+            [CpuRegister.Rdx] = budget,
+        };
+        context.SetXmmRegister(0, 0, 0);
+        return (context, memory);
+    }
+
+    private static void WriteShaderRegisters(
+        FakeCpuMemory memory,
+        uint vertexOutputConfiguration,
+        bool includeMaxOutput = true)
+    {
+        WriteRegister(memory, 0, ContextRegisterOffset.VgtGsOnchipCntl, 0);
+        WriteRegister(memory, 1, ContextRegisterOffset.GeNggSubgroupCntl, 0);
+        WriteRegister(memory, 2, ContextRegisterOffset.SpiVsOutConfig, vertexOutputConfiguration);
+        WriteRegister(memory, 3, ContextRegisterOffset.PaClVsOutCntl, 0);
+        if (includeMaxOutput)
+        {
+            WriteRegister(memory, 4, ContextRegisterOffset.GeMaxOutputPerSubgroup, 1);
+        }
+    }
+
+    private static void WriteRegister(FakeCpuMemory memory, int index, uint offset, uint value)
+    {
+        var address = CxRegistersAddress + (ulong)(index * 8);
+        WriteUInt32(memory, address, offset);
+        WriteUInt32(memory, address + sizeof(uint), value);
+    }
+
+    private static ModuleManager CreateManager()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        Assert.True(manager.TryGetExport("NKIzURsgV7I", out var export));
+        Assert.Equal("sceAgcGetGsOversubscription", export.Name);
+        Assert.Equal("libSceAgc", export.LibraryName);
+        Assert.Equal(Generation.Gen5, export.Target);
+        return manager;
+    }
+
+    private static void AssertOutput(FakeCpuMemory memory, uint userConfig, uint shaderResources)
+    {
+        Assert.Equal(UserConfigRegisterOffset.ParameterOversubscription, ReadUInt32(memory, OutputAddress));
+        Assert.Equal(userConfig, ReadUInt32(memory, OutputAddress + sizeof(uint)));
+        Assert.Equal(ShaderRegisterOffset.SpiShaderPgmRsrc4Gs, ReadUInt32(memory, OutputAddress + 2 * sizeof(uint)));
+        Assert.Equal(shaderResources, ReadUInt32(memory, OutputAddress + 3 * sizeof(uint)));
+    }
+
+    private static uint ReadUInt32(FakeCpuMemory memory, ulong address)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        Assert.True(memory.TryRead(address, bytes));
+        return BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+    }
+
+    private static void WriteUInt32(FakeCpuMemory memory, ulong address, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        Assert.True(memory.TryWrite(address, bytes));
+    }
+
+    private static void WriteUInt64(FakeCpuMemory memory, ulong address, ulong value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        Assert.True(memory.TryWrite(address, bytes));
     }
 }

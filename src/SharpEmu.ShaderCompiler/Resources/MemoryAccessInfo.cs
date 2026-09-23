@@ -155,6 +155,12 @@ public sealed class MemoryAccessTable
                     table.Add(FromGlobal(instruction, global));
                     break;
                 case Gen5ImageControl image:
+                    // BVH queries are lowered to a defined conservative miss by
+                    // the backends. They do not read a T# or S# descriptor, so
+                    // keeping them in the image-access table would make resource
+                    // tracking validate a handle that the emitted shader never uses.
+                    if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
+                        break;
                     table.Add(FromImage(instruction, image));
                     break;
                 case Gen5DataShareControl share:
@@ -237,6 +243,7 @@ public sealed class MemoryAccessTable
     private static MemoryAccessInfo FromGlobal(Gen5ShaderInstruction instruction, Gen5GlobalMemoryControl control)
     {
         var opcode = instruction.Opcode;
+        var scratch = opcode.StartsWith("Scratch", StringComparison.Ordinal);
         var access = opcode.Contains("Atomic", StringComparison.Ordinal) ? MemoryAccess.Atomic
             : opcode.Contains("Store", StringComparison.Ordinal) ? MemoryAccess.Write
             : MemoryAccess.Read;
@@ -245,11 +252,9 @@ public sealed class MemoryAccessTable
         {
             Pc = instruction.Pc,
             Opcode = opcode,
-            Kind = opcode.StartsWith("Scratch", StringComparison.Ordinal)
-                ? MemoryResourceKind.Scratch
-                : control.UsesFlatAddress
-                    ? MemoryResourceKind.Flat
-                    : MemoryResourceKind.Global,
+            Kind = scratch ? MemoryResourceKind.Scratch
+                : control.UsesFlatAddress ? MemoryResourceKind.Flat
+                : MemoryResourceKind.Global,
             Access = access,
             Offset = unchecked((uint)control.OffsetBytes),
             DataDwords = Math.Max(control.DwordCount, 1u),

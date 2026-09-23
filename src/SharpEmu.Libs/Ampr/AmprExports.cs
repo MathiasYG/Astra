@@ -151,6 +151,17 @@ public static class AmprExports
     }
 
     [SysAbiExport(
+        Nid = "EDq5bqCqYpA",
+        ExportName = "sceAmprAmmCommandBufferConstructor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferConstructor(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "a8uLzYY--tM",
         ExportName = "sceAmprAprCommandBufferConstructor",
         Target = Generation.Gen5,

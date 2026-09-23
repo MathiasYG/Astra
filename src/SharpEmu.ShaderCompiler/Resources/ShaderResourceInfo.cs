@@ -52,6 +52,9 @@ public sealed class BufferResource
     public bool Atomic { get; set; }
     public bool Formatted { get; set; }
     public bool Scalar { get; set; }
+    // The descriptor words are loaded by the shader from a dynamic address rather
+    // than from the host's fixed descriptor array.
+    public bool DynamicDescriptor { get; set; }
 
     public BufferResource Clone() => (BufferResource)MemberwiseClone();
 }
@@ -93,8 +96,22 @@ public sealed class SamplerResource
     public uint FirstUsePc { get; set; }
     public bool ForcePointFiltering { get; set; }
     public bool DepthCompare { get; set; }
+    public uint IndirectRoot { get; set; } = DescriptorConstants.NoIndex;
+    public uint IndirectMappingOffset { get; set; }
+    public uint IndirectSearchIterations { get; set; }
+    public List<uint> IndirectResources { get; set; } = [];
 
-    public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
+    public SamplerResource Clone() => new()
+    {
+        Source = Source,
+        FirstUsePc = FirstUsePc,
+        ForcePointFiltering = ForcePointFiltering,
+        DepthCompare = DepthCompare,
+        IndirectRoot = IndirectRoot,
+        IndirectMappingOffset = IndirectMappingOffset,
+        IndirectSearchIterations = IndirectSearchIterations,
+        IndirectResources = [.. IndirectResources],
+    };
 }
 
 public sealed class SampledImagePair
@@ -142,6 +159,10 @@ public sealed record StageOutput(StageOutputKind Kind, uint Index, uint Location
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
+    // Keep the dense image table above the minimum descriptor count used by
+    // ordinary shaders.  Resource plans can legitimately combine static images
+    // with several indirect descriptor records; Vulkan binding arrays are sized
+    // from this table and do not require the old 32-entry ceiling.
     public const int MaxImages = 64;
     public const int MaxSamplers = 32;
     public const int MaxSampledPairs = 64;
@@ -183,6 +204,32 @@ public sealed record IndirectImageSelector(
     uint SelectorOffset,
     uint KeyArgument)
 {
+    // Most AGC descriptor tables use a 32-byte heap record addressed by key << 5.
+    // Some engines keep the key table and descriptor records at different strides;
+    // these values describe that layout while retaining the legacy defaults.
+    public uint HeapStride { get; init; } = 32;
+    public uint HeapOffset { get; init; }
+    // A descriptor array is indexed directly by the byte offset carried by the
+    // shader, rather than by a material-table key.  The host enumerates records
+    // at HeapStride while the translated shader uses that offset as its key.
+    public bool DescriptorArray { get; init; }
+    // The descriptor records may live behind a raw device-address handle rather
+    // than a scalar-buffer descriptor.  The materializer reads those records
+    // through the guest memory reader when this is set.
+    public bool HeapIsAddress { get; init; }
+    // Optional per-dword layout for descriptors assembled from a structured record.
+    // Values are absolute byte offsets within the record; uint.MaxValue selects the
+    // corresponding table/static value instead.
+    public IReadOnlyList<uint>? DescriptorHeapOffsets { get; init; }
+    // A descriptor field may be derived from its heap word through a constant
+    // bit-mask.  uint.MaxValue means the heap word is used unchanged.
+    public IReadOnlyList<uint>? DescriptorHeapMasks { get; init; }
+    // A loop-carried descriptor can have more than one heap field for a dword.
+    // The materializer reads every alternative and only accepts the descriptor when
+    // all sources agree, preserving strict-mode safety across control-flow paths.
+    public IReadOnlyList<uint[]>? DescriptorHeapAlternates { get; init; }
+    public IReadOnlyList<uint>? DescriptorTableSlots { get; init; }
+    public IReadOnlyList<uint>? DescriptorStaticValues { get; init; }
     public IndirectSelectorValues? SelectorValues { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
     public bool Dense { get; init; }
@@ -197,8 +244,10 @@ public sealed record DirectImageCandidate(uint Offset, uint Source);
 public sealed class DescriptorSource
 {
     public ScalarValue[] Dwords { get; init; } = [];
+    public bool DynamicBuffer { get; init; }
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    public IndirectImageSelector? IndirectSampler { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.

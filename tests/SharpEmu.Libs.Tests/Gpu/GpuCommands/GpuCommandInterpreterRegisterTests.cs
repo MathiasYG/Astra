@@ -200,6 +200,31 @@ public sealed class GpuCommandInterpreterRegisterTests
     }
 
     [Fact]
+    public void NativeShaderTable_StoresReservedShaderRegisterPrefix()
+    {
+        var runner = new StreamRunner();
+        runner.Host.WriteWords(Table, Pairs((0x1, 0)));
+
+        runner.Run(Table5(PacketOpcode.SetShaderRegisterIndirect, Table, 1));
+
+        Assert.Equal(0u, runner.Interpreter.Registers.Shader[0x1]);
+        Assert.Equal(0ul, runner.Interpreter.TypedRegisters.Shader.Pixel.Address);
+        Assert.Single(runner.Interpreter.Registers.Shader);
+    }
+
+    [Fact]
+    public void NativeUserConfigTable_AcceptsWriteToReadOnlyGsPrimitiveCounter()
+    {
+        var runner = new StreamRunner();
+        runner.Host.WriteWords(Table, Pairs((UserConfigRegisterOffset.CpVgtGsPrimCountHi, 0)));
+
+        runner.Run(Table5(PacketOpcode.SetUserConfigRegisterIndirect, Table, 1));
+
+        Assert.Equal(0u, runner.Interpreter.TypedRegisters.UserConfig.PrimitiveType);
+        Assert.Equal(0u, runner.Interpreter.TypedRegisters.UserConfig.ObjectId);
+    }
+
+    [Fact]
     public void WrappedTables_CarryTheCountFirst()
     {
         var runner = new StreamRunner();
