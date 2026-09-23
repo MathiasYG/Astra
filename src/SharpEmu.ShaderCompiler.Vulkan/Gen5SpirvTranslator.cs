@@ -2119,12 +2119,14 @@ public static partial class Gen5SpirvTranslator
                 continueLabel);
             var observedFloat = Bitcast(_floatType, observed);
             var valueFloat = Bitcast(_floatType, value);
+            var candidateFloat = Ext(maxValue ? 40u : 37u, _floatType, valueFloat, observedFloat);
+            var candidate = Bitcast(_uintType, candidateFloat);
             var replace = _module.AddInstruction(
                 maxValue ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
                 _boolType,
                 valueFloat,
                 observedFloat);
-            var next = _module.AddInstruction(SpirvOp.Select, _uintType, replace, value, observed);
+            var next = _module.AddInstruction(SpirvOp.Select, _uintType, replace, candidate, observed);
 
             _module.AddStatement(
                 SpirvOp.AtomicCompareExchange,

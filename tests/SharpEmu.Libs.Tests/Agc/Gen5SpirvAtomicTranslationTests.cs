@@ -36,17 +36,19 @@ public sealed class Gen5SpirvAtomicTranslationTests
     }
 
     [Theory]
-    [InlineData(0xE0FC4000u, SpirvOp.FOrdLessThan)]
-    [InlineData(0xE1004000u, SpirvOp.FOrdGreaterThan)]
-    public void BufferFloatAtomics_EmitCompareExchangeLoop(uint word, SpirvOp compareOp)
+    [InlineData(0xE0FC4000u, SpirvOp.FOrdLessThan, 37u)]
+    [InlineData(0xE1004000u, SpirvOp.FOrdGreaterThan, 40u)]
+    public void BufferFloatAtomics_EmitCompareExchangeLoop(uint word, SpirvOp compareOp, uint minMaxOperation)
     {
-        var opcodes = CompileComputeOpcodes(
+        var spirv = CompileComputeSpirv(
             [word, 0x80000100],
             BufferDescriptorRegisters());
+        var opcodes = CollectOpcodes(spirv);
 
         Assert.Contains((ushort)SpirvOp.AtomicLoad, opcodes);
         Assert.Contains((ushort)SpirvOp.AtomicCompareExchange, opcodes);
         Assert.Contains((ushort)compareOp, opcodes);
+        Assert.Contains(minMaxOperation, CollectExtendedInstructionNumbers(spirv));
     }
 
     [Fact]
@@ -246,6 +248,26 @@ public sealed class Gen5SpirvAtomicTranslationTests
         }
 
         return opcodes;
+    }
+
+    private static HashSet<uint> CollectExtendedInstructionNumbers(byte[] spirv)
+    {
+        var instructions = new HashSet<uint>();
+        for (var offset = 5 * sizeof(uint); offset + sizeof(uint) <= spirv.Length;)
+        {
+            var word = BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset, sizeof(uint)));
+            var wordCount = Math.Max((int)(word >> 16), 1);
+            if ((ushort)word == (ushort)SpirvOp.ExtInst && wordCount >= 5)
+            {
+                instructions.Add(BinaryPrimitives.ReadUInt32LittleEndian(
+                    spirv.AsSpan(offset + (4 * sizeof(uint)), sizeof(uint))));
+            }
+
+            offset += wordCount * sizeof(uint);
+        }
+
+        return instructions;
     }
 
     private static bool ContainsConstant(byte[] spirv, uint expected)
