@@ -42,7 +42,7 @@ public sealed class ScalarValueGraphTests
     }
 
     [Fact]
-    public void NullPlanningAddressReadProducesZeroDescriptorWord()
+    public void NullPlanningAddressReadRemainsAFailedGuestRead()
     {
         var program = Program(
             MoveScalar(0, 4, 0),
@@ -57,19 +57,18 @@ public sealed class ScalarValueGraphTests
 
         Assert.Single(plan.TableReads);
         Assert.True(plan.Memory.Find(8)!.PlanningOnly);
-        Assert.True(RuntimeValueEvaluator.FlattenResourceTable(
+        Assert.False(RuntimeValueEvaluator.FlattenResourceTable(
             plan,
             Inputs([], readMemory: static (ulong _, out uint word) =>
             {
                 word = 0;
                 return false;
             }),
-            out var table));
-        Assert.Equal([0u], table);
+            out _));
     }
 
     [Fact]
-    public void UndefinedPlanningAddressReadProducesZeroDescriptorWord()
+    public void UndefinedPlanningAddressReadRemainsAFailedGuestRead()
     {
         var program = Program(
             MoveScalar(0, 4, 0),
@@ -84,15 +83,14 @@ public sealed class ScalarValueGraphTests
 
         Assert.Single(plan.TableReads);
         Assert.True(plan.Memory.Find(8)!.PlanningOnly);
-        Assert.True(RuntimeValueEvaluator.FlattenResourceTable(
+        Assert.False(RuntimeValueEvaluator.FlattenResourceTable(
             plan,
             Inputs([], readMemory: static (ulong _, out uint word) =>
             {
                 word = 0;
                 return false;
             }),
-            out var table));
-        Assert.Equal([0u], table);
+            out _));
     }
 
     [Fact]
