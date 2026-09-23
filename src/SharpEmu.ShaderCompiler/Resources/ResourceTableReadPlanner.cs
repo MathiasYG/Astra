@@ -6,8 +6,9 @@ using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-// Collects the scalar reads reachable from descriptor handles. Reads with an immediate
-// offset receive compact flattened-table slots; dynamic offsets stay explicit.
+// Collects scalar reads reachable from descriptor handles. Host-evaluable reads with
+// immediate offsets receive compact flattened-table slots; dynamic or unresolved
+// addresses stay explicit for shader-side execution.
 public sealed class ResourceTableReadPlanner
 {
     private readonly ScalarValueGraph _graph;
@@ -17,6 +18,7 @@ public sealed class ResourceTableReadPlanner
     private readonly List<ScalarValue> _dynamicReads = [];
     private readonly List<(ScalarValue Read, uint Slot)> _patches = [];
     private readonly Dictionary<int, uint> _flattenedSlotByMemoryIndex = [];
+    private readonly HashSet<int> _explicitAddressReadMemoryIndices = [];
     private readonly List<ScalarValue> _visiting = [];
     private readonly HashSet<ScalarValue> _visited = [];
     private readonly Dictionary<ScalarValue, ScalarValue> _replacements = [];
@@ -51,6 +53,23 @@ public sealed class ResourceTableReadPlanner
                 {
                     Fail(_graph.Memory[value.MemoryIndex].Pc, $"{value.Kind} has incompatible scalar memory metadata");
                 }
+            }
+
+            // A scalar-address read is only safe to flatten when its address is
+            // available to the host at resource-materialization time. In
+            // particular, a loop-carried address may be a valid run-time shader
+            // value while having no single host-evaluable value. Make the choice
+            // per memory instruction, since one instruction can have multiple
+            // graph nodes from different data-flow iterations. A non-invariant
+            // phi is not a host-evaluable address even when its defined arms are
+            // individually uniform: materialization has no guest predecessor for
+            // a loop-carried or otherwise ambiguous merge.
+            if (value.Kind == ScalarValueKind.ScalarAddressWord && IsRawRead(value) &&
+                value.Operands.Length >= 2 && value.Operands[1].IsConstant &&
+                (!new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, 0).Validate(value) ||
+                 ContainsNonInvariantPhi(value.Operands[0]) || ContainsNonInvariantPhi(value.Operands[1])))
+            {
+                _explicitAddressReadMemoryIndices.Add(value.MemoryIndex);
             }
         }
 
@@ -95,6 +114,33 @@ public sealed class ResourceTableReadPlanner
     private bool IsRawRead(ScalarValue value) =>
         new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, 0).IsRawRead(value);
 
+    private bool ContainsNonInvariantPhi(ScalarValue root)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(root);
+        while (pending.Count != 0)
+        {
+            var current = pending.Pop();
+            if (!visited.Add(current))
+            {
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.Phi && _graph.ResolveInvariantPhi(current) is null)
+            {
+                return true;
+            }
+
+            foreach (var operand in current.Operands)
+            {
+                pending.Push(operand);
+            }
+        }
+
+        return false;
+    }
+
     private void Collect(ScalarValue value, uint usePc)
     {
         if (value.IsConstant)
@@ -133,10 +179,15 @@ public sealed class ResourceTableReadPlanner
         var offset = value.Operands[1];
         if (!offset.IsConstant)
         {
-            if (!_dynamicReads.Contains(value))
-            {
-                _dynamicReads.Add(value);
-            }
+            AddDynamicRead(value);
+
+            return;
+        }
+
+        if (value.Kind == ScalarValueKind.ScalarAddressWord &&
+            _explicitAddressReadMemoryIndices.Contains(value.MemoryIndex))
+        {
+            AddDynamicRead(value);
 
             return;
         }
@@ -153,6 +204,14 @@ public sealed class ResourceTableReadPlanner
         var newSlot = (uint)_reads.Count;
         _reads.Add(new ResourceTableRead(value, newSlot));
         _patches.Add((value, newSlot));
+    }
+
+    private void AddDynamicRead(ScalarValue value)
+    {
+        if (!_dynamicReads.Contains(value))
+        {
+            _dynamicReads.Add(value);
+        }
     }
 
     // Equivalent reads share one host read, but each instruction must load its destination

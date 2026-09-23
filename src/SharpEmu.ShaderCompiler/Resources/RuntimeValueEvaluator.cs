@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System;
 using System.Collections.Generic;
 
 namespace SharpEmu.ShaderCompiler.Resources;
@@ -10,12 +11,15 @@ namespace SharpEmu.ShaderCompiler.Resources;
 public sealed class RuntimeValueEvaluator
 {
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
+    private const int NoPredecessor = int.MinValue;
+    private const int AmbiguousPredecessor = int.MinValue + 1;
 
     private readonly ShaderResourcePlan _plan;
     private readonly ResourceRuntimeInputs _inputs;
     private readonly IReadOnlyList<byte> _cleanFlatSlots;
     private readonly RuntimeValueEvaluator? _cleanEvaluator;
     private readonly ScalarValue? _activeMask;
+    private readonly IReadOnlyList<int>? _phiPredecessors;
     private readonly Dictionary<ScalarValue, ulong> _cache;
     private readonly List<ScalarValue> _visiting;
 
@@ -24,8 +28,9 @@ public sealed class RuntimeValueEvaluator
         ResourceRuntimeInputs inputs,
         IReadOnlyList<byte>? cleanFlatSlots = null,
         RuntimeValueEvaluator? cleanEvaluator = null,
-        ScalarValue? activeMask = null)
-        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, [], [])
+        ScalarValue? activeMask = null,
+        IReadOnlyList<int>? phiPredecessors = null)
+        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, phiPredecessors, [], [])
     {
     }
 
@@ -35,8 +40,9 @@ public sealed class RuntimeValueEvaluator
         ResourceRuntimeInputs inputs,
         IReadOnlyList<byte>? cleanFlatSlots = null,
         RuntimeValueEvaluator? cleanEvaluator = null,
-        ScalarValue? activeMask = null)
-        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, scratch.Values, scratch.Visiting)
+        ScalarValue? activeMask = null,
+        IReadOnlyList<int>? phiPredecessors = null)
+        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, phiPredecessors, scratch.Values, scratch.Visiting)
     {
     }
 
@@ -46,6 +52,7 @@ public sealed class RuntimeValueEvaluator
         IReadOnlyList<byte>? cleanFlatSlots,
         RuntimeValueEvaluator? cleanEvaluator,
         ScalarValue? activeMask,
+        IReadOnlyList<int>? phiPredecessors,
         Dictionary<ScalarValue, ulong> cache,
         List<ScalarValue> visiting)
     {
@@ -56,6 +63,7 @@ public sealed class RuntimeValueEvaluator
         _cleanFlatSlots = cleanFlatSlots ?? [];
         _cleanEvaluator = cleanEvaluator;
         _activeMask = activeMask;
+        _phiPredecessors = phiPredecessors;
     }
 
     public bool Evaluate(ScalarValue value, out uint result)
@@ -133,12 +141,28 @@ public sealed class RuntimeValueEvaluator
             case ScalarValueKind.Phi:
             {
                 var invariant = _plan.Graph.ResolveInvariantPhi(value);
-                return invariant is not null && EvaluateWide(invariant, out result);
+                if (invariant is not null)
+                {
+                    return EvaluateWide(invariant, out result);
+                }
+
+                if (_phiPredecessors is not null &&
+                    (uint)value.PhiBlock < (uint)_phiPredecessors.Count &&
+                    _phiPredecessors[value.PhiBlock] is var predecessor && predecessor != AmbiguousPredecessor)
+                {
+                    var operandIndex = Array.IndexOf(value.PhiPredecessors, predecessor);
+                    if (operandIndex >= 0)
+                    {
+                        return EvaluateWide(value.Operands[operandIndex], out result);
+                    }
+                }
+
+                return false;
             }
             case ScalarValueKind.FirstLane:
             {
                 using var scratch = RuntimeEvaluationScratch.Rent();
-                return new RuntimeValueEvaluator(scratch, _plan, _inputs, _cleanFlatSlots, _cleanEvaluator, value.Operands[1])
+                return new RuntimeValueEvaluator(scratch, _plan, _inputs, _cleanFlatSlots, _cleanEvaluator, value.Operands[1], _phiPredecessors)
                     .EvaluateWide(value.Operands[0], out result);
             }
             case ScalarValueKind.ResourceTableWord:
@@ -325,12 +349,23 @@ public sealed class RuntimeValueEvaluator
             return false;
         }
 
+        IReadOnlyList<int>? phiPredecessors = null;
+        if (plan.ResourceBranches.Count != 0)
+        {
+            using var branchScratch = RuntimeEvaluationScratch.Rent();
+            var branchEvaluator = new RuntimeValueEvaluator(branchScratch, plan, inputs.WithReader(inputs.ReadCleanMemory));
+            var reachableSources = EvaluateActiveSources(plan, inputs, branchEvaluator, out var selectedPredecessors);
+            phiPredecessors = selectedPredecessors;
+            if (evaluateTable && plan.CanPruneResourceSources)
+            {
+                activeSources = reachableSources;
+            }
+        }
+
         using var cleanScratch = RuntimeEvaluationScratch.Rent();
         using var scratch = RuntimeEvaluationScratch.Rent();
-        var cleanEvaluator = new RuntimeValueEvaluator(cleanScratch, plan, inputs.WithReader(inputs.ReadCleanMemory));
-        var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs, cleanFlatSlots, cleanEvaluator);
-        if (evaluateTable && plan.ResourceBranches.Count != 0)
-            activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator);
+        var cleanEvaluator = new RuntimeValueEvaluator(cleanScratch, plan, inputs.WithReader(inputs.ReadCleanMemory), phiPredecessors: phiPredecessors);
+        var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs, cleanFlatSlots, cleanEvaluator, phiPredecessors: phiPredecessors);
         var evaluated = new List<DescriptorWords>(sources.Count);
         foreach (var sourceIndex in sources)
         {
@@ -374,7 +409,11 @@ public sealed class RuntimeValueEvaluator
         return true;
     }
 
-    private static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, RuntimeValueEvaluator cleanEvaluator)
+    private static bool[] EvaluateActiveSources(
+        ShaderResourcePlan plan,
+        ResourceRuntimeInputs inputs,
+        RuntimeValueEvaluator cleanEvaluator,
+        out int[] selectedPredecessors)
     {
         var activeSources = new bool[plan.DescriptorSources.Count];
         Array.Fill(activeSources, true);
@@ -382,6 +421,10 @@ public sealed class RuntimeValueEvaluator
             foreach (var source in block.Sources) activeSources[source] = false;
 
         var visited = new bool[plan.ResourceBranches.Count];
+        var predecessorMap = new int[plan.ResourceBranches.Count];
+        Array.Fill(predecessorMap, NoPredecessor);
+        predecessorMap[0] = -1;
+        selectedPredecessors = predecessorMap;
         var pending = new Stack<int>();
         pending.Push(0);
         while (pending.TryPop(out var blockIndex))
@@ -392,13 +435,31 @@ public sealed class RuntimeValueEvaluator
             foreach (var source in block.Sources) activeSources[source] = true;
             // An unreadable predicate keeps both paths; never use the general reader to choose one.
             if (block.Condition is { } condition && inputs.ReadCleanMemory is not null && cleanEvaluator.Evaluate(condition, out var value))
-                pending.Push(block.Successors[value != 0 ? 0 : 1]);
+                AddSuccessor(blockIndex, block.Successors[value != 0 ? 0 : 1]);
             else
-                foreach (var successor in block.Successors) pending.Push(successor);
+                foreach (var successor in block.Successors) AddSuccessor(blockIndex, successor);
         }
 
-        ResourceMaterializationProfile.RecordActivity(activeSources);
+        if (plan.CanPruneResourceSources)
+        {
+            ResourceMaterializationProfile.RecordActivity(activeSources);
+        }
+
         return activeSources;
+
+        void AddSuccessor(int predecessor, int successor)
+        {
+            var incoming = predecessorMap[successor];
+            if (incoming == NoPredecessor)
+            {
+                predecessorMap[successor] = predecessor;
+                pending.Push(successor);
+            }
+            else if (incoming != predecessor && incoming != AmbiguousPredecessor)
+            {
+                predecessorMap[successor] = AmbiguousPredecessor;
+            }
+        }
     }
 
     public static bool EvaluateDescriptorSource(ShaderResourcePlan plan, uint source, ResourceRuntimeInputs inputs, out DescriptorWords result)

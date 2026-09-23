@@ -328,7 +328,10 @@ public static class ResourceMaterializer
             {
                 if (!evaluator.Evaluate(source.Dwords[dword], out _))
                 {
-                    return $"descriptor source {sourceIndex} dword {dword} cannot be evaluated: " +
+                    var dynamicBufferNote = string.IsNullOrEmpty(source.DynamicBufferRejectionReason)
+                        ? string.Empty
+                        : $" Dynamic-buffer recognition rejected it: {source.DynamicBufferRejectionReason}.";
+                    return $"descriptor source {sourceIndex} dword {dword} cannot be evaluated:{dynamicBufferNote} " +
                         DescribeEvaluationValue(plan, inputs, evaluator, source.Dwords[dword]);
                 }
             }

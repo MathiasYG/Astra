@@ -426,10 +426,15 @@ public sealed partial class ResourceTracker
         }
 
         var source = MakeSource(handle, width, sampler, sampleAdjust, pc, imageR128);
-        if (expected == ScalarValueKind.BufferHandle && TryMakeDynamicBufferSource(handle, pc, out var dynamicSource))
+        if (expected == ScalarValueKind.BufferHandle)
         {
-            _info.UsesDeviceAddresses = true;
-            return InternSource(dynamicSource);
+            if (TryMakeDynamicBufferSource(handle, pc, out var dynamicSource, out var rejectionReason))
+            {
+                _info.UsesDeviceAddresses = true;
+                return InternSource(dynamicSource);
+            }
+
+            source.DynamicBufferRejectionReason = rejectionReason;
         }
         if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.BufferHandle)
         {
@@ -453,43 +458,80 @@ public sealed partial class ResourceTracker
     // descriptor table. The dynamic offset cannot be evaluated by the host at
     // compile time, so retain the descriptor in scalar registers and lower the
     // actual buffer access through the device-address page table.
-    private bool TryMakeDynamicBufferSource(ScalarValue handle, uint pc, out DescriptorSource source)
+    private bool TryMakeDynamicBufferSource(
+        ScalarValue handle,
+        uint pc,
+        out DescriptorSource source,
+        out string rejectionReason)
     {
         source = null!;
-        if (handle.Kind != ScalarValueKind.BufferHandle || handle.Operands.Length != 4 ||
-            handle.Operands.Any(value => value.Kind is not (ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord) ||
-                value.MemoryIndex < 0 || value.MemoryIndex >= _plan.Memory.Count))
+        rejectionReason = string.Empty;
+        if (handle.Kind != ScalarValueKind.BufferHandle || handle.Operands.Length != 4)
         {
+            rejectionReason = "the handle is not four scalar dwords";
             return false;
         }
 
-        var first = handle.Operands[0];
-        var firstMemory = _plan.Memory[first.MemoryIndex];
-        var instruction = _graph.Program.Instructions.FirstOrDefault(candidate => candidate.Pc == firstMemory.Pc);
-        var isScalarAddress = first.Kind == ScalarValueKind.ScalarAddressWord;
-        if (instruction?.Control is not Gen5ScalarMemoryControl control ||
-            (isScalarAddress
-                ? !instruction.Opcode.StartsWith("SLoadDwordx4", StringComparison.Ordinal)
-                : !instruction.Opcode.StartsWith("SBufferLoadDwordx4", StringComparison.Ordinal)) ||
-            control.DestinationCount < 4 || control.DynamicOffsetRegister is null || first.Operands.Length < 2)
-        {
-            return false;
-        }
-
-        var addressHandle = first.Operands[0];
-        var offset = first.Operands[1];
+        var reads = new HashSet<ScalarValue>();
         for (var component = 0; component < handle.Operands.Length; component++)
         {
-            var read = handle.Operands[component];
-            var memory = _plan.Memory[read.MemoryIndex];
-            if ((isScalarAddress && memory.Kind != MemoryResourceKind.ScalarAddress) ||
-                (!isScalarAddress && memory.Kind != MemoryResourceKind.ScalarBuffer) ||
-                memory.Pc != firstMemory.Pc || memory.ComponentIndex != (uint)component ||
-                memory.Offset != firstMemory.Offset + (uint)component * sizeof(uint) ||
-                !_graph.Equivalent(addressHandle, read.Operands[0]) ||
-                !_graph.Equivalent(offset, read.Operands[1]) ||
-                !MemoryIndexBelongsTo(read.MemoryIndex, read))
+            if (!TryCollectScalarLoadResults(handle.Operands[component], reads, out var hasValidatedLeaf, out var reason))
             {
+                rejectionReason = $"descriptor dword {component}: {reason}";
+                return false;
+            }
+
+            if (!hasValidatedLeaf)
+            {
+                rejectionReason = $"descriptor dword {component} has no scalar-load or flattened-table value";
+                return false;
+            }
+        }
+
+    // Descriptor words can be assembled from separate loads, flattened table
+    // values, calculated scalar values, or loop-carried scalar values. The
+    // shader already has each word in its scalar register at the buffer access.
+    // Direct constant words stay eligible for host specialization; a constant
+    // arm in a loop-carried Phi is accepted only when another word proves the
+    // descriptor is runtime-loaded.
+        if (reads.Count == 0)
+        {
+            rejectionReason = "none of the descriptor dwords comes from a runtime scalar load";
+            return false;
+        }
+
+        foreach (var read in reads)
+        {
+            if (read.MemoryIndex < 0 || read.MemoryIndex >= _plan.Memory.Count)
+            {
+                rejectionReason = $"scalar-load value #{read.Id} has invalid memory index {read.MemoryIndex}";
+                return false;
+            }
+
+            if (read.Operands.Length < 2)
+            {
+                rejectionReason = $"scalar-load value #{read.Id} has an incomplete address/offset pair";
+                return false;
+            }
+
+            var memory = _plan.Memory[read.MemoryIndex];
+            var expectedKind = read.Kind == ScalarValueKind.ScalarAddressWord
+                ? MemoryResourceKind.ScalarAddress
+                : MemoryResourceKind.ScalarBuffer;
+            var isScalarAddress = read.Kind == ScalarValueKind.ScalarAddressWord;
+            var instruction = _graph.Program.Instructions.FirstOrDefault(candidate => candidate.Pc == memory.Pc);
+            if (memory.Kind != expectedKind || memory.Access != MemoryAccess.Read || memory.DataBits != 32 ||
+                memory.DataDwords != 1 || memory.PlanningOnly ||
+                instruction?.Control is not Gen5ScalarMemoryControl control ||
+                (isScalarAddress
+                    ? !instruction.Opcode.StartsWith("SLoadDword", StringComparison.Ordinal)
+                    : !instruction.Opcode.StartsWith("SBufferLoadDword", StringComparison.Ordinal)) ||
+                memory.ComponentIndex >= control.DestinationCount ||
+                memory.ComponentCount != control.DestinationCount ||
+                memory.ComponentIndex >= instruction.Destinations.Count ||
+                memory.Offset != unchecked((uint)control.ImmediateOffsetBytes + memory.ComponentIndex * sizeof(uint)))
+            {
+                rejectionReason = $"scalar-load value #{read.Id} does not match a live 32-bit scalar-load result";
                 return false;
             }
         }
@@ -499,6 +541,130 @@ public sealed partial class ResourceTracker
             Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray(),
             DynamicBuffer = true,
         };
+        return true;
+    }
+
+    // A descriptor word can pass through loop-carried phis before a buffer
+    // operation consumes it. Accept values the guest scalar file can produce:
+    // validated flattened table words, scalar-load results, and scalar
+    // operations/selects over those leaves. Direct constant words remain for
+    // host specialization; a Phi with only constant/self arms is accepted as a
+    // shader-resident word only when another descriptor word has a runtime
+    // scalar load.
+    private bool TryCollectScalarLoadResults(
+        ScalarValue value,
+        HashSet<ScalarValue> reads,
+        out bool hasValidatedLeaf,
+        out string rejectionReason)
+    {
+        hasValidatedLeaf = false;
+        rejectionReason = string.Empty;
+        if (value.Type != ScalarValueType.U32)
+        {
+            rejectionReason = $"expected U32, got {value.Type}";
+            return false;
+        }
+
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        var hasPhi = false;
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current))
+            {
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.Phi)
+            {
+                if (current.Type != ScalarValueType.U32 || current.Operands.Length == 0 ||
+                    current.PhiPredecessors.Length != current.Operands.Length)
+                {
+                    rejectionReason = $"malformed Phi value #{current.Id}";
+                    return false;
+                }
+
+                hasPhi = true;
+                foreach (var operand in current.Operands)
+                {
+                    pending.Push(operand);
+                }
+
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.Operation &&
+                RuntimeValueValidator.IsUniformOperation(current.Operation) &&
+                current.Operands.Length != 0)
+            {
+                foreach (var operand in current.Operands)
+                {
+                    pending.Push(operand);
+                }
+
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.Select && current.Operands.Length == 3)
+            {
+                foreach (var operand in current.Operands)
+                {
+                    pending.Push(operand);
+                }
+
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.ResourceTableWord)
+            {
+                if (current.Payload >= (ulong)_plan.TableReads.Count)
+                {
+                    rejectionReason = $"flattened-table word #{current.Id} has an invalid slot";
+                    return false;
+                }
+
+                hasValidatedLeaf = true;
+                continue;
+            }
+
+            if (current.IsConstant)
+            {
+                continue;
+            }
+
+            if (current.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
+            {
+                if (current.MemoryIndex < 0 || current.MemoryIndex >= _plan.Memory.Count)
+                {
+                    rejectionReason = $"scalar-load value #{current.Id} has invalid memory index {current.MemoryIndex}";
+                    return false;
+                }
+
+                reads.Add(current);
+                hasValidatedLeaf = true;
+                continue;
+            }
+
+            rejectionReason = $"unsupported value {current.Kind} {current.Operation} at node #{current.Id}";
+            return false;
+        }
+
+        if (!hasValidatedLeaf && hasPhi)
+        {
+            // A loop-carried descriptor word may stay on its initialized
+            // scalar value on every path observed by this component. Accept
+            // that word only when the descriptor has other validated runtime
+            // scalar-load words (checked by TryMakeDynamicBufferSource).
+            hasValidatedLeaf = true;
+        }
+
+        if (!hasValidatedLeaf)
+        {
+            rejectionReason = "the value has no direct scalar-load or flattened-table leaf";
+            return false;
+        }
+
         return true;
     }
 

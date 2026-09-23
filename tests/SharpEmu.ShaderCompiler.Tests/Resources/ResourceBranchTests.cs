@@ -53,6 +53,36 @@ public sealed class ResourceBranchTests
     }
 
     [Fact]
+    public void DescriptorPhiUsesTheRuntimeSelectedPredecessor()
+    {
+        var plan = Extract(Program(
+            Sopc(0, "SCmpEqU32", Gen5Operand.Scalar(8), Operand(1)),
+            Branch(4, "SCbranchScc1", 4),
+            MoveScalar(8, 0, 0x1000),
+            MoveScalar(12, 1, 0),
+            MoveScalar(16, 2, 256),
+            MoveScalar(20, 3, 0),
+            Branch(24, "SBranch", 3),
+            BufferLoad(40, 0),
+            BufferStore(44, 0),
+            EndProgram(52)), userDataBase: 8, userDataCount: 1);
+
+        Assert.NotEmpty(plan.ResourceBranches);
+        Assert.False(plan.CanPruneResourceSources);
+
+        var valid = Materialize(plan, [0], CleanRead);
+        Assert.Equal(0x1000u, Assert.Single(valid.Buffers)[0]);
+
+        var invalidSnapshot = new ResourceSnapshot();
+        var invalidSpecialization = new ResourceSpecialization();
+        Assert.False(ResourceMaterializer.Materialize(
+            plan,
+            Inputs([1], readCleanMemory: CleanRead),
+            ref invalidSnapshot,
+            ref invalidSpecialization));
+    }
+
+    [Fact]
     public void MissingCleanReaderKeepsBothPaths()
     {
         var snapshot = Materialize(Extract(ConditionalBuffers()), UserData(1), null);
@@ -77,7 +107,8 @@ public sealed class ResourceBranchTests
         var instructions = ConditionalBuffers().Instructions.ToArray();
         instructions[2] = atomic ? BufferAtomicAdd(8, 0) : BufferStore(8, 0);
         var plan = Extract(Program(instructions));
-        Assert.Empty(plan.ResourceBranches);
+        Assert.NotEmpty(plan.ResourceBranches);
+        Assert.False(plan.CanPruneResourceSources);
         var snapshot = Materialize(plan, UserData(1), CleanRead);
         Assert.Equal(0x1000u, snapshot.Buffers[0][0]);
         Assert.Equal(0x2000u, snapshot.Buffers[1][0]);

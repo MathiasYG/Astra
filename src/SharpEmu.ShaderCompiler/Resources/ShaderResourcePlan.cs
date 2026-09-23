@@ -35,6 +35,7 @@ public sealed class ShaderResourcePlan
     public IReadOnlyList<DescriptorSource> DescriptorSources { get; private set; } = [];
     public IReadOnlyList<uint> MaterializationSources { get; private set; } = [];
     public IReadOnlyList<ResourceBranchBlock> ResourceBranches { get; private set; } = [];
+    public bool CanPruneResourceSources { get; private set; }
     public IReadOnlyList<ResourceTableRead> TableReads { get; private set; } = [];
     public IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex { get; private set; } = new Dictionary<int, uint>();
     public IReadOnlyList<ScalarValue> DynamicReads { get; private set; } = [];
@@ -160,7 +161,8 @@ public sealed class ShaderResourcePlan
         }
 
         plan.CleanFlatSlots = cleanSlots;
-        plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
+        plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite, out var canPruneResourceSources);
+        plan.CanPruneResourceSources = canPruneResourceSources;
         plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
 
         // Each written handle owns three flattened slots after the table reads: base

@@ -5,8 +5,8 @@ using System.Collections.Generic;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-// Accepts a graph value only when every node down to its leaves is one the host can
-// evaluate per draw: user data, shader base, reads, invariant phis, uniform operations.
+// Accepts a graph value only when every reachable node is one the host can evaluate
+// per draw: user data, shader base, reads, predecessor-selected phis, uniform operations.
 public sealed class RuntimeValueValidator
 {
     private readonly ScalarValueGraph _graph;
@@ -85,7 +85,39 @@ public sealed class RuntimeValueValidator
             case ScalarValueKind.Phi:
             {
                 var invariant = _graph.ResolveInvariantPhi(value);
-                return invariant is not null && Validate(invariant);
+                if (invariant is not null)
+                {
+                    return Validate(invariant);
+                }
+
+                if (value.PhiPredecessors.Length != value.Operands.Length || value.Operands.Length == 0)
+                {
+                    return false;
+                }
+
+                var hasUndefinedOperand = false;
+                var hasDefinedOperand = false;
+                foreach (var operand in value.Operands)
+                {
+                    if (operand.IsUndefined)
+                    {
+                        hasUndefinedOperand = true;
+                        continue;
+                    }
+
+                    if (ReferenceEquals(operand, value))
+                    {
+                        continue;
+                    }
+
+                    hasDefinedOperand = true;
+                    if (!Validate(operand))
+                    {
+                        return false;
+                    }
+                }
+
+                return hasUndefinedOperand && hasDefinedOperand;
             }
             case ScalarValueKind.FirstLane:
                 return value.Operands.Length == 2 &&

@@ -245,6 +245,7 @@ public sealed class DescriptorSource
 {
     public ScalarValue[] Dwords { get; init; } = [];
     public bool DynamicBuffer { get; init; }
+    public string? DynamicBufferRejectionReason { get; set; }
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
     public IndirectImageSelector? IndirectSampler { get; init; }

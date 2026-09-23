@@ -7,13 +7,21 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 public sealed record ResourceBranchBlock(ScalarValue? Condition, int[] Successors, uint[] Sources)
 {
-    internal static IReadOnlyList<ResourceBranchBlock> Build(ShaderResourcePlan plan, Func<ScalarValue, ScalarValue> rewrite)
+    internal static IReadOnlyList<ResourceBranchBlock> Build(
+        ShaderResourcePlan plan,
+        Func<ScalarValue, ScalarValue> rewrite,
+        out bool canPruneResourceSources)
     {
-        // A shader write can change a predicate through an alias or a later loop iteration.
-        if (plan.Memory.Entries.Any(access => access.Access is MemoryAccess.Write or MemoryAccess.Atomic)) return [];
+        // A shader write can invalidate host-side resource pruning, but it does not prevent
+        // resolving a predecessor when the branch predicate is independent of guest memory.
+        canPruneResourceSources = !plan.Memory.Entries.Any(access => access.Access is MemoryAccess.Write or MemoryAccess.Atomic);
         var instructions = plan.Graph.Program.Instructions;
         if (instructions.Any(instruction => instruction.Opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64" or
-            "SCbranchJoin" or "SCbranchIFork" or "SCbranchGFork")) return [];
+            "SCbranchJoin" or "SCbranchIFork" or "SCbranchGFork"))
+        {
+            canPruneResourceSources = false;
+            return [];
+        }
 
         var flow = plan.Graph.ControlFlow;
         var blocks = new ResourceBranchBlock[flow.Blocks.Count];
@@ -37,7 +45,11 @@ public sealed record ResourceBranchBlock(ScalarValue? Condition, int[] Successor
                     if (plan.Graph.BranchConditions.TryGetValue(last.Pc, out var original))
                     {
                         var candidate = rewrite(original);
-                        if (plan.ValidateRuntimeValue(candidate)) condition = candidate;
+                        if (plan.ValidateRuntimeValue(candidate) &&
+                            (canPruneResourceSources || !DependsOnGuestMemory(candidate)))
+                        {
+                            condition = candidate;
+                        }
                     }
                 }
             }
@@ -60,6 +72,38 @@ public sealed record ResourceBranchBlock(ScalarValue? Condition, int[] Successor
             hasCondition |= condition is not null;
         }
 
-        return hasCondition ? blocks : [];
+        if (!hasCondition)
+        {
+            canPruneResourceSources = false;
+            return [];
+        }
+
+        return blocks;
+    }
+
+    private static bool DependsOnGuestMemory(ScalarValue value)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current))
+            {
+                continue;
+            }
+
+            if (current.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord or ScalarValueKind.ResourceTableWord)
+            {
+                return true;
+            }
+
+            foreach (var operand in current.Operands)
+            {
+                pending.Push(operand);
+            }
+        }
+
+        return false;
     }
 }
