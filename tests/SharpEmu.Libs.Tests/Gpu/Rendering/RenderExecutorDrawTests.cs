@@ -201,9 +201,8 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 0 }, autoDraw: false, out _));
         Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
         Assert.Equal(PrimitiveTopology.TriangleStrip, topology);
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: false, out _));
-        Assert.Contains("primitiveType=17", fatal.Message);
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, autoDraw: true, out _));
+        Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: false, out _));
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, autoDraw: true, out _));
         Assert.Contains("primitiveType=9", fatal.Message);
     }
 
@@ -470,16 +469,18 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void LegacyRectangleList_DrawsFourVerticesAndRejectsOtherShapes()
+    public void LegacyRectangleList_DrawsFourVerticesAndSkipsMalformedShapes()
     {
         _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(3, instances: 2));
         Assert.Contains("draw 4 2 0 0", _host.Calls);
 
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6)));
-        Assert.Contains("count=6 buffers=0", fatal.Message);
+        var callCount = _host.Calls.Count;
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6));
+        Assert.DoesNotContain(_host.Calls.Skip(callCount), c => c.StartsWith("draw ", StringComparison.Ordinal));
 
-        fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(3)));
-        Assert.Contains("primitiveType=17", fatal.Message);
+        callCount = _host.Calls.Count;
+        _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(3));
+        Assert.DoesNotContain(_host.Calls.Skip(callCount), c => c.StartsWith("draw", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -87,6 +87,28 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void BufferAtomicFmin_DecodesAsFloatAtomic()
+    {
+        // BUFFER_ATOMIC_FMIN v1, off, s[0:3].
+        var instruction = DecodeSingle(0xE0FC0000, 0x00000100);
+
+        Assert.Equal("BufferAtomicFmin", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
+    }
+
+    [Fact]
+    public void VffbhU32_DecodesAsLeadingZeroCount()
+    {
+        // V_FFBH_U32 v2, v1.
+        var instruction = DecodeSingle(
+            0x7E000000u | (2u << 17) | (0x39u << 9) | 257u);
+
+        Assert.Equal("VFfbhU32", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(2) }, instruction.Destinations);
+    }
+
+    [Fact]
     public void ImageAtomicAdd_KeepsDataRegisterAsDestination()
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc
@@ -98,6 +120,32 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(4u, control.ScalarResource);
         Assert.True(control.Glc);
         Assert.Equal(new[] { Gen5Operand.Vector(2) }, instruction.Destinations);
+    }
+
+    [Fact]
+    public void ImageBvhIntersectRay_DecodesOpcodeBitSevenAndFourResults()
+    {
+        // IMAGE_BVH_INTERSECT_RAY is MIMG opcode 0xE6. GFX10 stores its
+        // high opcode bit in word0 bit 0, so the low field alone is 0x66.
+        var instruction = DecodeSingle(0xF1980001, 0x00000400);
+
+        Assert.Equal("ImageBvhIntersectRay", instruction.Opcode);
+        Assert.Equal(
+            new[]
+            {
+                Gen5Operand.Vector(4),
+                Gen5Operand.Vector(5),
+                Gen5Operand.Vector(6),
+                Gen5Operand.Vector(7),
+            },
+            instruction.Destinations);
+        Assert.Equal(
+            new[]
+            {
+                Gen5Operand.Vector(0),
+                Gen5Operand.Scalar(0),
+            },
+            instruction.Sources);
     }
 
     [Fact]

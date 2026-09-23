@@ -18,6 +18,26 @@ public static class ResourceMaterializer
     // into its fatal.
     public static Action<string> SpecializationFailed { get; set; } = message => Console.Error.WriteLine($"shader resource specialization failed: {message}");
 
+    // Descriptor arrays can be written by an earlier GPU dispatch. The clean
+    // reader deliberately refuses such a range, while the normal reader performs
+    // the required CPU synchronization before returning the guest word. Use that
+    // synchronized path only after the clean read declines the address.
+    private static bool TryReadStableWord(ResourceRuntimeInputs inputs, ulong address, out uint word)
+    {
+        word = 0;
+        if (inputs.ReadCleanMemory is { } clean && clean(address, out word))
+        {
+            return true;
+        }
+
+        if (inputs.ReadMemory is { } reader && !reader.Equals(inputs.ReadCleanMemory) && reader(address, out word))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     private sealed class IndirectImageTable
     {
         public uint Resource;
@@ -31,6 +51,18 @@ public static class ResourceMaterializer
         public IndirectSelectorDiagnostic? SelectorDiagnostic;
     }
 
+    private sealed class IndirectSamplerTable
+    {
+        public uint Resource;
+        public List<uint> Keys = [];
+        public List<uint> Candidates = [];
+        public List<DescriptorWords> Descriptors = [];
+        public uint[] MaterialDescriptor = [];
+        public uint[] HeapDescriptor = [];
+        public uint SelectorStride;
+        public uint SelectorOffset;
+    }
+
     private sealed class MaterializedSnapshot
     {
         public uint[][] Buffers = [];
@@ -39,6 +71,7 @@ public static class ResourceMaterializer
         public uint[] FlattenedTable = [];
         public uint[] UserData = [];
         public List<IndirectImageTable> IndirectImages = [];
+        public List<IndirectSamplerTable> IndirectSamplers = [];
     }
 
     public static bool Materialize(
@@ -163,7 +196,7 @@ public static class ResourceMaterializer
                     if (directTable.Descriptors.Count > 1) snapshot.IndirectImages.Add(directTable);
                     continue;
                 }
-                if (indirect.Dense)
+        if (indirect.Dense)
                 {
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.HeapSource], cleanInputs, [], evaluateTable: false,
                         out var denseSources, out _))
@@ -178,12 +211,35 @@ public static class ResourceMaterializer
                     }
                     continue;
                 }
+        if (indirect.DescriptorArray)
+                {
+                    if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.HeapSource], cleanInputs, [], evaluateTable: false, out var arrayTables, out _))
+                    {
+                        return false;
+                    }
+
+                    if (!MaterializeDescriptorArray(indirect, arrayTables[0], image.R128, inputs,
+                        out var arrayTable, out failure))
+                    {
+                        return false;
+                    }
+
+                    snapshot.Images[imageIndex] = arrayTable.Descriptors[(int)arrayTable.Candidates[0]].Dwords;
+                    if (arrayTable.Descriptors.Count > 1)
+                    {
+                        arrayTable.Resource = (uint)imageIndex;
+                        snapshot.IndirectImages.Add(arrayTable);
+                    }
+
+                    continue;
+                }
+
                 if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.MaterialSource, indirect.HeapSource], cleanInputs, [], evaluateTable: false, out var tables, out _))
                 {
                     return false;
                 }
 
-                if (!MaterializeIndirectImage(plan, indirect, tables[0], tables[1], image, inputs,
+                if (!MaterializeIndirectImage(plan, indirect, tables[0], tables[1], snapshot.FlattenedTable, image.R128, inputs,
                     captureSelectorDiagnostic, out var indirectTable, out failure))
                 {
                     return false;
@@ -210,7 +266,33 @@ public static class ResourceMaterializer
 
         snapshot.Samplers = new uint[plan.Info.Samplers.Count][];
         for (var index = 0; index < snapshot.Samplers.Length; index++)
-            snapshot.Samplers[index] = values[cursor++].Dwords;
+        {
+            var source = plan.DescriptorSources[(int)plan.Info.Samplers[index].Source];
+            if (source.IndirectSampler is not { } indirect)
+            {
+                snapshot.Samplers[index] = values[cursor++].Dwords;
+                continue;
+            }
+
+            var cleanInputs = inputs.WithReader(inputs.ReadCleanMemory);
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.MaterialSource, indirect.HeapSource], cleanInputs, [],
+                evaluateTable: false, out var tables, out _))
+            {
+                return false;
+            }
+
+            if (!MaterializeIndirectSampler(plan, indirect, tables[0], tables[1], inputs, out var samplerTable))
+            {
+                return false;
+            }
+
+            snapshot.Samplers[index] = samplerTable.Descriptors[(int)samplerTable.Candidates[0]].Dwords;
+            if (samplerTable.Descriptors.Count > 1)
+            {
+                samplerTable.Resource = (uint)index;
+                snapshot.IndirectSamplers.Add(samplerTable);
+            }
+        }
         snapshot.UserData = inputs.UserData.ToArray();
         return true;
     }
@@ -246,7 +328,10 @@ public static class ResourceMaterializer
             {
                 if (!evaluator.Evaluate(source.Dwords[dword], out _))
                 {
-                    return $"descriptor source {sourceIndex} dword {dword} cannot be evaluated: " +
+                    var dynamicBufferNote = string.IsNullOrEmpty(source.DynamicBufferRejectionReason)
+                        ? string.Empty
+                        : $" Dynamic-buffer recognition rejected it: {source.DynamicBufferRejectionReason}.";
+                    return $"descriptor source {sourceIndex} dword {dword} cannot be evaluated:{dynamicBufferNote} " +
                         DescribeEvaluationValue(plan, inputs, evaluator, source.Dwords[dword]);
                 }
             }
@@ -335,6 +420,86 @@ public static class ResourceMaterializer
         return value.ToString();
     }
 
+    private static bool MaterializeDescriptorArray(
+        IndirectImageSelector indirect,
+        DescriptorWords heap,
+        bool r128,
+        ResourceRuntimeInputs inputs,
+        out IndirectImageTable result,
+        out ResourceMaterializationFailure failure)
+    {
+        failure = ResourceMaterializationFailure.Other;
+        result = new IndirectImageTable();
+        if (heap.DwordCount != 4 || indirect.HeapIsAddress || indirect.HeapStride == 0)
+        {
+            return false;
+        }
+
+        var size = ScalarBufferSize(heap.Dwords);
+        // A zero-sized (or truncated) scalar buffer is a valid null resource.
+        // Keep one all-zero candidate so the image is materialized as null; the
+        // scalar-buffer reader already returns zero for words outside its size.
+        var recordCount = indirect.HeapOffset > size || size - indirect.HeapOffset < 8u * sizeof(uint)
+            ? 1ul
+            : (size - indirect.HeapOffset - 8u * sizeof(uint)) / indirect.HeapStride + 1;
+        if (recordCount == 0 || recordCount > MaxIndirectImageProbes)
+        {
+            return false;
+        }
+
+
+        var table = new IndirectImageTable
+        {
+            MaterialDescriptor = heap.Dwords,
+            HeapDescriptor = heap.Dwords,
+            SelectorStride = indirect.HeapStride,
+            SelectorOffset = indirect.HeapOffset,
+        };
+
+        for (ulong index = 0; index < recordCount; index++)
+        {
+            var key = index * indirect.HeapStride;
+            if (key > uint.MaxValue)
+            {
+                return false;
+            }
+
+            var candidate = new uint[8];
+            for (uint dword = 0; dword < candidate.Length; dword++)
+            {
+                if (!TryReadIndirectImageWord(indirect, heap.Dwords, [], (uint)key, dword, inputs, out candidate[dword]))
+                {
+                    return false;
+                }
+            }
+
+            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128))
+            {
+                Array.Clear(candidate);
+            }
+
+            var words = new DescriptorWords(candidate);
+            var found = table.Descriptors.FindIndex(existing => existing.SameAs(words));
+            if (found < 0)
+            {
+                if (table.Descriptors.Count >= ShaderResourceInfo.MaxImages)
+                {
+                    failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+                    return Fail("descriptor-array candidates exceed the dense image resource limit");
+                }
+
+                table.Descriptors.Add(words);
+                found = table.Descriptors.Count - 1;
+            }
+
+            table.Keys.Add((uint)key);
+            table.Candidates.Add((uint)found);
+        }
+
+        result = table;
+        return table.Descriptors.Count != 0;
+    }
+
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>
         descriptor[0] == 0 && (descriptor[1] & 0xFF) == 0;
 
@@ -415,8 +580,53 @@ public static class ResourceMaterializer
             return false;
         }
 
-        return inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(baseAddress + aligned, out word);
+        if (inputs.ReadCleanMemory is null && inputs.ReadMemory is null)
+        {
+            return false;
+        }
+
+        return TryReadStableWord(inputs, baseAddress + aligned, out word);
     }
+
+    private static bool ReadAddressWord(
+        ReadOnlySpan<uint> descriptor,
+        uint dynamicOffset,
+        uint immediateOffset,
+        ResourceRuntimeInputs inputs,
+        out uint word)
+    {
+        word = 0;
+        if (descriptor.Length < 2)
+        {
+            return false;
+        }
+
+        var baseAddress = ((ulong)descriptor[0] | ((ulong)descriptor[1] << 32)) & AddressMask;
+        var byteOffset = (ulong)dynamicOffset + immediateOffset;
+        var aligned = byteOffset & ~3ul;
+        if (aligned > AddressMask - baseAddress)
+        {
+            return false;
+        }
+
+        if (inputs.ReadCleanMemory is null && inputs.ReadMemory is null)
+        {
+            return false;
+        }
+
+        return TryReadStableWord(inputs, baseAddress + aligned, out word);
+    }
+
+    private static bool ReadIndirectHeapWord(
+        IndirectImageSelector indirect,
+        ReadOnlySpan<uint> descriptor,
+        uint dynamicOffset,
+        uint immediateOffset,
+        ResourceRuntimeInputs inputs,
+        out uint word)
+        => indirect.HeapIsAddress
+            ? ReadAddressWord(descriptor, dynamicOffset, immediateOffset, inputs, out word)
+            : ReadScalarBufferWord(descriptor, dynamicOffset, immediateOffset, inputs, out word);
 
     // Enumerates every material key that can pass the table's bounds and reads the
     // heap descriptor each selects; stale or invalid descriptors become null.
@@ -425,7 +635,8 @@ public static class ResourceMaterializer
         IndirectImageSelector indirect,
         DescriptorWords material,
         DescriptorWords heap,
-        ImageResource image,
+        ReadOnlySpan<uint> flattenedTable,
+        bool r128,
         ResourceRuntimeInputs inputs,
         bool captureSelectorDiagnostic,
         out IndirectImageTable result,
@@ -433,16 +644,15 @@ public static class ResourceMaterializer
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
-        if (material.DwordCount != 4 || heap.DwordCount != 4)
+        var expectedHeapDwords = indirect.HeapIsAddress ? 2u : 4u;
+        if (material.DwordCount != 4 || heap.DwordCount != expectedHeapDwords)
         {
             return false;
         }
 
-        var materialStride = (material.Dwords[1] >> 16) & 0x3FFF;
-        if (materialStride != indirect.SelectorStride)
-        {
-            return false;
-        }
+        // Scalar-buffer offsets are byte offsets. The descriptor stride only
+        // bounds the record footprint; a key table may intentionally pack keys
+        // more tightly than the descriptor's declared structured stride.
 
         var period = 1ul << 32;
         var step = (ulong)BigInteger.GreatestCommonDivisor(indirect.SelectorStride, period);
@@ -492,16 +702,15 @@ public static class ResourceMaterializer
         foreach (var key in keys)
         {
             var candidate = new uint[8];
-            var heapOffset = key << 5;
             for (uint dword = 0; dword < 8; dword++)
             {
-                if (!ReadScalarBufferWord(heap.Dwords, heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                if (!TryReadIndirectImageWord(indirect, heap.Dwords, flattenedTable, key, dword, inputs, out candidate[dword]))
                 {
                     return false;
                 }
             }
 
-            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, image.R128) ||
+            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) ||
                 !ReservedImageBitsClear(candidate))
             {
                 Array.Clear(candidate);
@@ -538,7 +747,8 @@ public static class ResourceMaterializer
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
-        if (heap.DwordCount != 2 || indirect.KeyBound == 0 || indirect.KeyBound > MaxIndirectImageProbes || inputs.ReadCleanMemory is null)
+        if (heap.DwordCount != 2 || indirect.KeyBound == 0 || indirect.KeyBound > MaxIndirectImageProbes ||
+            (inputs.ReadCleanMemory is null && inputs.ReadMemory is null))
             return false;
 
         var baseAddress = (((ulong)heap.Dwords[1] << 32) | heap.Dwords[0]) & AddressMask;
@@ -551,8 +761,8 @@ public static class ResourceMaterializer
             {
                 var relative = entry + dword * sizeof(uint);
                 if (relative > AddressMask || baseAddress > AddressMask - relative ||
-                    !inputs.ReadCleanMemory(baseAddress + relative, out candidate[dword]))
-                    return false;
+                    !TryReadStableWord(inputs, baseAddress + relative, out candidate[dword]))
+                return false;
             }
 
             if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) ||
@@ -594,6 +804,195 @@ public static class ResourceMaterializer
             }
             result.Candidates.Add((uint)found);
         }
+        return true;
+    }
+
+    private static bool TryReadIndirectImageWord(
+        IndirectImageSelector indirect,
+        ReadOnlySpan<uint> heapDescriptor,
+        ReadOnlySpan<uint> flattenedTable,
+        uint key,
+        uint dword,
+        ResourceRuntimeInputs inputs,
+        out uint word)
+    {
+        word = 0;
+        if (indirect.DescriptorHeapOffsets is { Count: >= 8 } offsets && dword < offsets.Count)
+        {
+            var mask = indirect.DescriptorHeapMasks is { Count: >= 8 }
+                ? indirect.DescriptorHeapMasks[(int)dword]
+                : uint.MaxValue;
+            var fieldOffset = offsets[(int)dword];
+            var hasHeapField = fieldOffset != uint.MaxValue;
+            var hasTableSlot = indirect.DescriptorTableSlots is { Count: >= 8 } tableSlots &&
+                tableSlots[(int)dword] != uint.MaxValue;
+            var hasWord = false;
+            var expectedWord = 0u;
+            if (hasTableSlot)
+            {
+                var slot = indirect.DescriptorTableSlots![(int)dword];
+                if (slot >= flattenedTable.Length)
+                {
+                    return false;
+                }
+
+                expectedWord = flattenedTable[(int)slot];
+                expectedWord &= mask;
+                hasWord = true;
+            }
+
+            if (hasHeapField)
+            {
+                var recordOffset = (ulong)key * indirect.HeapStride;
+                if (recordOffset > uint.MaxValue - fieldOffset)
+                {
+                    return false;
+                }
+
+                if (!ReadIndirectHeapWord(indirect, heapDescriptor, (uint)(recordOffset + fieldOffset), 0, inputs, out var heapWord))
+                {
+                    return false;
+                }
+
+                var maskedHeapWord = heapWord & mask;
+                if (hasWord && expectedWord != maskedHeapWord)
+                {
+                    return false;
+                }
+
+                expectedWord = maskedHeapWord;
+                hasWord = true;
+            }
+
+            if (indirect.DescriptorHeapAlternates is { Count: >= 8 } alternates)
+            {
+                foreach (var alternateOffset in alternates[(int)dword])
+                {
+                    var recordOffset = (ulong)key * indirect.HeapStride;
+                    if (recordOffset > uint.MaxValue - alternateOffset ||
+                        !ReadIndirectHeapWord(indirect, heapDescriptor, (uint)(recordOffset + alternateOffset), 0, inputs, out var alternateWord))
+                    {
+                        return false;
+                    }
+
+                    var maskedAlternateWord = alternateWord & mask;
+                    if (hasWord && expectedWord != maskedAlternateWord)
+                    {
+                        return false;
+                    }
+
+                    expectedWord = maskedAlternateWord;
+                    hasWord = true;
+                }
+            }
+
+            if (hasWord)
+            {
+                word = expectedWord;
+                return true;
+            }
+
+            if (indirect.DescriptorStaticValues is not { Count: >= 8 } staticValues)
+            {
+                return false;
+            }
+
+            word = staticValues[(int)dword];
+            return true;
+        }
+
+        var heapOffset = indirect.DescriptorArray
+            ? (ulong)key + indirect.HeapOffset
+            : (ulong)key * indirect.HeapStride + indirect.HeapOffset;
+        var immediateOffset = (ulong)dword * sizeof(uint);
+        if (heapOffset > uint.MaxValue || immediateOffset > uint.MaxValue - heapOffset)
+        {
+            return false;
+        }
+
+        return ReadIndirectHeapWord(indirect, heapDescriptor, (uint)heapOffset, (uint)immediateOffset, inputs, out word);
+    }
+
+    private static bool MaterializeIndirectSampler(
+        ShaderResourcePlan plan,
+        IndirectImageSelector indirect,
+        DescriptorWords material,
+        DescriptorWords heap,
+        ResourceRuntimeInputs inputs,
+        out IndirectSamplerTable result)
+    {
+        result = new IndirectSamplerTable();
+        if (material.DwordCount != 4 || heap.DwordCount != 4)
+        {
+            return false;
+        }
+
+        var period = 1ul << 32;
+        var step = (ulong)BigInteger.GreatestCommonDivisor(indirect.SelectorStride, period);
+        var residue = indirect.SelectorOffset % step;
+        var size = ScalarBufferSize(material.Dwords);
+        var limit = Math.Min(uint.MaxValue, size + 3);
+        var probeCount = residue <= limit ? (limit - residue) / step + 1 : 0;
+        if (probeCount > MaxIndirectImageProbes)
+        {
+            return false;
+        }
+
+        var keys = new List<uint> { 0 };
+        var seen = new HashSet<uint> { 0 };
+        for (ulong index = 0, offset = residue; index < probeCount; index++, offset += step)
+        {
+            if (!ReadScalarBufferWord(material.Dwords, (uint)offset, 0, inputs, out var key))
+            {
+                return false;
+            }
+
+            if (seen.Add(key))
+            {
+                keys.Add(key);
+            }
+        }
+
+        var table = new IndirectSamplerTable
+        {
+            Keys = keys,
+            MaterialDescriptor = material.Dwords,
+            HeapDescriptor = heap.Dwords,
+            SelectorStride = indirect.SelectorStride,
+            SelectorOffset = indirect.SelectorOffset,
+        };
+        foreach (var key in keys)
+        {
+            var candidate = new uint[4];
+            var heapOffset = (ulong)key * indirect.HeapStride + indirect.HeapOffset;
+            for (uint dword = 0; dword < 4; dword++)
+            {
+                if (heapOffset > uint.MaxValue ||
+                    !ReadScalarBufferWord(heap.Dwords, (uint)heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                {
+                    return false;
+                }
+            }
+
+            var words = new DescriptorWords(candidate);
+            var found = table.Descriptors.FindIndex(existing => existing.SameAs(words));
+            if (found < 0)
+            {
+                if (table.Descriptors.Count >= ShaderResourceInfo.MaxSamplers)
+                {
+                    return false;
+                }
+
+                table.Descriptors.Add(words);
+                table.Candidates.Add((uint)table.Descriptors.Count - 1);
+            }
+            else
+            {
+                table.Candidates.Add((uint)found);
+            }
+        }
+
+        result = table;
         return true;
     }
 
@@ -654,6 +1053,7 @@ public static class ResourceMaterializer
         specialization = new ResourceSpecialization();
         var info = plan.Info;
         var imageCount = info.Images.Count;
+        var samplerCount = info.Samplers.Count;
         var mappingWordCount = 0;
         foreach (var table in snapshot.IndirectImages)
         {
@@ -672,8 +1072,25 @@ public static class ResourceMaterializer
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
+        foreach (var table in snapshot.IndirectSamplers)
+        {
+            if (table.Resource >= info.Samplers.Count || table.Descriptors.Count < 2)
+            {
+                return Fail("indirect sampler table has an invalid root or candidate count");
+            }
+
+            if (samplerCount + table.Descriptors.Count - 1 > ShaderResourceInfo.MaxSamplers)
+            {
+                return Fail("indirect sampler candidates exceed the dense sampler resource limit");
+            }
+
+            samplerCount += table.Descriptors.Count - 1;
+            mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
+        }
+
         // Each draw owns these arrays. Only indirect candidates require a larger table.
         Array.Resize(ref snapshot.Images, imageCount);
+        Array.Resize(ref snapshot.Samplers, samplerCount);
         var mappingCursor = snapshot.FlattenedTable.Length;
         Array.Resize(ref snapshot.FlattenedTable, checked(mappingCursor + mappingWordCount));
         var imageCursor = info.Images.Count;
@@ -713,6 +1130,44 @@ public static class ResourceMaterializer
             }
 
             snapshot.Images[(int)table.Resource] = table.Descriptors[0].Dwords;
+        }
+
+        var samplers = new List<SamplerSpecialization>(samplerCount);
+        foreach (var sampler in info.Samplers)
+        {
+            samplers.Add(new SamplerSpecialization(
+                sampler.IndirectRoot, sampler.IndirectMappingOffset, sampler.IndirectSearchIterations));
+        }
+
+        var samplerCursor = info.Samplers.Count;
+        foreach (var table in snapshot.IndirectSamplers)
+        {
+            var rootSampler = samplers[(int)table.Resource];
+            for (var candidate = 1; candidate < table.Descriptors.Count; candidate++)
+            {
+                samplers.Add(rootSampler with { IndirectRoot = table.Resource });
+                snapshot.Samplers[samplerCursor++] = table.Descriptors[candidate].Dwords;
+            }
+
+            var mappingOffset = (uint)mappingCursor;
+            samplers[(int)table.Resource] = rootSampler with
+            {
+                IndirectRoot = table.Resource,
+                IndirectMappingOffset = mappingOffset,
+                IndirectSearchIterations = (uint)BitOperations.Log2((uint)table.Keys.Count) + 1,
+            };
+            mappingCursor += 1 + table.Keys.Count * 2;
+            var order = Enumerable.Range(0, table.Keys.Count).OrderBy(index => table.Keys[index]).ToArray();
+            snapshot.FlattenedTable[(int)mappingOffset] = (uint)table.Keys.Count;
+            for (var entry = 0; entry < order.Length; entry++)
+            {
+                var source = order[entry];
+                var offset = (int)mappingOffset + 1 + entry * 2;
+                snapshot.FlattenedTable[offset] = table.Keys[source];
+                snapshot.FlattenedTable[offset + 1] = table.Candidates[source];
+            }
+
+            snapshot.Samplers[(int)table.Resource] = table.Descriptors[0].Dwords;
         }
 
         var buffers = new List<BufferSpecialization>(info.Buffers.Count);
@@ -795,7 +1250,7 @@ public static class ResourceMaterializer
             }
 
             var format = GuestImageFormat.FormatOf(descriptor);
-            if (baseImage.Atomic && format != GuestImageFormat.Format32Uint)
+            if (baseImage.Atomic && format is not (GuestImageFormat.Format32Uint or GuestImageFormat.Format32Sint or GuestImageFormat.Format32Float))
             {
                 return Fail($"atomic image descriptor {index} uses unsupported format {format}");
             }
@@ -828,7 +1283,7 @@ public static class ResourceMaterializer
                 Cube = GuestImageFormat.ImageTypeOf(descriptor) == GuestImageFormat.ImageTypeCube,
                 ConversionFormat = conversionFormat,
                 ShaderSwizzle = shaderSwizzle,
-                NumericClass = numericClass,
+                NumericClass = baseImage.Atomic ? ImageNumericClass.Uint : numericClass,
             };
         }
 
@@ -943,7 +1398,7 @@ public static class ResourceMaterializer
             }
         }
 
-        specialization = new ResourceSpecialization { Buffers = buffers, Images = images };
+        specialization = new ResourceSpecialization { Buffers = buffers, Images = images, Samplers = samplers };
         specializedSnapshot = snapshot;
         return true;
     }
@@ -1008,7 +1463,8 @@ public static class ResourceMaterializer
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {
         var source = plan.Info;
-        if (source.Buffers.Count != specialization.Buffers.Count || source.Images.Count > specialization.Images.Count)
+        if (source.Buffers.Count != specialization.Buffers.Count || source.Images.Count > specialization.Images.Count ||
+            (specialization.Samplers.Count != 0 && source.Samplers.Count > specialization.Samplers.Count))
         {
             throw new ResourcePlanException(
                 $"shader resource specialization does not match the plan: hash=0x{plan.Hash:X16} stage={plan.Stage} " +
@@ -1055,6 +1511,38 @@ public static class ResourceMaterializer
             if (root != DescriptorConstants.NoIndex)
             {
                 info.Images[(int)root].IndirectResources.Add((uint)index);
+            }
+        }
+
+        if (specialization.Samplers.Count != 0)
+        {
+            for (var index = 0; index < specialization.Samplers.Count; index++)
+            {
+                var specialized = specialization.Samplers[index];
+                if (index >= info.Samplers.Count)
+                {
+                    if (specialized.IndirectRoot >= source.Samplers.Count)
+                    {
+                        throw new ResourcePlanException($"shader resource specialization names an invalid indirect root: hash=0x{plan.Hash:X16} sampler={index}");
+                    }
+
+                    info.Samplers.Add(source.Samplers[(int)specialized.IndirectRoot].Clone());
+                }
+
+                var sampler = info.Samplers[index];
+                sampler.IndirectRoot = specialized.IndirectRoot;
+                sampler.IndirectMappingOffset = specialized.IndirectMappingOffset;
+                sampler.IndirectSearchIterations = specialized.IndirectSearchIterations;
+                sampler.IndirectResources = [];
+            }
+
+            for (var index = 0; index < info.Samplers.Count; index++)
+            {
+                var root = info.Samplers[index].IndirectRoot;
+                if (root != DescriptorConstants.NoIndex)
+                {
+                    info.Samplers[(int)root].IndirectResources.Add((uint)index);
+                }
             }
         }
 

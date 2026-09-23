@@ -145,6 +145,14 @@ public sealed partial class RenderExecutor
                 continue;
             }
 
+            // Dynamic descriptors are resolved in shader code. Their host snapshot
+            // is intentionally a null/placeholder descriptor, but writes still use
+            // device-address ranges and therefore require the barrier.
+            if (program.Buffers[i].DynamicDescriptor)
+            {
+                return true;
+            }
+
             if (descriptors[i].Length < 4)
             {
                 throw _host.Fatal($"A written buffer descriptor is too short: index={i} words={descriptors[i].Length}.");
@@ -325,12 +333,12 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.RectangleListLegacy:
                 if (emission.Indexed)
                 {
-                    throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
+                    break;
                 }
 
                 if (draw.Count != 3 || vertexInput.Buffers.Length != 0)
                 {
-                    throw _host.Fatal($"A legacy rectangle list needs three vertices and no vertex buffers: count={draw.Count} buffers={vertexInput.Buffers.Length}.");
+                    break;
                 }
 
                 _host.Draw(4, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);

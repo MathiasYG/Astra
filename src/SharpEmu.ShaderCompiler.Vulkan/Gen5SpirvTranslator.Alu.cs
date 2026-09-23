@@ -101,6 +101,29 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            if (instruction.Opcode is "VLshlrevB64" or "VLshrrevB64")
+            {
+                if (instruction.Destinations.Count < 2 ||
+                    instruction.Destinations[1].Kind != Gen5OperandKind.VectorRegister ||
+                    instruction.Destinations[1].Value != destination + 1 ||
+                    instruction.Sources.Count < 2)
+                {
+                    error = $"{instruction.Opcode} expects a VGPR pair destination, a shift count, and a 64-bit source";
+                    return false;
+                }
+
+                // The first source is the six-bit shift count; the second is
+                // the adjacent VGPR/SGPR pair being shifted.
+                var shift = Widen(BitwiseAnd(GetRawSource(instruction, 0), UInt(63)));
+                var source = GetRawSource64(instruction, 1);
+                var shifted = instruction.Opcode == "VLshlrevB64"
+                    ? ShiftLeftLogical64(source, shift)
+                    : ShiftRightLogical64(source, shift);
+                StoreV(destination, Narrow(shifted));
+                StoreV(destination + 1, Narrow(ShiftRightLogical64(shifted, ULong(32))));
+                return true;
+            }
+
             if (instruction.Opcode is "VMovrelsB32" or "VMovreldB32" or
                 "VMovrelsdB32" or "VMovrelsd2B32")
             {
@@ -678,6 +701,28 @@ public static partial class Gen5SpirvTranslator
                         GetRawSource(instruction, 2));
                     break;
                 }
+                case "VMadI32I24":
+                {
+                    var left = _module.AddInstruction(
+                        SpirvOp.BitFieldSExtract,
+                        _intType,
+                        Bitcast(_intType, GetRawSource(instruction, 0)),
+                        UInt(0),
+                        UInt(24));
+                    var right = _module.AddInstruction(
+                        SpirvOp.BitFieldSExtract,
+                        _intType,
+                        Bitcast(_intType, GetRawSource(instruction, 1)),
+                        UInt(0),
+                        UInt(24));
+                    var product = _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _uintType,
+                        Bitcast(_uintType, left),
+                        Bitcast(_uintType, right));
+                    result = IAdd(product, GetRawSource(instruction, 2));
+                    break;
+                }
                 case "VMadU32U16":
                 {
                     var left = BitwiseAnd(
@@ -753,6 +798,35 @@ public static partial class Gen5SpirvTranslator
                         GetRawSource(instruction, 0),
                         BitwiseAnd(GetRawSource(instruction, 1), UInt(31)));
                     result = IAdd(shifted, GetRawSource(instruction, 2));
+                    break;
+                }
+                case "VAlignbyteB32":
+                {
+                    // V_ALIGNBYTE treats S0 as the high half and S1 as the
+                    // low half of a 64-bit value, then returns the low 32
+                    // bits after a byte-granular logical right shift.
+                    var byteShift = BitwiseAnd(GetRawSource(instruction, 2), UInt(31));
+                    var shift = _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _uintType,
+                        byteShift,
+                        UInt(8));
+                    var wide = Pair64(
+                        GetRawSource(instruction, 1),
+                        GetRawSource(instruction, 0));
+                    var shift64 = Widen(shift);
+                    var shifted = ShiftRightLogical64(wide, shift64);
+                    var inRange = _module.AddInstruction(
+                        SpirvOp.ULessThan,
+                        _boolType,
+                        shift64,
+                        ULong(64));
+                    result = Narrow(_module.AddInstruction(
+                        SpirvOp.Select,
+                        _ulongType,
+                        inRange,
+                        shifted,
+                        ULong(0)));
                     break;
                 }
                 case "VXadU32":
@@ -1975,6 +2049,15 @@ public static partial class Gen5SpirvTranslator
                 return TryEmitScalarCompare(instruction, out error);
             }
 
+            if (instruction.Opcode == "SSetregB32")
+            {
+                // S_SETREG changes shader mode state (for example FP mode).
+                // SPIR-V has no equivalent dynamic hardware register; retain
+                // it as an explicit sequencing point rather than rejecting
+                // the shader or fabricating an SGPR write.
+                return true;
+            }
+
             if (instruction.Destinations.Count == 0 ||
                 instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
             {
@@ -2667,6 +2750,29 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             var left = GetRawSource64(instruction, 0);
+            if (instruction.Opcode is "SSetpcB64" or "SSwappcB64")
+            {
+                if (instruction.Opcode == "SSwappcB64")
+                {
+                    if (instruction.Destinations.Count == 0 ||
+                        instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+                    {
+                        error = "missing scalar destination for SSwappcB64";
+                        return false;
+                    }
+
+                    var (baseLow, baseHigh) = LoadShaderBase();
+                    var next = IAdd64(
+                        Pair64(baseLow, baseHigh),
+                        ULong(instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint))));
+                    StoreS64(instruction.Destinations[0].Value, next);
+                }
+
+                // The dispatcher updates the compact block PC after this
+                // instruction. S_SETPC itself has no SGPR destination.
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
                 var oldExec = BooleanToWaveMask(Load(_boolType, _exec));

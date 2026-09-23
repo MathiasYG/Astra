@@ -12,6 +12,34 @@ namespace SharpEmu.Libs.Tests.Ampr;
 public sealed class AmprWriteAddressTests
 {
     [Fact]
+    public void AmmCommandBufferConstructor_ReturnsSuccessWithoutMutatingGuestMemory()
+    {
+        const string nid = "EDq5bqCqYpA";
+        const ulong memoryBase = 0x3_2000_0000;
+        const ulong commandBufferAddress = memoryBase + 0x80;
+        var memory = new FakeCpuMemory(memoryBase, 0x100);
+        Span<byte> before = stackalloc byte[16];
+        for (var i = 0; i < before.Length; i++)
+        {
+            before[i] = (byte)(i + 1);
+        }
+        Assert.True(memory.TryWrite(commandBufferAddress, before));
+
+        var context = new CpuContext(memory, Generation.Gen5)
+        {
+            [CpuRegister.Rdi] = commandBufferAddress,
+        };
+        var manager = CreateManagerWithExport(nid, "sceAmprAmmCommandBufferConstructor");
+
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, manager.Dispatch(nid, context));
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+
+        Span<byte> after = stackalloc byte[16];
+        Assert.True(memory.TryRead(commandBufferAddress, after));
+        Assert.Equal(before.ToArray(), after.ToArray());
+    }
+
+    [Fact]
     public void MeasureCommandSizeWriteAddress0400_MatchesOnCompletionVariant()
     {
         const string nid = "4fgtGfXDrFc";

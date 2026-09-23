@@ -13,6 +13,8 @@ public sealed record IndirectImageAccess(int MemoryIndex, ScalarValue Key, uint 
     public bool KeyIsAddressOffset { get; init; }
 }
 
+public sealed record IndirectSamplerAccess(int MemoryIndex, ScalarValue Key, uint HeapSource);
+
 // The immutable resource analysis of one program: graph, descriptor sources, flattened
 // reads and dense tables. Built once, materialised per draw, free of any draw's user data.
 public sealed class ShaderResourcePlan
@@ -33,11 +35,13 @@ public sealed class ShaderResourcePlan
     public IReadOnlyList<DescriptorSource> DescriptorSources { get; private set; } = [];
     public IReadOnlyList<uint> MaterializationSources { get; private set; } = [];
     public IReadOnlyList<ResourceBranchBlock> ResourceBranches { get; private set; } = [];
+    public bool CanPruneResourceSources { get; private set; }
     public IReadOnlyList<ResourceTableRead> TableReads { get; private set; } = [];
     public IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex { get; private set; } = new Dictionary<int, uint>();
     public IReadOnlyList<ScalarValue> DynamicReads { get; private set; } = [];
     public IReadOnlyList<byte> CleanFlatSlots { get; private set; } = [];
     public IReadOnlyList<IndirectImageAccess> IndirectImages { get; private set; } = [];
+    public IReadOnlyList<IndirectSamplerAccess> IndirectSamplers { get; private set; } = [];
     public bool RequiresSpecializationMemory { get; private set; }
     public ShaderResourceInfo Info { get; private set; } = new();
 
@@ -86,6 +90,7 @@ public sealed class ShaderResourcePlan
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
         plan.IndirectImages = tracked.IndirectImages;
+        plan.IndirectSamplers = tracked.IndirectSamplers;
         plan.DynamicReads = plan.DynamicReads.Where(read => !tracked.IndirectReads.Contains(read)).ToList();
 
         var materialization = new List<uint>();
@@ -108,7 +113,14 @@ public sealed class ShaderResourcePlan
 
         foreach (var sampler in plan.Info.Samplers)
         {
-            materialization.Add(sampler.Source);
+            if (plan.DescriptorSources[(int)sampler.Source].IndirectSampler is not null)
+            {
+                plan.RequiresSpecializationMemory = true;
+            }
+            else
+            {
+                materialization.Add(sampler.Source);
+            }
         }
 
         plan.MaterializationSources = materialization;
@@ -137,8 +149,20 @@ public sealed class ShaderResourcePlan
             }
         }
 
+        foreach (var sampler in plan.Info.Samplers)
+        {
+            if (plan.DescriptorSources[(int)sampler.Source].IndirectSampler is not { } indirect)
+            {
+                continue;
+            }
+
+            plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.MaterialSource], cleanSlots);
+            plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
+        }
+
         plan.CleanFlatSlots = cleanSlots;
-        plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
+        plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite, out var canPruneResourceSources);
+        plan.CanPruneResourceSources = canPruneResourceSources;
         plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
 
         // Each written handle owns three flattened slots after the table reads: base

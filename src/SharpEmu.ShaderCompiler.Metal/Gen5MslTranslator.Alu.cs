@@ -45,6 +45,31 @@ public static partial class Gen5MslTranslator
                 return TryEmitVectorCompare(instruction, out error);
             }
 
+            if (instruction.Opcode is "VLshlrevB64" or "VLshrrevB64")
+            {
+                if (instruction.Destinations.Count < 2 ||
+                    instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister ||
+                    instruction.Destinations[1].Kind != Gen5OperandKind.VectorRegister ||
+                    instruction.Destinations[1].Value != instruction.Destinations[0].Value + 1 ||
+                    instruction.Sources.Count < 2)
+                {
+                    error = $"{instruction.Opcode} expects a VGPR pair destination, a shift count, and a 64-bit source";
+                    return false;
+                }
+
+                var destination = instruction.Destinations[0].Value;
+                var shift = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
+                var source = Temp("ulong", RawSource64(instruction, 1));
+                var shifted = Temp(
+                    "ulong",
+                    instruction.Opcode == "VLshlrevB64"
+                        ? $"{source} << (ulong){shift}"
+                        : $"{source} >> (ulong){shift}");
+                StoreVector(destination, $"(uint){shifted}");
+                StoreVector(destination + 1, $"(uint)({shifted} >> 32)");
+                return true;
+            }
+
             switch (instruction.Opcode)
             {
                 case "VReadfirstlaneB32":
@@ -288,6 +313,8 @@ public static partial class Gen5MslTranslator
                     AsUInt($"mulhi(as_type<int>({RawSource(instruction, 0)}), as_type<int>({RawSource(instruction, 1)}))"),
                 "VMadU32U24" =>
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFFFu)) + ({RawSource(instruction, 2)}))",
+                "VMadI32I24" =>
+                    $"({EmitSignedMultiply24(instruction)} + ({RawSource(instruction, 2)}))",
                 "VMadU32U16" =>
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFu)) + ({RawSource(instruction, 2)}))",
                 "VAdd3U32" =>
@@ -300,6 +327,10 @@ public static partial class Gen5MslTranslator
                     $"((({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)})) << (({RawSource(instruction, 2)}) & 31u))",
                 "VLshlAddU32" =>
                     $"((({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u)) + ({RawSource(instruction, 2)}))",
+                "VAlignbyteB32" =>
+                    $"(uint)((((ulong)({RawSource(instruction, 0)}) << 32ul) | " +
+                    $"(ulong)({RawSource(instruction, 1)})) >> " +
+                    $"(((ulong)({RawSource(instruction, 2)}) & 31ul) * 8ul))",
                 "VMinU32" => $"min({RawSource(instruction, 0)}, {RawSource(instruction, 1)})",
                 "VMaxU32" => $"max({RawSource(instruction, 0)}, {RawSource(instruction, 1)})",
                 "VMinI32" =>
@@ -351,6 +382,8 @@ public static partial class Gen5MslTranslator
                 "VBcntU32B32" => $"(popcount({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}))",
                 "VFfblB32" =>
                     $"(({RawSource(instruction, 0)}) == 0u ? 0xFFFFFFFFu : (uint)ctz({RawSource(instruction, 0)}))",
+                "VFfbhU32" =>
+                    $"(({RawSource(instruction, 0)}) == 0u ? 0xFFFFFFFFu : (uint)clz({RawSource(instruction, 0)}))",
 
                 // ---- wave / lane ----
                 // mbcnt reads the mask dword the guest passes (no cross-lane
@@ -1036,6 +1069,13 @@ public static partial class Gen5MslTranslator
                 return TryEmitScalarCompare(instruction, out error);
             }
 
+            if (instruction.Opcode == "SSetregB32")
+            {
+                // S_SETREG changes shader mode state (for example FP mode),
+                // which has no direct MSL representation.
+                return true;
+            }
+
             if (instruction.Destinations.Count == 0 ||
                 instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
             {
@@ -1474,6 +1514,30 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             var left = Temp("ulong", RawSource64(instruction, 0));
+            if (instruction.Opcode is "SSetpcB64" or "SSwappcB64")
+            {
+                if (instruction.Opcode == "SSwappcB64")
+                {
+                    if (instruction.Destinations.Count == 0 ||
+                        instruction.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+                    {
+                        error = "missing scalar destination for SSwappcB64";
+                        return false;
+                    }
+
+                    var (baseLow, baseHigh) = ShaderBaseWords();
+                    var next = Temp(
+                        "ulong",
+                        $"(((ulong){baseLow} | ((ulong){baseHigh} << 32)) + " +
+                        $"{instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint))}ul)");
+                    StoreScalar64(instruction.Destinations[0].Value, next);
+                }
+
+                // The dispatcher resolves the dynamic target after this
+                // instruction; S_SETPC itself has no SGPR destination.
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
                 var oldExec = Temp("ulong", Scalar64Expression(ExecLoRegister));

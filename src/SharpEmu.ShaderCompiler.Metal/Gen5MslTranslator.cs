@@ -829,6 +829,12 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
+                if (IsDynamicControl(instruction.Opcode))
+                {
+                    EmitDynamicControl(blocks, instruction);
+                    return true;
+                }
+
                 if (isTerminator)
                 {
                     // Fall through to the next block (or exit at program end).
@@ -876,6 +882,25 @@ public static partial class Gen5MslTranslator
             block = -1;
             return TryGetBranchTargetPc(instruction, out var targetPc) &&
                 TryFindBlock(blocks, targetPc, out block);
+        }
+
+        private void EmitDynamicControl(
+            IReadOnlyList<ShaderBlock> blocks,
+            Gen5ShaderInstruction instruction)
+        {
+            var target = Temp("ulong", RawSource64(instruction, 0));
+            var (baseLow, baseHigh) = ShaderBaseWords();
+            var shaderBase = $"((ulong){baseLow} | ((ulong){baseHigh} << 32))";
+            var selected = "0xFFFFFFFFu";
+            for (var index = blocks.Count - 1; index >= 0; index--)
+            {
+                var start = blocks[index].StartPc;
+                var absolute = $"({shaderBase} + {start}ul)";
+                selected =
+                    $"(({target} == {absolute} || {target} == {start}ul) ? {index}u : {selected})";
+            }
+
+            Line($"pc = {selected};");
         }
 
         /// <summary>True when the branch lands at or past the last instruction's
@@ -1822,7 +1847,9 @@ public static partial class Gen5MslTranslator
                     leaders.Add(targetPc);
                 }
 
-                if ((IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm") &&
+                if ((IsBranch(instruction.Opcode) ||
+                     IsDynamicControl(instruction.Opcode) ||
+                     instruction.Opcode == "SEndpgm") &&
                     index + 1 < instructions.Count)
                 {
                     leaders.Add(instructions[index + 1].Pc);
@@ -1857,6 +1884,9 @@ public static partial class Gen5MslTranslator
         private static bool IsBranch(string opcode) =>
             opcode == "SBranch" ||
             opcode.StartsWith("SCbranch", StringComparison.Ordinal);
+
+        private static bool IsDynamicControl(string opcode) =>
+            opcode is "SSetpcB64" or "SSwappcB64";
 
         private static bool TryGetBranchTargetPc(
             Gen5ShaderInstruction instruction,

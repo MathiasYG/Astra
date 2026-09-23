@@ -471,6 +471,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
+                // A read-only device-address range may legitimately point at an
+                // unmapped/null guest address. The shader-side page-table lookup
+                // resolves that access as invalid and returns the defined zero
+                // value; do not turn it into a host-side submission failure.
+                if (!range.Written &&
+                    (range.Base == 0 || !_guestMemory.CanRead(range.Base, 1)))
+                {
+                    continue;
+                }
+
                 if (range.Base >= PageOwnerTable.AddressSpaceSize || range.Size > PageOwnerTable.AddressSpaceSize - range.Base)
                 {
                     throw SubmissionScheduler.Fatal($"A device-address range is outside the cache: handle={range.Handle} base=0x{range.Base:X16} size=0x{range.Size:X} hash=0x{program.Hash:X16}.");

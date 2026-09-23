@@ -234,7 +234,8 @@ public sealed partial class ScalarValueGraph
         }
 
         // Equal incoming values pass through; differing or still unknown ones meet in a
-        // phi owned by this block and register. Any undefined input stays undefined.
+        // phi owned by this block and register. Preserve undefined inputs in the phi:
+        // a runtime-selected predecessor may still provide a defined value.
         private ScalarValue MergeSlot(
             int block,
             int slot,
@@ -249,7 +250,8 @@ public sealed partial class ScalarValueGraph
                 var value = read(state);
                 if (value.IsUndefined)
                 {
-                    return _graph.Undefined(first.Type);
+                    same &= first.IsUndefined;
+                    continue;
                 }
 
                 same &= ReferenceEquals(value, first);
@@ -1103,6 +1105,8 @@ public sealed partial class ScalarValueGraph
                 }
                 case "VMadU32U24":
                     return Binary(ScalarOperation.IAdd32, Binary(ScalarOperation.IMul32, Low24(Source(0)), Low24(Source(1))), Source(2));
+                case "VMadI32I24":
+                    return Binary(ScalarOperation.IAdd32, Binary(ScalarOperation.IMul32, SignedLow24(Source(0)), SignedLow24(Source(1))), Source(2));
                 case "VLshlrevB32":
                     return Shift(Source(1), Source(0), ScalarOperation.ShiftLeft32);
                 case "VLshrrevB32":

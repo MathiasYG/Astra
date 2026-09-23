@@ -122,6 +122,15 @@ public sealed class Gen5ImageTests
         Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageSampleExplicitLod);
     }
 
+    [Fact]
+    public void BvhIntersectRayLowersWithoutAnImageBinding()
+    {
+        var instructions = ReadSpirvInstructions(CompileImageOperation("ImageBvhIntersectRay", dimension: 1));
+
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.TypeImage);
+        Assert.DoesNotContain(instructions, item => item.Opcode is SpirvOp.ImageFetch or SpirvOp.ImageRead or SpirvOp.ImageSampleExplicitLod);
+    }
+
     [Theory]
     [InlineData(0xFACu, 0xFu, 4, 5, 6, 7)]
     [InlineData(0x9F5u, 0xFu, 7, 4, 5, 6)]

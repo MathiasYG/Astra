@@ -3,6 +3,7 @@
 
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
@@ -108,6 +109,18 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void BvhImageQueriesDoNotRequireDescriptorTracking()
+    {
+        var plan = Extract(Program(
+            Image(0, "ImageBvhIntersectRay", 0),
+            EndProgram(8)));
+
+        Assert.Null(plan.Memory.Find(0));
+        Assert.Empty(plan.Info.Images);
+        Assert.Empty(plan.Info.Samplers);
+    }
+
+    [Fact]
     public void SamplerWithDivergentBits_IsRejected()
     {
         var program = Program(
@@ -123,6 +136,51 @@ public sealed class ResourceTrackerTests
         var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
         Assert.Contains("not a valid runtime value", error.Message);
         Assert.Contains("pc=0x00000200", error.Message);
+    }
+
+    [Fact]
+    public void MixedImageDescriptorFromScalarBufferLoadIsRuntimeMaterialized()
+    {
+        var program = Program(
+            MoveScalar(0, 0, 0x1000),
+            MoveScalar(4, 1, 0),
+            MoveScalar(8, 2, 1),
+            MoveScalar(12, 3, 0),
+            ScalarBufferLoad(20, 0, destination: 16, count: 4, dynamicOffsetRegister: 8),
+            MoveScalar(24, 20, 0x20),
+            MoveScalar(28, 21, Format32x4Float << 20),
+            MoveScalar(32, 22, 3 | (3 << 14)),
+            MoveScalar(36, 23, IdentitySwizzle | (ImageType2D << 28)),
+            Image(40, "ImageSample", 16, 24),
+            EndProgram(48));
+
+        var plan = Extract(program);
+        var image = Assert.Single(plan.Info.Images);
+        var source = plan.DescriptorSources[(int)image.Source];
+        Assert.Equal(ScalarValueKind.ScalarBufferWord, source.Dwords[0].Kind);
+        Assert.Equal(ScalarValueKind.ScalarBufferWord, source.Dwords[3].Kind);
+        Assert.True(source.Dwords[4].IsConstant);
+    }
+
+    [Fact]
+    public void R128ImageIgnoresClobberedUpperDescriptorWords()
+    {
+        var program = Program(
+            MoveScalar(0, 16, 0x20),
+            MoveScalar(4, 17, Format32x4Float << 20),
+            MoveScalar(8, 18, 3 | (3 << 14)),
+            MoveScalar(12, 19, IdentitySwizzle | (ImageType2D << 28)),
+            Image(16, "ImageStore", 16, r128: true),
+            EndProgram(24));
+
+        var plan = Extract(program);
+        var source = plan.DescriptorSources[(int)Assert.Single(plan.Info.Images).Source];
+        Assert.Equal(8, source.Dwords.Length);
+        Assert.All(source.Dwords.Skip(4), value =>
+        {
+            Assert.True(value.IsConstant);
+            Assert.Equal(0u, value.ConstantU32);
+        });
     }
 
     private static uint[] StorageDescriptorUserData(uint mipBase, uint mipLast) =>
@@ -463,6 +521,176 @@ public sealed class ResourceTrackerTests
         Assert.Equal((uint)layout.UserDataRegisters.Count, layout.MemoryOffsetDword);
         Assert.Equal(1u, layout.MemoryOffsetCount);
         Assert.Equal(layout.MemoryOffsetDword + 1, layout.ShaderDataDwordCount);
+    }
+
+    [Fact]
+    public void DynamicDescriptorWordComputedFromScalarLoadRemainsShaderResident()
+    {
+        var program = Program(
+            ScalarLoad(4, 0, destination: 16, count: 4, dynamicOffsetRegister: 2),
+            Sop2(12, "SAddU32", 17, Gen5Operand.Scalar(17), Operand(1)),
+            BufferLoad(16, 16),
+            EndProgram(24));
+
+        var plan = Extract(program);
+
+        Assert.Empty(plan.TableReads);
+        Assert.Single(plan.Info.Buffers);
+        Assert.True(plan.Info.Buffers[0].DynamicDescriptor);
+        Assert.All(plan.Memory.Entries.Where(entry => entry.Pc == 4), entry => Assert.False(entry.PlanningOnly));
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0, 4]), ref snapshot, ref specialization));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program), out _, out var error), error);
+    }
+
+    [Fact]
+    public void DynamicDescriptorCanContainLoopCarriedConstantWord()
+    {
+        var program = Program(
+            Sopc(0, "SCmpEqU32", Gen5Operand.Scalar(0), Operand(1)),
+            Branch(4, "SCbranchScc1", 3),
+            MoveScalar(8, 19, 0),
+            Branch(12, "SBranch", 2),
+            Nop(16),
+            MoveScalar(20, 19, 1),
+            ScalarLoad(24, 0, destination: 16, count: 3, dynamicOffsetRegister: 2),
+            BufferLoad(32, 16),
+            EndProgram(40));
+
+        var plan = Extract(program);
+
+        Assert.Empty(plan.TableReads);
+        Assert.Single(plan.Info.Buffers);
+        Assert.True(plan.Info.Buffers[0].DynamicDescriptor);
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0, 4]), ref snapshot, ref specialization));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program), out _, out var error), error);
+    }
+
+    [Fact]
+    public void LoopCarriedAddressDescriptorRemainsShaderResident()
+    {
+        var program = Program(
+            Sop2(0, "SAddU32", 0, Gen5Operand.Scalar(0), Operand(1)),
+            Branch(4, "SCbranchScc1", -2),
+            ScalarLoad(8, 0, destination: 16, count: 8),
+            BufferLoad(16, 16),
+            EndProgram(24));
+
+        var plan = Extract(program);
+
+        Assert.Empty(plan.TableReads);
+        Assert.Single(plan.Info.Buffers);
+        Assert.True(plan.Info.Buffers[0].DynamicDescriptor);
+        Assert.All(plan.Memory.Entries.Where(entry => entry.Pc == 8), entry => Assert.False(entry.PlanningOnly));
+        Assert.Contains(plan.DynamicReads, read => read.Kind == ScalarValueKind.ScalarAddressWord &&
+            plan.Memory[read.MemoryIndex].Pc == 8);
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0]), ref snapshot, ref specialization));
+        Assert.Equal([0u, 0u, 0u, 0u], Assert.Single(snapshot.Buffers));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program), out _, out var error), error);
+    }
+
+    [Fact]
+    public void LoopCarriedDescriptorCanMergeFlattenedSeedWithRuntimeScalarLoad()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 16, count: 4),
+            Sop2(8, "SAddU32", 0, Gen5Operand.Scalar(0), Operand(4)),
+            ScalarLoad(12, 0, destination: 16, count: 8),
+            Branch(20, "SCbranchScc1", -4),
+            BufferLoad(24, 16),
+            EndProgram(32));
+
+        var plan = Extract(program);
+
+        Assert.NotEmpty(plan.TableReads);
+        Assert.Single(plan.Info.Buffers);
+        Assert.True(plan.Info.Buffers[0].DynamicDescriptor);
+        Assert.All(plan.Memory.Entries.Where(entry => entry.Pc == 0), entry => Assert.True(entry.PlanningOnly));
+        Assert.All(plan.Memory.Entries.Where(entry => entry.Pc == 12), entry => Assert.False(entry.PlanningOnly));
+        Assert.Contains(plan.DynamicReads, read => read.Kind == ScalarValueKind.ScalarAddressWord &&
+            plan.Memory[read.MemoryIndex].Pc == 12);
+
+        var memory = new TestWordMemory
+        {
+            Words = [0x100, 0x200, 0x300, 0x400],
+        };
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory.Read),
+            ref snapshot, ref specialization));
+        Assert.Equal([0u, 0u, 0u, 0u], Assert.Single(snapshot.Buffers));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program), out _, out var error), error);
+    }
+
+    [Fact]
+    public void LoopCarriedDescriptorCanCombineFlattenedWordsWithPartialRuntimeLoad()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 16, count: 4),
+            Sop2(8, "SAddU32", 0, Gen5Operand.Scalar(0), Operand(4)),
+            ScalarLoad(12, 0, destination: 16, count: 1),
+            Branch(20, "SCbranchScc1", -4),
+            BufferLoad(24, 16),
+            EndProgram(32));
+
+        var plan = Extract(program);
+
+        Assert.NotEmpty(plan.TableReads);
+        Assert.Single(plan.Info.Buffers);
+        Assert.True(plan.Info.Buffers[0].DynamicDescriptor);
+        Assert.All(plan.Memory.Entries.Where(entry => entry.Pc == 0), entry => Assert.True(entry.PlanningOnly));
+        Assert.All(plan.Memory.Entries.Where(entry => entry.Pc == 12), entry => Assert.False(entry.PlanningOnly));
+        Assert.Contains(plan.DynamicReads, read => read.Kind == ScalarValueKind.ScalarAddressWord &&
+            plan.Memory[read.MemoryIndex].Pc == 12);
+
+        var memory = new TestWordMemory
+        {
+            Words = [0x100, 0x200, 0x300, 0x400],
+        };
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readMemory: memory.Read), ref snapshot, ref specialization));
+        Assert.Equal([0u, 0u, 0u, 0u], Assert.Single(snapshot.Buffers));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program), out _, out var error), error);
+    }
+
+    [Fact]
+    public void DescriptorLoadThroughPathDependentAddressRemainsShaderResident()
+    {
+        var program = Program(
+            Sopc(0, "SCmpEqU32", Gen5Operand.Scalar(0), Operand(1)),
+            Branch(4, "SCbranchScc1", 3),
+            MoveScalar(8, 80, 0x1000),
+            MoveScalar(12, 81, 0),
+            Branch(16, "SBranch", 2),
+            Nop(20),
+            Nop(24),
+            ScalarLoad(28, 80, destination: 16, count: 8),
+            BufferLoad(36, 16),
+            EndProgram(44));
+
+        var plan = Extract(program);
+
+        Assert.Empty(plan.TableReads);
+        Assert.Single(plan.Info.Buffers);
+        Assert.True(plan.Info.Buffers[0].DynamicDescriptor);
+        Assert.All(plan.Memory.Entries.Where(entry => entry.Pc == 28), entry => Assert.False(entry.PlanningOnly));
+        Assert.Contains(plan.DynamicReads, read => read.Kind == ScalarValueKind.ScalarAddressWord &&
+            plan.Memory[read.MemoryIndex].Pc == 28);
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([1]), ref snapshot, ref specialization));
+        Assert.Equal([0u, 0u, 0u, 0u], Assert.Single(snapshot.Buffers));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program), out _, out var error), error);
     }
 
     [Fact]

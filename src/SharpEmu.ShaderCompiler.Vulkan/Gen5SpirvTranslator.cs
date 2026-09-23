@@ -1350,6 +1350,11 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (IsDynamicControl(terminator.Opcode))
+            {
+                return TryEmitDynamicControl(blocks, terminator, out error);
+            }
+
             if (fallthrough == uint.MaxValue)
             {
                 Store(_programActive, _module.ConstantBool(false));
@@ -1359,6 +1364,57 @@ public static partial class Gen5SpirvTranslator
                 Store(_programCounter, UInt(fallthrough));
             }
 
+            return true;
+        }
+
+        private bool TryEmitDynamicControl(
+            IReadOnlyList<ShaderBlock> blocks,
+            Gen5ShaderInstruction instruction,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count == 0)
+            {
+                error = $"missing scalar 64-bit target for {instruction.Opcode}";
+                return false;
+            }
+
+            // S_SETPC/ S_SWAPPC receive an absolute code address. The dispatcher
+            // uses compact block indices, so resolve both forms that appear in
+            // practice: the shader-base-relative PC returned by S_GETPC and the
+            // already-relative offset used when no shader-base binding exists.
+            var target = GetRawSource64(instruction, 0);
+            var (baseLow, baseHigh) = LoadShaderBase();
+            var shaderBase = Pair64(baseLow, baseHigh);
+            var selected = UInt(uint.MaxValue);
+            for (var index = blocks.Count - 1; index >= 0; index--)
+            {
+                var start = blocks[index].StartPc;
+                var absolute = IAdd64(shaderBase, ULong(start));
+                var absoluteMatch = _module.AddInstruction(
+                    SpirvOp.IEqual,
+                    _boolType,
+                    target,
+                    absolute);
+                var relativeMatch = _module.AddInstruction(
+                    SpirvOp.IEqual,
+                    _boolType,
+                    target,
+                    ULong(start));
+                var matches = _module.AddInstruction(
+                    SpirvOp.LogicalOr,
+                    _boolType,
+                    absoluteMatch,
+                    relativeMatch);
+                selected = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    matches,
+                    UInt((uint)index),
+                    selected);
+            }
+
+            Store(_programCounter, selected);
             return true;
         }
 
@@ -2063,12 +2119,14 @@ public static partial class Gen5SpirvTranslator
                 continueLabel);
             var observedFloat = Bitcast(_floatType, observed);
             var valueFloat = Bitcast(_floatType, value);
+            var candidateFloat = Ext(maxValue ? 40u : 37u, _floatType, valueFloat, observedFloat);
+            var candidate = Bitcast(_uintType, candidateFloat);
             var replace = _module.AddInstruction(
                 maxValue ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
                 _boolType,
                 valueFloat,
                 observedFloat);
-            var next = _module.AddInstruction(SpirvOp.Select, _uintType, replace, value, observed);
+            var next = _module.AddInstruction(SpirvOp.Select, _uintType, replace, candidate, observed);
 
             _module.AddStatement(
                 SpirvOp.AtomicCompareExchange,
@@ -2235,6 +2293,11 @@ public static partial class Gen5SpirvTranslator
                 {
                     error = "missing buffer-memory binding";
                     return false;
+                }
+
+                if (specialized.DynamicDescriptor)
+                {
+                    return TryEmitDynamicBufferMemory(instruction, control, out error);
                 }
 
                 stride = UInt(specialized.PackedStride & 0x3FFF);
@@ -3496,11 +3559,9 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
-                // The host path does not expose Vulkan ray-query or an
-                // acceleration-structure descriptor for GFX10's raw BVH
-                // texture. Return a deterministic miss instead of rejecting
-                // the complete compute shader. The instruction always writes
-                // four DWORD result registers.
+                // This backend has no portable SPIR-V image-BVH primitive.
+                // Model the defined conservative miss without resolving a
+                // regular image descriptor; the instruction writes four DWORDs.
                 for (uint component = 0; component < 4; component++)
                 {
                     StoreV(image.VectorData + component, UInt(0));
@@ -6435,6 +6496,9 @@ public static partial class Gen5SpirvTranslator
             opcode == "SBranch" ||
             opcode.StartsWith("SCbranch", StringComparison.Ordinal);
 
+        private static bool IsDynamicControl(string opcode) =>
+            opcode is "SSetpcB64" or "SSwappcB64";
+
         private static bool TryGetBranchTargetPc(
             Gen5ShaderInstruction instruction,
             out uint targetPc)
@@ -6477,7 +6541,9 @@ public static partial class Gen5SpirvTranslator
                     leaders.Add(targetPc);
                 }
 
-                if ((IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm") &&
+                if ((IsBranch(instruction.Opcode) ||
+                     IsDynamicControl(instruction.Opcode) ||
+                     instruction.Opcode == "SEndpgm") &&
                     index + 1 < instructions.Count)
                 {
                     leaders.Add(instructions[index + 1].Pc);

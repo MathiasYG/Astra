@@ -224,6 +224,7 @@ public static class ShaderRegisterOffset
 // User-config bank offsets the write table covers.
 public static class UserConfigRegisterOffset
 {
+    public const uint CpVgtGsPrimCountHi = 0x01F;
     public const uint VgtPrimitiveType = 0x242;
     public const uint VgtIndexType = 0x243;
     public const uint VgtObjectId = 0x248;

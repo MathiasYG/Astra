@@ -75,6 +75,32 @@ public sealed class Gen5FlatMemoryTests
     }
 
     [Fact]
+    public void ScratchStoreDword_DecodesAndUsesAddressMemoryLowering()
+    {
+        var program = DecodeProgram(
+            0xDC70_4000,
+            0x0000_0400,
+            SEndpgm);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal("ScratchStoreDword", instruction.Opcode);
+        Assert.Equal(
+            [
+                Gen5Operand.Vector(0),
+                Gen5Operand.Scalar(0),
+                Gen5Operand.Vector(4),
+            ],
+            instruction.Sources);
+        Assert.Empty(instruction.Destinations);
+
+        var control = Assert.IsType<Gen5GlobalMemoryControl>(instruction.Control);
+        Assert.Equal(1u, control.DwordCount);
+        Assert.Equal(0u, control.VectorAddress);
+        Assert.Equal(4u, control.SourceVectorRegister);
+        Assert.Equal(0u, control.ScalarAddress);
+    }
+
+    [Fact]
     public void SadU32CompilesToUnsignedMinMaxDifferenceAndAdd()
     {
         var program = DecodeProgram(0xD15D0003u, 0x040A0300u, SEndpgm);

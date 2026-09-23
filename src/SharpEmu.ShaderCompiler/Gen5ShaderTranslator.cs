@@ -774,9 +774,9 @@ public static partial class Gen5ShaderTranslator
             0x0C => "SCmpkGeU32",
             0x0D => "SCmpkLtU32",
             0x0E => "SCmpkLeU32",
+            0x13 => "SSetregB32",
             0x0F => "SAddkI32",
             0x10 => "SMulkI32",
-            0x13 => "SSetregB32",
             // RDNA2 uses four SOPK forms to wait for one counter.
             // The selected counter does not change the translated operation.
             0x17 or 0x18 or 0x19 or 0x1A => "SWaitcnt",
@@ -1069,6 +1069,7 @@ public static partial class Gen5ShaderTranslator
             : opcode switch
         {
             0x0B5 => "VCmpxNeI64",
+            0x0F5 => "VCmpxNeU64",
             0x101 => "VCndmaskB32",
             0x103 => "VAddF32",
             0x104 => "VSubF32",
@@ -1080,6 +1081,7 @@ public static partial class Gen5ShaderTranslator
             0x12B => "VFmacF32",
             0x12F => "VCvtPkrtzF16F32",
             0x141 => "VMadF32",
+            0x142 => "VMadI32I24",
             0x143 => "VMadU32U24",
             0x144 => "VCubeidF32",
             0x145 => "VCubescF32",
@@ -1088,6 +1090,7 @@ public static partial class Gen5ShaderTranslator
             0x14A => "VBfiB32",
             0x14E => "VAlignbitB32",
             0x14B => "VFmaF32",
+            0x14F => "VAlignbyteB32",
             0x151 => "VMin3F32",
             0x152 => "VMin3I32",
             0x153 => "VMin3U32",
@@ -1128,11 +1131,12 @@ public static partial class Gen5ShaderTranslator
             0x36D => "VAdd3U32",
             0x36F => "VLshlOrU32",
             0x178 => "VXor3B32",
-            0x300 => "VLshrrevB64",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
             0x378 => "VPermlanex16B32",
+            0x2FF => "VLshlrevB64",
+            0x300 => "VLshrrevB64",
             _ => $"Vop3Raw{opcode:X3}",
         };
 
@@ -1480,8 +1484,9 @@ public static partial class Gen5ShaderTranslator
 
     private static bool DecodeMimg(uint word, out string name, out uint sizeDwords, out string error)
     {
-        // RDNA2 MIMG OP[7] is bit 0 while OP[6:0] occupies bits 24:18.
-        // Ignoring bit 0 aliases 0xE6/0xE7 BVH operations to 0x66/0x67.
+        // RDNA2 stores MIMG opcode bit 7 in word0 bit 0 while bits 18:24 hold
+        // bits 0:6. Ignoring bit 0 aliases BVH opcodes 0xE6/0xE7 to reserved
+        // values 0x66/0x67 and rejects valid ray-query instructions.
         var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
         sizeDwords = 2 + ((word >> 1) & 0x3);
         error = string.Empty;
@@ -1575,7 +1580,10 @@ public static partial class Gen5ShaderTranslator
             _ => string.Empty,
         };
 
-        return FinishDecode(name, $"unknown-mimg op=0x{opcode:X2}", out error);
+        return FinishDecode(
+            name,
+            $"unknown-mimg op=0x{opcode:X2} word=0x{word:X8}",
+            out error);
     }
 
     private static bool DecodeVintrp(uint word, out string name, out uint sizeDwords, out string error)
@@ -1862,6 +1870,8 @@ public static partial class Gen5ShaderTranslator
                 }
                 else if (opcode == "SSetregB32")
                 {
+                    // The SOPK SDST field selects the scalar data source; the
+                    // encoded immediate identifies the hardware register field.
                     sources =
                     [
                         Gen5Operand.Scalar((word >> 16) & 0x7F),
@@ -2105,7 +2115,11 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
-                destinations = [Gen5Operand.Vector(word & 0xFF)];
+                destinations = opcode.StartsWith("VCmp", StringComparison.Ordinal)
+                    ? []
+                    : opcode is "VLshlrevB64" or "VLshrrevB64"
+                    ? [Gen5Operand.Vector(word & 0xFF), Gen5Operand.Vector((word & 0xFF) + 1)]
+                    : [Gen5Operand.Vector(word & 0xFF)];
                 if (opcode == "VReadlaneB32")
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the
@@ -2268,14 +2282,11 @@ public static partial class Gen5ShaderTranslator
                 var usesFlatAddress = opcode.StartsWith(
                     "Flat",
                     StringComparison.Ordinal);
-                var usesScratchAddress = opcode.StartsWith(
-                    "Scratch",
-                    StringComparison.Ordinal);
+                // Keep scratch opcodes visible to resource planning and backend
+                // lowering so they are not mistaken for device-address accesses.
                 var memoryOpcode = usesFlatAddress
                     ? "Global" + opcode["Flat".Length..]
-                    : usesScratchAddress
-                        ? "Global" + opcode["Scratch".Length..]
-                        : opcode;
+                    : opcode;
                 var dwordCount = memoryOpcode switch
                 {
                     "GlobalLoadUbyte" or
@@ -2302,6 +2313,14 @@ public static partial class Gen5ShaderTranslator
                     "GlobalStoreDwordx2" => 2u,
                     "GlobalStoreDwordx3" => 3u,
                     "GlobalStoreDwordx4" => 4u,
+                    "ScratchLoadDword" => 1u,
+                    "ScratchLoadDwordx2" => 2u,
+                    "ScratchLoadDwordx3" => 3u,
+                    "ScratchLoadDwordx4" => 4u,
+                    "ScratchStoreDword" => 1u,
+                    "ScratchStoreDwordx2" => 2u,
+                    "ScratchStoreDwordx3" => 3u,
+                    "ScratchStoreDwordx4" => 4u,
                     _ => 0u,
                 };
                 sources = usesFlatAddress
@@ -2310,18 +2329,17 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorAddress + 1),
                     ]
-                    : usesScratchAddress && scalarAddress < 125
-                        ? [Gen5Operand.Scalar(scalarAddress)]
-                        : usesScratchAddress
-                            ? [Gen5Operand.Vector(vectorAddress)]
                     :
                     [
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Scalar(scalarAddress),
                     ];
-                var isLoad = memoryOpcode.StartsWith("GlobalLoad", StringComparison.Ordinal);
-                var isStore = memoryOpcode.StartsWith("GlobalStore", StringComparison.Ordinal);
-                var isAtomic = memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal);
+                var isLoad = memoryOpcode.StartsWith("GlobalLoad", StringComparison.Ordinal) ||
+                    memoryOpcode.StartsWith("ScratchLoad", StringComparison.Ordinal);
+                var isStore = memoryOpcode.StartsWith("GlobalStore", StringComparison.Ordinal) ||
+                    memoryOpcode.StartsWith("ScratchStore", StringComparison.Ordinal);
+                var isAtomic = memoryOpcode.StartsWith("GlobalAtomic", StringComparison.Ordinal) ||
+                    memoryOpcode.StartsWith("ScratchAtomic", StringComparison.Ordinal);
                 var globallyCoherent = ((word >> 16) & 1) != 0;
                 if (isStore || isAtomic)
                 {
@@ -2487,7 +2505,10 @@ public static partial class Gen5ShaderTranslator
                 }
 
                 imageSources.Add(Gen5Operand.Scalar(scalarResource));
-                imageSources.Add(Gen5Operand.Scalar(scalarSampler));
+                if (!opcode.StartsWith("ImageBvh", StringComparison.Ordinal))
+                {
+                    imageSources.Add(Gen5Operand.Scalar(scalarSampler));
+                }
                 sources = imageSources;
                 destinations = opcode.StartsWith("ImageStore", StringComparison.Ordinal)
                     ? []
