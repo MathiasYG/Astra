@@ -508,14 +508,6 @@ public static partial class Gen5SpirvTranslator
                             _intType,
                             Bitcast(_intType, GetRawSource(instruction, 0))));
                     break;
-                case "VFfbhU32":
-                {
-                    var source = GetRawSource(instruction, 0);
-                    var mostSignificantBit = Ext(75, _uintType, source);
-                    var count = ISubU(UInt(31), mostSignificantBit);
-                    result = SelectU(IsNotZero(source), count, UInt(uint.MaxValue));
-                    break;
-                }
                 case "VAddI32":
                 case "VAddU32":
                     result = EmitIntegerBinary(instruction, SpirvOp.IAdd);

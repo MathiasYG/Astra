@@ -1131,7 +1131,6 @@ public static partial class Gen5ShaderTranslator
             0x36D => "VAdd3U32",
             0x36F => "VLshlOrU32",
             0x178 => "VXor3B32",
-            0x300 => "VLshrrevB64",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
@@ -2330,10 +2329,6 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorAddress + 1),
                     ]
-                    : usesScratchAddress && scalarAddress < 125
-                        ? [Gen5Operand.Scalar(scalarAddress)]
-                        : usesScratchAddress
-                            ? [Gen5Operand.Vector(vectorAddress)]
                     :
                     [
                         Gen5Operand.Vector(vectorAddress),

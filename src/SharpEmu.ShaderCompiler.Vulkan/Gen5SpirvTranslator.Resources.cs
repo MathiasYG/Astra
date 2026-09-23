@@ -79,9 +79,6 @@ public static partial class Gen5SpirvTranslator
         private uint _physicalUintPointer;
         private uint _deviceEntryScratch;
         private uint _deviceWordScratch;
-        private uint _scratch;
-        private uint _scratchElementPointer;
-        private uint _scratchDwordCount;
         private uint _pushDataBlockPointer;
         private uint _wordRuntimeArray;
         private uint _addressRuntimeArray;
@@ -216,21 +213,6 @@ public static partial class Gen5SpirvTranslator
                 _module.AddName(_deviceWordScratch, "deviceAddressWord");
                 _interfaces.Add(_deviceEntryScratch);
                 _interfaces.Add(_deviceWordScratch);
-            }
-
-            if (request.Program.Instructions.Any(static instruction =>
-                    instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal)))
-            {
-                _scratchDwordCount = Math.Max(request.ScratchDwords, 1u);
-                var scratchArrayType = _module.TypeArray(_uintType, _scratchDwordCount);
-                var scratchPointer = _module.TypePointer(SpirvStorageClass.Private, scratchArrayType);
-                _scratchElementPointer = _module.TypePointer(SpirvStorageClass.Private, _uintType);
-                _scratch = _module.AddGlobalVariable(
-                    scratchPointer,
-                    SpirvStorageClass.Private,
-                    _module.ConstantNull(scratchArrayType));
-                _module.AddName(_scratch, "guestScratch");
-                _interfaces.Add(_scratch);
             }
 
             foreach (var memoryIndex in request.IndirectKeyMemoryIndices)
