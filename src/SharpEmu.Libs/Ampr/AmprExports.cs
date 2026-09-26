@@ -125,6 +125,44 @@ public static class AmprExports
         public required CachedHostFile File { get; init; }
     }
 
+    [SysAbiExport(
+        Nid = "wkQR9+xTFKY",
+        ExportName = "sceAmprAmmGetVirtualAddressRanges",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmGetVirtualAddressRanges(CpuContext ctx)
+    {
+        // The Gen5 import thunk expands the 32-byte output structure into four
+        // pointers: base and size for the direct and flexible memory pools.
+        var directBaseOut = ctx[CpuRegister.Rdi];
+        var directSizeOut = ctx[CpuRegister.Rsi];
+        var flexibleBaseOut = ctx[CpuRegister.Rdx];
+        var flexibleSizeOut = ctx[CpuRegister.Rcx];
+        if (directBaseOut == 0 || directSizeOut == 0 ||
+            flexibleBaseOut == 0 || flexibleSizeOut == 0)
+        {
+            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!ctx.TryWriteUInt64(directBaseOut, 0) ||
+            !ctx.TryWriteUInt64(directSizeOut, GuestMemoryLayout.DirectBytes) ||
+            !ctx.TryWriteUInt64(flexibleBaseOut, GuestMemoryLayout.FlexibleOffset) ||
+            !ctx.TryWriteUInt64(flexibleSizeOut, GuestMemoryLayout.FlexibleBytes))
+        {
+            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (_traceAmpr)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][TRACE] ampr amm_virtual_ranges " +
+                $"direct=0x0+0x{GuestMemoryLayout.DirectBytes:X} " +
+                $"flexible=0x{GuestMemoryLayout.FlexibleOffset:X}+0x{GuestMemoryLayout.FlexibleBytes:X}");
+        }
+
+        return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     // Keep a bounded LRU of open host files. An unbounded cache exhausts the
     // process FD limit (~10k on macOS) during large asset storms, after
     // which every new open throws IOException and surfaces as NOT_FOUND — the
