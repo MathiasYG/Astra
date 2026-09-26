@@ -2366,6 +2366,12 @@ public sealed partial class DirectExecutionBackend
 		return OrbisGen2Result.ORBIS_GEN2_OK;
 	}
 
+	public bool TryResolveGuestSymbol(string symbolName, out ulong address)
+	{
+		return TryResolveRuntimeSymbolAddress(symbolName, out address) &&
+			IsDirectImportTargetUsable(address);
+	}
+
 	private bool TryResolveRuntimeSymbolAddress(string symbolName, out ulong address)
 	{
 		address = 0uL;
