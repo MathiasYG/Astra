@@ -124,6 +124,9 @@ internal static class KernelPthreadState
     {
         var pointer = Marshal.AllocHGlobal(ThreadObjectSize);
         Marshal.Copy(ZeroThreadObject, 0, pointer, ThreadObjectSize);
+        // Guest pthread objects expose their numeric thread ID in the first
+        // word. Callers may read it directly after pthread_create succeeds.
+        Marshal.WriteInt32(pointer, unchecked((int)uniqueId));
 
         var handle = unchecked((ulong)pointer.ToInt64());
         Threads[handle] = new ThreadIdentity(uniqueId, string.IsNullOrWhiteSpace(name) ? $"Thread-{uniqueId:X}" : name);
