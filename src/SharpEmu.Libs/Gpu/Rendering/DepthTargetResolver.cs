@@ -167,11 +167,41 @@ public static class DepthTargetResolver
             var operationsDisabled = depth.StencilClearEnabled || depth.StencilWriteDisabled;
             var frontWriteMask = operationsDisabled ? (byte)0 : masks.WriteMask;
             var backWriteMask = operationsDisabled ? (byte)0 : masks.WriteMaskBack;
+            var frontOperationValueAsInvert = TryUseInvertForOperationValue(
+                (CompareOp)depth.StencilCompare,
+                masks.Mask,
+                frontWriteMask,
+                masks.TestValue,
+                masks.OperationValue,
+                control.Fail,
+                control.Pass,
+                control.DepthFail,
+                out var frontVulkanWriteMask);
+            var backOperationValueAsInvert = TryUseInvertForOperationValue(
+                (CompareOp)depth.StencilCompareBack,
+                masks.MaskBack,
+                backWriteMask,
+                masks.TestValueBack,
+                masks.OperationValueBack,
+                control.FailBack,
+                control.PassBack,
+                control.DepthFailBack,
+                out var backVulkanWriteMask);
+            if (!frontOperationValueAsInvert)
+            {
+                frontVulkanWriteMask = frontWriteMask;
+            }
+
+            if (!backOperationValueAsInvert)
+            {
+                backVulkanWriteMask = backWriteMask;
+            }
+
             if (depth.StencilCompare > (uint)CompareOp.Always ||
                 (depth.BackFaceEnabled && depth.StencilCompareBack > (uint)CompareOp.Always) ||
-                (frontWriteMask != 0 && UsesOperationValue(control.Fail, control.Pass, control.DepthFail) &&
+                (frontWriteMask != 0 && UsesOperationValue(control.Fail, control.Pass, control.DepthFail) && !frontOperationValueAsInvert &&
                     !CanShareStencilReference((CompareOp)depth.StencilCompare, masks.Mask, frontWriteMask, masks.TestValue, masks.OperationValue, control.Fail, control.Pass, control.DepthFail)) ||
-                (depth.BackFaceEnabled && backWriteMask != 0 && UsesOperationValue(control.FailBack, control.PassBack, control.DepthFailBack) &&
+                (depth.BackFaceEnabled && backWriteMask != 0 && UsesOperationValue(control.FailBack, control.PassBack, control.DepthFailBack) && !backOperationValueAsInvert &&
                     !CanShareStencilReference((CompareOp)depth.StencilCompareBack, masks.MaskBack, backWriteMask, masks.TestValueBack, masks.OperationValueBack, control.FailBack, control.PassBack, control.DepthFailBack)))
             {
                 throw fatal(
@@ -181,27 +211,27 @@ public static class DepthTargetResolver
             }
 
             front = new StencilOperations(
-                ConvertOperation(control.Fail, frontWriteMask, masks.OperationValue, fatal),
-                ConvertOperation(control.Pass, frontWriteMask, masks.OperationValue, fatal),
-                ConvertOperation(control.DepthFail, frontWriteMask, masks.OperationValue, fatal),
+                ConvertOperation(control.Fail, frontVulkanWriteMask, masks.OperationValue, fatal, frontOperationValueAsInvert),
+                ConvertOperation(control.Pass, frontVulkanWriteMask, masks.OperationValue, fatal, frontOperationValueAsInvert),
+                ConvertOperation(control.DepthFail, frontVulkanWriteMask, masks.OperationValue, fatal, frontOperationValueAsInvert),
                 (CompareOp)depth.StencilCompare);
-            var frontReference = UsesOperationValue(control.Fail, control.Pass, control.DepthFail) &&
+            var frontReference = !frontOperationValueAsInvert && UsesOperationValue(control.Fail, control.Pass, control.DepthFail) &&
                 (frontWriteMask & (masks.TestValue ^ masks.OperationValue)) != 0
                 ? masks.OperationValue
                 : masks.TestValue;
-            frontMasks = new StencilMasks(masks.Mask, frontWriteMask, frontReference);
+            frontMasks = new StencilMasks(masks.Mask, frontVulkanWriteMask, frontReference);
             if (depth.BackFaceEnabled)
             {
                 back = new StencilOperations(
-                    ConvertOperation(control.FailBack, backWriteMask, masks.OperationValueBack, fatal),
-                    ConvertOperation(control.PassBack, backWriteMask, masks.OperationValueBack, fatal),
-                    ConvertOperation(control.DepthFailBack, backWriteMask, masks.OperationValueBack, fatal),
+                    ConvertOperation(control.FailBack, backVulkanWriteMask, masks.OperationValueBack, fatal, backOperationValueAsInvert),
+                    ConvertOperation(control.PassBack, backVulkanWriteMask, masks.OperationValueBack, fatal, backOperationValueAsInvert),
+                    ConvertOperation(control.DepthFailBack, backVulkanWriteMask, masks.OperationValueBack, fatal, backOperationValueAsInvert),
                     (CompareOp)depth.StencilCompareBack);
-                var backReference = UsesOperationValue(control.FailBack, control.PassBack, control.DepthFailBack) &&
+                var backReference = !backOperationValueAsInvert && UsesOperationValue(control.FailBack, control.PassBack, control.DepthFailBack) &&
                     (backWriteMask & (masks.TestValueBack ^ masks.OperationValueBack)) != 0
                     ? masks.OperationValueBack
                     : masks.TestValueBack;
-                backMasks = new StencilMasks(masks.MaskBack, backWriteMask, backReference);
+                backMasks = new StencilMasks(masks.MaskBack, backVulkanWriteMask, backReference);
             }
             else
             {
@@ -231,6 +261,33 @@ public static class DepthTargetResolver
     private static bool UsesOperationValue(byte fail, byte pass, byte depthFail) =>
         fail == ReplaceWithOperationValue || pass == ReplaceWithOperationValue || depthFail == ReplaceWithOperationValue;
 
+    private static bool TryUseInvertForOperationValue(
+        CompareOp compare,
+        byte compareMask,
+        byte writeMask,
+        byte testValue,
+        byte operationValue,
+        byte fail,
+        byte pass,
+        byte depthFail,
+        out byte vulkanWriteMask)
+    {
+        vulkanWriteMask = writeMask;
+        if (writeMask == 0 || compare != CompareOp.Equal || (writeMask & ~compareMask) != 0 ||
+            fail != 0 ||
+            (pass != 0 && pass != ReplaceWithOperationValue) ||
+            (depthFail != 0 && depthFail != ReplaceWithOperationValue) ||
+            !UsesOperationValue(fail, pass, depthFail))
+        {
+            return false;
+        }
+
+        // Equal comparison fixes every written bit to the test value. INVERT with a mask
+        // containing only bits that differ then produces the operation-value replacement.
+        vulkanWriteMask = (byte)(writeMask & (testValue ^ operationValue));
+        return true;
+    }
+
     private static bool CanShareStencilReference(CompareOp compare, byte compareMask, byte writeMask, byte testValue, byte operationValue, byte fail, byte pass, byte depthFail)
     {
         var differingBits = (byte)(testValue ^ operationValue);
@@ -259,7 +316,7 @@ public static class DepthTargetResolver
         fail == 0x03 || pass == 0x03 || depthFail == 0x03;
 
     // A zero write mask makes every operation a keep; XOR maps to invert only over the written bits.
-    private static StencilOp ConvertOperation(byte operation, byte writeMask, byte operationValue, Func<string, Exception> fatal)
+    private static StencilOp ConvertOperation(byte operation, byte writeMask, byte operationValue, Func<string, Exception> fatal, bool operationValueAsInvert = false)
     {
         if (writeMask == 0)
         {
@@ -274,7 +331,7 @@ public static class DepthTargetResolver
                 return StencilOp.Zero;
             case 0x03:
             case ReplaceWithOperationValue:
-                return StencilOp.Replace;
+                return operation == ReplaceWithOperationValue && operationValueAsInvert ? StencilOp.Invert : StencilOp.Replace;
             case 0x05:
                 return StencilOp.IncrementAndClamp;
             case 0x06:

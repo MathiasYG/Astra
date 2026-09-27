@@ -123,6 +123,39 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void DepthState_EqualTestCanTranslateOperationValueReplacementToMaskedInvert()
+    {
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x40, DepthControl(CompareOp.Less, CompareOp.Equal));
+        context.StencilControl.DepthFail = 0;
+        context.StencilMask.TestValue = 0xFF;
+
+        var state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
+
+        Assert.Equal(new StencilOperations(StencilOp.Keep, StencilOp.Invert, StencilOp.Keep, CompareOp.Equal), state.FrontOperations);
+        Assert.Equal(new StencilMasks(0xFF, 0xBF, 0xFF), state.FrontMasks);
+
+        // The Equal test only passes for 0xFF. Invert toggles the differing bits and
+        // leaves the shared bit intact, exactly matching the guest replacement.
+        for (var stencil = 0; stencil <= byte.MaxValue; stencil++)
+        {
+            var before = (byte)stencil;
+            var guestAfter = before == 0xFF ? (byte)0x40 : before;
+            var vulkanAfter = before == state.FrontMasks.Reference
+                ? (byte)((before & ~(byte)state.FrontMasks.WriteMask) | ((byte)~before & (byte)state.FrontMasks.WriteMask))
+                : before;
+            Assert.Equal(guestAfter, vulkanAfter);
+        }
+
+        // A replacement in the stencil-fail path has no known input value, and an
+        // incomplete compare mask does not establish all written bits.
+        context.StencilControl.Fail = 4;
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+        context.StencilControl.Fail = 0;
+        context.StencilMask.Mask = 0x7F;
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+    }
+
+    [Fact]
     public void DepthState_RejectsMixedReplacementValuesWhenBothCanAffectWrites()
     {
         var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(CompareOp.Less, CompareOp.Always));
