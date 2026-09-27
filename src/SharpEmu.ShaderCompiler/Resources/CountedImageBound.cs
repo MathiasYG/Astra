@@ -95,7 +95,8 @@ internal static class CountedImageBound
             var displacement = unchecked((short)(instruction.Words[0] & 0xFFFF));
             var targetPc = unchecked((uint)((long)instruction.Pc + 4 + (long)displacement * 4));
             var targetBlock = FindBlock(flow, targetPc);
-            if (targetBlock >= 0 && !ReachableWithoutGuard(flow, targetBlock, readBlock, guardBlock))
+            if (targetBlock >= 0 && targetBlock != guardBlock &&
+                !ReachableWithoutGuard(flow, targetBlock, readBlock, guardBlock))
                 return true;
         }
         return false;
