@@ -12,7 +12,7 @@ using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Network;
 
-public static class NetExports
+public static partial class NetExports
 {
     private const int NetErrorBadFileDescriptor = unchecked((int)0x80410109);
     private const int NetErrorFault = unchecked((int)0x8041010E);
@@ -121,6 +121,7 @@ public static class NetExports
             socket.Dispose();
         }
         _sockets.Clear();
+        ClearEpollInstances();
         TraceNet("term", 0, 0, 0, 0);
         return ctx.SetReturn(0);
     }
@@ -959,7 +960,7 @@ public static class NetExports
         socketType = type switch
         {
             1 => SocketType.Stream,
-            2 => SocketType.Dgram,
+            2 or 6 => SocketType.Dgram, // 6 is the platform's P2P datagram type.
             _ => SocketType.Unknown,
         };
         protocolType = protocol switch
