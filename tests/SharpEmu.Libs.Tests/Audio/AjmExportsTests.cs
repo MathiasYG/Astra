@@ -324,6 +324,41 @@ public sealed class AjmExportsTests : IDisposable
         Assert.All(written.AsSpan(8).ToArray(), value => Assert.Equal(0x5A, value));
     }
 
+    [Fact]
+    public void DecodeSplit_UsesDescriptorArraysAndReportsInvalidInputWithoutClaimingDecodedAudio()
+    {
+        const ulong inputDescriptors = MemoryBase + 0x600;
+        const ulong outputDescriptors = MemoryBase + 0x640;
+        const ulong resultAddress = MemoryBase + 0x900;
+
+        var contextId = Initialize();
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+        Assert.Equal(0, CreateInstance(contextId, 1, 0x401, InstanceAddress));
+        InitializeBatch(BatchBufferAddress, 0x200, BatchInfoAddress);
+
+        WriteUInt64(inputDescriptors, 0); // A nonempty input needs an address.
+        WriteUInt64(inputDescriptors + 8, 16);
+        WriteUInt64(outputDescriptors, MemoryBase + 0x800);
+        WriteUInt64(outputDescriptors + 8, 64);
+        Span<byte> sentinel = stackalloc byte[64];
+        sentinel.Fill(0xA5);
+        Assert.True(_memory.TryWrite(MemoryBase + 0x800, sentinel));
+
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = ReadUInt32(InstanceAddress);
+        _ctx[CpuRegister.Rdx] = inputDescriptors;
+        _ctx[CpuRegister.Rcx] = 1;
+        _ctx[CpuRegister.R8] = outputDescriptors;
+        _ctx[CpuRegister.R9] = 1;
+        WriteStackArgs(resultAddress, 0, 0);
+
+        Assert.Equal(0, AjmExports.AjmBatchJobDecodeSplit(_ctx));
+        Assert.Equal(64ul, ReadUInt64(BatchInfoAddress + 8));
+        Assert.Equal(4, BinaryPrimitives.ReadInt32LittleEndian(ReadBytes(resultAddress, 4)));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(ReadBytes(resultAddress + 8, 4)));
+        Assert.All(ReadBytes(MemoryBase + 0x800, 64), value => Assert.Equal(0xA5, value));
+    }
+
     [Theory]
     [InlineData(23u)]
     [InlineData(24u)]

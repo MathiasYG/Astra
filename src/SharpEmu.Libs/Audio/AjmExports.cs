@@ -531,6 +531,51 @@ public static class AjmExports
     public static int AjmBatchJobDecodeSingle(CpuContext ctx) =>
         AjmBatchJobDecodeCore(ctx, multipleFrames: false);
 
+    // The split decode ABI has the same result argument as Decode, but its
+    // input and output arguments are arrays of AjmBuffer descriptors. Decode
+    // their concatenated streams using the same codec state as the plain job.
+    [SysAbiExport(
+        Nid = "SJ3i0DXP8vg",
+        ExportName = "sceAjmBatchJobDecodeSplit",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobDecodeSplit(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var inputAddress = ctx[CpuRegister.Rdx];
+        var inputCount = ctx[CpuRegister.Rcx];
+        var outputAddress = ctx[CpuRegister.R8];
+        var outputCount = ctx[CpuRegister.R9];
+        var resultAddress = ReadStackArg64(ctx, 0);
+
+        if (inputCount > MaxBufferDescriptors || outputCount > MaxBufferDescriptors ||
+            !TryAppendBatchJob(ctx, infoAddress,
+                AjmJobRunSplitBaseSize + (inputCount + outputCount) * AjmBufferDescriptorBytes))
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+
+        Atrac9DecodeResult result;
+        if (!TryGetInstance(instanceId, out var instance) ||
+            !TryCollectBuffers(ctx, true, inputAddress, inputCount, out var inputs, out var inputLength) ||
+            !TryCollectBuffers(ctx, true, outputAddress, outputCount, out var outputs, out var outputLength) ||
+            instance.Codec != Atrac9CodecType || instance.Atrac9 is null)
+        {
+            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+        else
+        {
+            result = DecodeAtrac9Scattered(ctx, instance, inputs, inputLength, outputs, outputLength,
+                multipleFrames: true);
+        }
+
+        WriteDecodeStreamResult(ctx, resultAddress, result, multipleFrames: true);
+        Trace($"batch_job_decode_split instance=0x{instanceId:X8} " +
+              $"in=0x{inputAddress:X16}#{inputCount} out=0x{outputAddress:X16}#{outputCount} " +
+              $"consumed={result.InputConsumed} produced={result.OutputWritten} " +
+              $"frames={result.Frames} status=0x{result.Status:X8}");
+        return ctx.SetReturn(0);
+    }
+
     /// <summary>
     /// The flag-driven decode entry point. Titles built on the modern AJM API
     /// drive ATRAC9 playback exclusively through Run/RunSplit —
