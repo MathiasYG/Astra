@@ -141,7 +141,8 @@ public sealed partial class ResourceTracker
     private static bool ReadsScalar(Gen5ShaderInstruction instruction, uint register)
     {
         bool InRange(uint first, uint width) => register >= first && register - first < width;
-        var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+        var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) &&
+            instruction.Opcode != "SBitreplicateB64B32" ? 2u : 1u;
         if (instruction.Sources.Any(source => source.Kind == Gen5OperandKind.ScalarRegister && InRange(source.Value, width)))
             return true;
         return instruction.Control switch

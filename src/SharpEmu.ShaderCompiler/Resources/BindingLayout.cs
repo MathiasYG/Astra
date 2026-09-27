@@ -442,11 +442,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         }
 
         var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+        var sourceWidth = instruction.Opcode == "SBitreplicateB64B32" ? 1u : width;
         foreach (var source in instruction.Sources)
         {
             if (source.Kind == Gen5OperandKind.ScalarRegister)
             {
-                Use(source.Value, width);
+                Use(source.Value, sourceWidth);
             }
         }
 

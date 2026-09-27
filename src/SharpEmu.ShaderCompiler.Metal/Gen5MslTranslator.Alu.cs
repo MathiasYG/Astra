@@ -1136,6 +1136,27 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (instruction.Opcode == "SBitreplicateB64B32")
+            {
+                var value = Temp("ulong", $"(ulong){RawSource(instruction, 0)}");
+                foreach (var (shift, mask) in new (uint Shift, ulong Mask)[]
+                {
+                    (16, 0x0000_FFFF_0000_FFFF),
+                    (8, 0x00FF_00FF_00FF_00FF),
+                    (4, 0x0F0F_0F0F_0F0F_0F0F),
+                    (2, 0x3333_3333_3333_3333),
+                    (1, 0x5555_5555_5555_5555),
+                })
+                {
+                    value = Temp("ulong", $"({value} | ({value} << {shift}u)) & 0x{mask:X16}ul");
+                }
+
+                var result = Temp("ulong", $"{value} | ({value} << 1u)");
+                StoreScalar(destination, $"(uint){result}");
+                StoreScalar(destination + 1, $"(uint)({result} >> 32u)");
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("B64", StringComparison.Ordinal) ||
                 instruction.Opcode == "SAshrI64" ||
                 instruction.Opcode is "SBfeU64" or "SBfeI64")

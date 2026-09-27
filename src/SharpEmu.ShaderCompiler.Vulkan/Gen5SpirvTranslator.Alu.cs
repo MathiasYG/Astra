@@ -2746,6 +2746,40 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (instruction.Opcode == "SBitreplicateB64B32")
+            {
+                var value = _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _ulongType,
+                    GetRawSource(instruction, 0));
+                foreach (var (shift, mask) in new (ulong Shift, ulong Mask)[]
+                {
+                    (16, 0x0000_FFFF_0000_FFFF),
+                    (8, 0x00FF_00FF_00FF_00FF),
+                    (4, 0x0F0F_0F0F_0F0F_0F0F),
+                    (2, 0x3333_3333_3333_3333),
+                    (1, 0x5555_5555_5555_5555),
+                })
+                {
+                    value = _module.AddInstruction(
+                        SpirvOp.BitwiseAnd,
+                        _ulongType,
+                        _module.AddInstruction(
+                            SpirvOp.BitwiseOr,
+                            _ulongType,
+                            value,
+                            _module.AddInstruction(SpirvOp.ShiftLeftLogical, _ulongType, value, ULong(shift))),
+                        ULong(mask));
+                }
+
+                StoreS64(destination, _module.AddInstruction(
+                    SpirvOp.BitwiseOr,
+                    _ulongType,
+                    value,
+                    _module.AddInstruction(SpirvOp.ShiftLeftLogical, _ulongType, value, ULong(1))));
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("B64", StringComparison.Ordinal) ||
                 instruction.Opcode == "SAshrI64" ||
                 instruction.Opcode is "SWqmB64" or "SBfeU64" or "SBfeI64")
