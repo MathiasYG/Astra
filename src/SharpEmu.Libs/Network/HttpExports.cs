@@ -23,7 +23,8 @@ public static partial class HttpExports
         ulong UserAgentAddress,
         int HttpVersion,
         bool AutoProxyConfig,
-        uint ConnectTimeoutMicroseconds = 30_000_000);
+        uint ConnectTimeoutMicroseconds = 30_000_000,
+        uint ReceiveTimeoutMicroseconds = 30_000_000);
 
     [SysAbiExport(
         Nid = "A9cVMUtEp4Y",
@@ -64,7 +65,7 @@ public static partial class HttpExports
         var httpVersion = unchecked((int)ctx[CpuRegister.Rdx]);
         var autoProxyConfig = ctx[CpuRegister.Rcx] != 0;
         var id = Interlocked.Increment(ref _nextTemplateId);
-        Templates[id] = new HttpTemplate(contextId, userAgentAddress, httpVersion, autoProxyConfig, 30_000_000);
+        Templates[id] = new HttpTemplate(contextId, userAgentAddress, httpVersion, autoProxyConfig, 30_000_000, 120_000_000);
         TraceHttp("create_template", id, unchecked((ulong)contextId), userAgentAddress, unchecked((ulong)httpVersion), autoProxyConfig ? 1UL : 0UL);
         ctx[CpuRegister.Rax] = unchecked((ulong)id);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -110,6 +111,35 @@ public static partial class HttpExports
                 return ctx.SetReturn(0);
             }
         }
+        return ctx.SetReturn(HttpErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "yigr4V0-HTM",
+        ExportName = "sceHttpSetRecvTimeOut",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpSetRecvTimeOut(CpuContext ctx)
+    {
+        var templateId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var timeout = ctx[CpuRegister.Rsi];
+        if (timeout > uint.MaxValue)
+        {
+            return ctx.SetReturn(HttpErrorInvalidValue);
+        }
+
+        while (Templates.TryGetValue(templateId, out var template))
+        {
+            if (Templates.TryUpdate(
+                    templateId,
+                    template with { ReceiveTimeoutMicroseconds = (uint)timeout },
+                    template))
+            {
+                TraceHttp("set_recv_timeout", templateId, timeout, 0, 0, 0);
+                return ctx.SetReturn(0);
+            }
+        }
+
         return ctx.SetReturn(HttpErrorInvalidId);
     }
 
