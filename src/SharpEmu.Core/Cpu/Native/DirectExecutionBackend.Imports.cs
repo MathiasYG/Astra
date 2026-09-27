@@ -1633,6 +1633,9 @@ public sealed partial class DirectExecutionBackend
 		var expectedUserServiceNoEvent =
 			string.Equals(nid, "yH17Q6NWtVg", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960007);
+		var expectedSystemServiceNoEvent =
+			string.Equals(nid, "656LMQSrg6U", StringComparison.Ordinal) &&
+			resultValue == unchecked((int)0x80A10004);
 		var expectedPrivacyInvalidParameter =
 			string.Equals(nid, "D-CzAxQL0XI", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960009);
@@ -1647,6 +1650,7 @@ public sealed partial class DirectExecutionBackend
 			!expectedPollSemaBusy &&
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
+			!expectedSystemServiceNoEvent &&
 			!expectedPrivacyInvalidParameter &&
 			!expectedPlayGoChunkEnumerationEnd)
 		{
