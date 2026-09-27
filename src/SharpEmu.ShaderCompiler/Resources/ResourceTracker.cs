@@ -385,10 +385,22 @@ public sealed partial class ResourceTracker
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
         handle.Operands.All(dword =>
             dword.Type == ScalarValueType.U32 &&
-            (_plan.ValidateRuntimeValue(dword) || DependsOnScalarBufferWord(dword))) &&
-        handle.Operands.Any(DependsOnScalarBufferWord);
+            (_plan.ValidateRuntimeValue(dword) || DependsOnDescriptorMemoryWord(dword))) &&
+        handle.Operands.Any(dword =>
+            DependsOnScalarBufferWord(dword) ||
+            (!_plan.ValidateRuntimeValue(dword) && DependsOnScalarAddressWord(dword)));
+
+    private static bool DependsOnDescriptorMemoryWord(ScalarValue value) =>
+        DependsOnMemoryWord(value, ScalarValueKind.ScalarBufferWord) ||
+        DependsOnMemoryWord(value, ScalarValueKind.ScalarAddressWord);
+
+    private static bool DependsOnScalarAddressWord(ScalarValue value) =>
+        DependsOnMemoryWord(value, ScalarValueKind.ScalarAddressWord);
 
     private static bool DependsOnScalarBufferWord(ScalarValue value)
+        => DependsOnMemoryWord(value, ScalarValueKind.ScalarBufferWord);
+
+    private static bool DependsOnMemoryWord(ScalarValue value, ScalarValueKind kind)
     {
         var pending = new Stack<ScalarValue>();
         var visited = new HashSet<ScalarValue>();
@@ -400,7 +412,7 @@ public sealed partial class ResourceTracker
                 continue;
             }
 
-            if (current.Kind == ScalarValueKind.ScalarBufferWord)
+            if (current.Kind == kind)
             {
                 return true;
             }

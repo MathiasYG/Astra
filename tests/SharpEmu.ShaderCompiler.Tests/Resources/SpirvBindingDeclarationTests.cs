@@ -132,6 +132,25 @@ public sealed class SpirvBindingDeclarationTests
     }
 
     [Fact]
+    public void ScalarAddressLoadedBufferDescriptorWithLaneOffsetStaysOnDevice()
+    {
+        var program = Program(
+            ReadFirstLane(0, 10, 0),
+            ScalarLoad(4, 0, destination: 20, count: 4, dynamicOffsetRegister: 10),
+            BufferStore(12, 20),
+            EndProgram(20));
+        var request = Request(program);
+        var store = Assert.Single(request.Memory.Entries, entry => entry.Pc == 12);
+        Assert.True(store.DeviceDescriptor);
+        Assert.Empty(request.Resources.Info.Buffers);
+        Assert.True(request.Resources.Info.UsesDeviceAddresses);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var module = new SpirvModuleInspector(shader.Spirv);
+        Assert.Contains((uint)SpirvCapability.PhysicalStorageBufferAddresses, module.Capabilities);
+        Assert.Contains((ushort)SpirvOp.ConvertUToPtr, module.Opcodes);
+    }
+
+    [Fact]
     public void SpilledUserData_ReadsTheShaderDataBufferInsteadOfPushData()
     {
         var instructions = new List<Gen5ShaderInstruction>();
