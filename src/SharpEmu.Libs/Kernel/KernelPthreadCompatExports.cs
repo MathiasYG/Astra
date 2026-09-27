@@ -376,6 +376,64 @@ public static class KernelPthreadCompatExports
         LibraryName = "libKernel")]
     public static int PthreadMutexTrylock(CpuContext ctx) => PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: true);
 
+    [SysAbiExport(ExportName = "scePthreadMutexTimedlock",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int PthreadMutexTimedlock(CpuContext ctx) =>
+        PthreadMutexTimedlockCore(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi]);
+
+    [SysAbiExport(ExportName = "pthread_mutex_timedlock",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int PosixPthreadMutexTimedlock(CpuContext ctx) =>
+        PosixPthreadMutexTimedlockCore(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi]);
+
+    private static int PthreadMutexTimedlockCore(CpuContext ctx, ulong mutexAddress, ulong timeoutMicroseconds)
+    {
+        var timeoutTicks = timeoutMicroseconds > (ulong)(long.MaxValue / 10)
+            ? long.MaxValue
+            : (long)timeoutMicroseconds * 10;
+        var nowTicks = DateTime.UtcNow.Ticks;
+        var deadline = nowTicks > long.MaxValue - timeoutTicks
+            ? long.MaxValue
+            : nowTicks + timeoutTicks;
+        return TryLockMutexUntil(ctx, mutexAddress, deadline);
+    }
+
+    private static int PosixPthreadMutexTimedlockCore(CpuContext ctx, ulong mutexAddress, ulong deadlineAddress)
+    {
+        if (deadlineAddress == 0 ||
+            !ctx.TryReadUInt64(deadlineAddress, out var seconds) ||
+            !ctx.TryReadUInt64(deadlineAddress + sizeof(long), out var nanoseconds) ||
+            seconds > long.MaxValue || nanoseconds >= 1_000_000_000)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        // POSIX uses an absolute CLOCK_REALTIME timespec; scePthreadMutexTimedlock
+        // above instead accepts a relative timeout in microseconds.
+        var deadlineTicks = seconds > (ulong)((long.MaxValue - DateTime.UnixEpoch.Ticks) / TimeSpan.TicksPerSecond)
+            ? long.MaxValue
+            : DateTime.UnixEpoch.Ticks + (long)seconds * TimeSpan.TicksPerSecond + (long)(nanoseconds / 100);
+        return TryLockMutexUntil(ctx, mutexAddress, deadlineTicks);
+    }
+
+    private static int TryLockMutexUntil(CpuContext ctx, ulong mutexAddress, long deadlineTicks)
+    {
+        // Reuse the ordinary trylock path so ownership and recursion rules stay identical.
+        while (true)
+        {
+            var result = PthreadMutexLockCore(ctx, mutexAddress, tryOnly: true);
+            if (result != (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY)
+                return result;
+
+            if (DateTime.UtcNow.Ticks >= deadlineTicks)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+            }
+
+            Thread.Sleep(1);
+        }
+    }
+
     [SysAbiExport(
         Nid = "tn3VlD0hG60",
         ExportName = "scePthreadMutexUnlock",
