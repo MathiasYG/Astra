@@ -64,7 +64,7 @@ public static partial class HttpExports
         var httpVersion = unchecked((int)ctx[CpuRegister.Rdx]);
         var autoProxyConfig = ctx[CpuRegister.Rcx] != 0;
         var id = Interlocked.Increment(ref _nextTemplateId);
-        Templates[id] = new HttpTemplate(contextId, userAgentAddress, httpVersion, autoProxyConfig);
+        Templates[id] = new HttpTemplate(contextId, userAgentAddress, httpVersion, autoProxyConfig, 30_000_000);
         TraceHttp("create_template", id, unchecked((ulong)contextId), userAgentAddress, unchecked((ulong)httpVersion), autoProxyConfig ? 1UL : 0UL);
         ctx[CpuRegister.Rax] = unchecked((ulong)id);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -102,9 +102,15 @@ public static partial class HttpExports
             return ctx.SetReturn(HttpErrorInvalidId);
         }
 
-        Templates[id] = template with { ConnectTimeoutMicroseconds = timeoutMicroseconds };
-        TraceHttp("set_connect_timeout", id, timeoutMicroseconds, 0, 0, 0);
-        return ctx.SetReturn(0);
+        while (Templates.TryGetValue(id, out template))
+        {
+            if (Templates.TryUpdate(id, template with { ConnectTimeoutMicroseconds = timeoutMicroseconds }, template))
+            {
+                TraceHttp("set_connect_timeout", id, timeoutMicroseconds, 0, 0, 0);
+                return ctx.SetReturn(0);
+            }
+        }
+        return ctx.SetReturn(HttpErrorInvalidId);
     }
 
     [SysAbiExport(
