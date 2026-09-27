@@ -31,7 +31,9 @@ public static partial class NetExports
     private const int NetErrnoNotInitialized = 200;
     private const int NetErrnoResolverNoDns = 225;
     private const int MaxNameLength = 256;
-    private static ReadOnlySpan<byte> OfflineMacAddress => [0x02, 0x53, 0x48, 0x41, 0x52, 0x50];
+    // A stable, locally administered unicast identity for the emulated network
+    // interface. Do not expose the host adapter's hardware address to guests.
+    internal static readonly byte[] VirtualMacAddress = [0x02, 0x53, 0x48, 0x41, 0x52, 0x50];
 
     private static readonly ConcurrentDictionary<int, NetPool> _pools = new();
     private static readonly ConcurrentDictionary<int, ResolverContext> _resolvers = new();
@@ -133,15 +135,21 @@ public static partial class NetExports
         LibraryName = "libSceNet")]
     public static int NetGetMacAddress(CpuContext ctx)
     {
-        var destinationAddress = ctx[CpuRegister.Rdi];
-        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
-        if (destinationAddress == 0 || flags != 0 || !ctx.Memory.TryWrite(destinationAddress, OfflineMacAddress))
+        if (!_initialized)
+        {
+            return SetNetError(ctx, NetErrorNotInitialized, NetErrnoNotInitialized);
+        }
+
+        var address = ctx[CpuRegister.Rdi];
+        var flags = ctx[CpuRegister.Rsi];
+        if (address == 0 || flags != 0)
         {
             return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
         }
 
-        TraceNet("get_mac_address", 0, destinationAddress, unchecked((ulong)flags), 0);
-        return ctx.SetReturn(0);
+        return ctx.Memory.TryWrite(address, VirtualMacAddress)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
