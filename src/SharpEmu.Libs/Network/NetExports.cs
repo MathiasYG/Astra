@@ -153,6 +153,50 @@ public static partial class NetExports
     }
 
     [SysAbiExport(
+        Nid = "v6M4txecCuo",
+        ExportName = "sceNetEtherNtostr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEtherNtostr(CpuContext ctx)
+    {
+        if (!_initialized)
+        {
+            return SetNetError(ctx, NetErrorNotInitialized, NetErrnoNotInitialized);
+        }
+
+        var address = ctx[CpuRegister.Rdi];
+        var textAddress = ctx[CpuRegister.Rsi];
+        var textCapacity = ctx[CpuRegister.Rdx];
+        if (address == 0 || textAddress == 0 || textCapacity < 18)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        Span<byte> mac = stackalloc byte[6];
+        if (!ctx.Memory.TryRead(address, mac))
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        const string hex = "0123456789abcdef";
+        Span<byte> output = stackalloc byte[18];
+        for (var index = 0; index < mac.Length; index++)
+        {
+            output[index * 3] = (byte)hex[mac[index] >> 4];
+            output[index * 3 + 1] = (byte)hex[mac[index] & 0x0f];
+            if (index < mac.Length - 1)
+            {
+                output[index * 3 + 2] = (byte)':';
+            }
+        }
+        output[^1] = 0;
+
+        return ctx.Memory.TryWrite(textAddress, output)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
         Nid = "Q4qBuN-c0ZM",
         ExportName = "sceNetSocket",
         Target = Generation.Gen4 | Generation.Gen5,
