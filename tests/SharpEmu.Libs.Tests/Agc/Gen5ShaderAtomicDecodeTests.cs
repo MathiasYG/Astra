@@ -391,6 +391,18 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(new[] { Gen5Operand.Vector(17) }, instruction.Destinations);
     }
 
+    [Theory]
+    [InlineData(0x307u, "VLshrrevB16")]
+    [InlineData(0x30Eu, "VSubNcI16")]
+    [InlineData(0x351u, "VMin3F16")]
+    [InlineData(0x357u, "VMed3F16")]
+    public void Vop3SubwordAndHalfFloatOpcodesFollowRdna2Table(uint opcode, string expected)
+    {
+        var instruction = DecodeSingle(0xD4000001u | (opcode << 16), 0x00020081);
+
+        Assert.Equal(expected, instruction.Opcode);
+    }
+
     private static Gen5ShaderInstruction DecodeSingle(params uint[] words)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x1000);

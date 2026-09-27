@@ -709,6 +709,16 @@ public static partial class Gen5SpirvTranslator
                 case "VMin3F32":
                     result = EmitFloatTernaryExt(instruction, 37);
                     break;
+                case "VMin3F16":
+                    result = EmitFloat16Result(
+                        instruction,
+                        destination,
+                        Ext(
+                            37,
+                            _floatType,
+                            Ext(37, _floatType, GetFloat16Source(instruction, 0), GetFloat16Source(instruction, 1)),
+                            GetFloat16Source(instruction, 2)));
+                    break;
                 case "VMax3F32":
                     result = EmitFloatTernaryExt(instruction, 40);
                     break;
@@ -809,6 +819,13 @@ public static partial class Gen5SpirvTranslator
                         instruction,
                         destination,
                         SpirvOp.IAdd);
+                    break;
+                case "VSubNcI16":
+                    result = EmitInteger16Binary(
+                        instruction,
+                        destination,
+                        SpirvOp.ISub,
+                        signed: true);
                     break;
                 case "VAddcU32":
                 case "VAddCoCiU32":
@@ -1083,8 +1100,17 @@ public static partial class Gen5SpirvTranslator
                                 _module.Constant64(_ulongType, 32))));
                     break;
                 }
+                case "VLshrrevB16":
+                    result = EmitInteger16ShiftReverse(
+                        instruction,
+                        destination,
+                        SpirvOp.ShiftRightLogical);
+                    break;
                 case "VLshlrevB16":
-                    result = EmitInteger16ShiftLeftReverse(instruction, destination);
+                    result = EmitInteger16ShiftReverse(
+                        instruction,
+                        destination,
+                        SpirvOp.ShiftLeftLogical);
                     break;
                 case "VLshlB32":
                     result = EmitIntegerBinary(instruction, SpirvOp.ShiftLeftLogical);
@@ -1290,6 +1316,49 @@ public static partial class Gen5SpirvTranslator
                             _floatType,
                             low,
                             Ext(37, _floatType, high, right)));
+                    break;
+                }
+                case "VMed3F16":
+                {
+                    var left = GetFloat16Source(instruction, 0);
+                    var middle = GetFloat16Source(instruction, 1);
+                    var right = GetFloat16Source(instruction, 2);
+                    var minimum = Ext(37, _floatType, Ext(37, _floatType, left, middle), right);
+                    var maximum = Ext(40, _floatType, Ext(40, _floatType, left, middle), right);
+                    var firstIsMaximum = _module.AddInstruction(
+                        SpirvOp.FOrdEqual,
+                        _boolType,
+                        maximum,
+                        left);
+                    var secondIsMaximum = _module.AddInstruction(
+                        SpirvOp.FOrdEqual,
+                        _boolType,
+                        maximum,
+                        middle);
+                    var median = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _floatType,
+                        firstIsMaximum,
+                        Ext(40, _floatType, middle, right),
+                        _module.AddInstruction(
+                            SpirvOp.Select,
+                            _floatType,
+                            secondIsMaximum,
+                            Ext(40, _floatType, left, right),
+                            Ext(40, _floatType, left, middle)));
+                    var anyNan = _module.AddInstruction(
+                        SpirvOp.LogicalOr,
+                        _boolType,
+                        _module.AddInstruction(SpirvOp.IsNan, _boolType, left),
+                        _module.AddInstruction(
+                            SpirvOp.LogicalOr,
+                            _boolType,
+                            _module.AddInstruction(SpirvOp.IsNan, _boolType, middle),
+                            _module.AddInstruction(SpirvOp.IsNan, _boolType, right)));
+                    result = EmitFloat16Result(
+                        instruction,
+                        destination,
+                        _module.AddInstruction(SpirvOp.Select, _floatType, anyNan, minimum, median));
                     break;
                 }
                 case "VCubeidF32":
@@ -4667,7 +4736,8 @@ public static partial class Gen5SpirvTranslator
         private uint EmitInteger16Binary(
             Gen5ShaderInstruction instruction,
             uint destination,
-            SpirvOp operation)
+            SpirvOp operation,
+            bool signed = false)
         {
             var control = instruction.Control as Gen5Vop3Control;
             var left = GetRawSource(instruction, 0, applySdwaIntegerModifiers: false);
@@ -4685,9 +4755,82 @@ public static partial class Gen5SpirvTranslator
 
             left = BitwiseAnd(left, UInt(0xFFFF));
             right = BitwiseAnd(right, UInt(0xFFFF));
-            var low16 = BitwiseAnd(
-                _module.AddInstruction(operation, _uintType, left, right),
-                UInt(0xFFFF));
+            uint operationResult;
+            if (control?.Clamp == true && signed)
+            {
+                var signedLeft = _module.AddInstruction(
+                    SpirvOp.BitFieldSExtract,
+                    _intType,
+                    Bitcast(_intType, left),
+                    UInt(0),
+                    UInt(16));
+                var signedRight = _module.AddInstruction(
+                    SpirvOp.BitFieldSExtract,
+                    _intType,
+                    Bitcast(_intType, right),
+                    UInt(0),
+                    UInt(16));
+                var signedResult = _module.AddInstruction(operation, _intType, signedLeft, signedRight);
+                var minimum = Bitcast(_intType, UInt(0xFFFF_8000));
+                var maximum = Bitcast(_intType, UInt(0x0000_7FFF));
+                var belowMinimum = _module.AddInstruction(
+                    SpirvOp.SLessThan,
+                    _boolType,
+                    signedResult,
+                    minimum);
+                var lowerClamped = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _intType,
+                    belowMinimum,
+                    minimum,
+                    signedResult);
+                var aboveMaximum = _module.AddInstruction(
+                    SpirvOp.SGreaterThan,
+                    _boolType,
+                    lowerClamped,
+                    maximum);
+                var signedClamped = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _intType,
+                    aboveMaximum,
+                    maximum,
+                    lowerClamped);
+                operationResult = Bitcast(_uintType, signedClamped);
+            }
+            else
+            {
+                operationResult = _module.AddInstruction(operation, _uintType, left, right);
+                if (control?.Clamp == true && operation == SpirvOp.IAdd)
+                {
+                    var aboveMaximum = _module.AddInstruction(
+                        SpirvOp.UGreaterThan,
+                        _boolType,
+                        operationResult,
+                        UInt(0xFFFF));
+                    operationResult = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        aboveMaximum,
+                        UInt(0xFFFF),
+                        operationResult);
+                }
+                else if (control?.Clamp == true && operation == SpirvOp.ISub)
+                {
+                    var belowMinimum = _module.AddInstruction(
+                        SpirvOp.ULessThan,
+                        _boolType,
+                        left,
+                        right);
+                    operationResult = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        belowMinimum,
+                        UInt(0),
+                        operationResult);
+                }
+            }
+
+            var low16 = BitwiseAnd(operationResult, UInt(0xFFFF));
             var current = LoadV(destination);
 
             return (control?.OperandSelect & 0x8) != 0
@@ -4699,12 +4842,14 @@ public static partial class Gen5SpirvTranslator
                     low16);
         }
 
-        private uint EmitInteger16ShiftLeftReverse(
+        private uint EmitInteger16ShiftReverse(
             Gen5ShaderInstruction instruction,
-            uint destination)
+            uint destination,
+            SpirvOp shiftOperation)
         {
-            // RDNA2 V_LSHLREV_B16 is D.u16 = S1.u16 << S0.u4. VOP3 OPSEL
-            // chooses each source half and the destination half independently.
+            // RDNA2 *_REV_B16 uses S0's low four bits as the count and S1's
+            // selected low half as the value. VOP3 OPSEL selects both source
+            // halves and the destination half independently.
             var control = instruction.Control as Gen5Vop3Control;
             var shift = GetRawSource(instruction, 0, applySdwaIntegerModifiers: false);
             var value = GetRawSource(instruction, 1, applySdwaIntegerModifiers: false);
@@ -4719,7 +4864,9 @@ public static partial class Gen5SpirvTranslator
             }
 
             var low16 = BitwiseAnd(
-                ShiftLeftLogical(
+                _module.AddInstruction(
+                    shiftOperation,
+                    _uintType,
                     BitwiseAnd(value, UInt(0xFFFF)),
                     BitwiseAnd(shift, UInt(0xF))),
                 UInt(0xFFFF));
