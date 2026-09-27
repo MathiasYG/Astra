@@ -14,6 +14,7 @@ using System.Threading;
 using System.Runtime.InteropServices;
 using System.Linq;
 using System.Globalization;
+using System.Security.Cryptography;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -75,6 +76,7 @@ public static partial class KernelMemoryCompatExports
     private const nuint DefaultLibcHeapAlignment = 16;
     private const ushort KernelStatModeDirectory = 0x41FF;
     private const ushort KernelStatModeRegular = 0x81FF;
+    private const ushort KernelStatModeCharacterDevice = 0x21B6;
     private const int KernelStatSize = 120;
     private const int KernelStatStDevOffset = 0;
     private const int KernelStatStInoOffset = 4;
@@ -96,6 +98,7 @@ public static partial class KernelMemoryCompatExports
 
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
+    private static readonly HashSet<int> _randomDeviceDescriptors = new();
     private static readonly Dictionary<int, HostMovieBridge.BinkGuestCompletionShim>
         _binkGuestCompletionShims = new();
     private static readonly Dictionary<int, string> _observedBinkGuestFiles = new();
@@ -1442,6 +1445,24 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (IsRandomDevicePath(guestPath))
+        {
+            if ((flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND | O_DIRECTORY)) != 0)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            }
+
+            var randomFd = AllocateGuestFileDescriptor();
+            lock (_fdGate)
+            {
+                _randomDeviceDescriptors.Add(randomFd);
+            }
+
+            LogOpenTrace($"_open device path='{guestPath}' fd={randomFd}");
+            ctx[CpuRegister.Rax] = unchecked((ulong)randomFd);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         var hostPath = ResolveGuestPath(guestPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);
@@ -1603,6 +1624,19 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (IsRandomDevicePath(guestPath))
+        {
+            var now = DateTime.UtcNow;
+            if (!TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0,
+                    now, now, now, guestPath, KernelStatModeCharacterDevice))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         var hostPath = ResolveGuestPath(guestPath);
         var statCacheKey = GetNegativeStatCacheKey(guestPath);
         if (statCacheKey is not null && IsNegativeStatCached(statCacheKey))
@@ -1677,6 +1711,29 @@ public static partial class KernelMemoryCompatExports
         return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
             ? 0
             : PosixFailure(ctx, result);
+    }
+
+    private static bool IsRandomDevicePath(string path) =>
+        path is "/dev/random" or "/dev/urandom";
+
+    private static int ReadRandomDevice(CpuContext ctx, ulong bufferAddress, int requested)
+    {
+        Span<byte> chunk = stackalloc byte[4096];
+        var written = 0;
+        while (written < requested)
+        {
+            var count = Math.Min(chunk.Length, requested - written);
+            RandomNumberGenerator.Fill(chunk[..count]);
+            if (!TryWriteCompat(ctx, bufferAddress + (ulong)written, chunk[..count]))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            written += count;
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)written);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     // POSIX fstat(2): a bad fd maps to EBADF rather than the path-oriented ENOENT.
@@ -2221,6 +2278,11 @@ public static partial class KernelMemoryCompatExports
                 ctx[CpuRegister.Rax] = 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
+            else if (_randomDeviceDescriptors.Remove(fd))
+            {
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
             else
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
@@ -2255,6 +2317,16 @@ public static partial class KernelMemoryCompatExports
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        bool isRandomDevice;
+        lock (_fdGate)
+        {
+            isRandomDevice = _randomDeviceDescriptors.Contains(fd);
+        }
+        if (isRandomDevice)
+        {
+            return ReadRandomDevice(ctx, bufferAddress, requested);
         }
 
         if (KernelSocketCompatExports.TryReadSocketFd(
@@ -6772,6 +6844,16 @@ public static partial class KernelMemoryCompatExports
             return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0, now, now, now, $"stdio:{fd}");
         }
 
+        lock (_fdGate)
+        {
+            if (_randomDeviceDescriptors.Contains(fd))
+            {
+                var now = DateTime.UtcNow;
+                return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0,
+                    now, now, now, $"random:{fd}", KernelStatModeCharacterDevice);
+            }
+        }
+
         string? hostPath = null;
         bool isDirectory = false;
         lock (_fdGate)
@@ -6921,7 +7003,8 @@ public static partial class KernelMemoryCompatExports
         DateTime lastAccessUtc,
         DateTime lastWriteUtc,
         DateTime creationUtc,
-        string inodeSeed)
+        string inodeSeed,
+        ushort? mode = null)
     {
         Span<byte> payload = stackalloc byte[KernelStatSize];
         payload.Clear();
@@ -6929,7 +7012,7 @@ public static partial class KernelMemoryCompatExports
         var seedBytes = Encoding.UTF8.GetBytes(inodeSeed);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStDevOffset..], 0);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStInoOffset..], ComputeDirectoryEntryHash(seedBytes));
-        BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStModeOffset..], isDirectory ? KernelStatModeDirectory : KernelStatModeRegular);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStModeOffset..], mode ?? (isDirectory ? KernelStatModeDirectory : KernelStatModeRegular));
         BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStNlinkOffset..], 1);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStUidOffset..], 0);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStGidOffset..], 0);
