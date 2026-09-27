@@ -401,6 +401,7 @@ public sealed partial class ScalarValueGraph
                     return;
                 case Gen5ShaderEncoding.Sopc:
                     ApplyScalarCompare(instruction, state);
+                    if (_recording) _graph.ScalarCompareConditions[instruction.Pc] = state.Scc;
                     return;
                 case Gen5ShaderEncoding.Sopp:
                     if (_recording)

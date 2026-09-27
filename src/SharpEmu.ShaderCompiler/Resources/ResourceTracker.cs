@@ -319,7 +319,8 @@ public sealed partial class ResourceTracker
         {
             var current = _sources[candidate];
             if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage) ||
-                current.ZeroExtentBufferSource != source.ZeroExtentBufferSource)
+                current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
+                !Equals(current.CountedSampler, source.CountedSampler))
             {
                 continue;
             }
@@ -434,6 +435,10 @@ public sealed partial class ResourceTracker
         {
             return zeroExtentSource;
         }
+
+        if (sampler && !sampleAdjust && !ValidateSource(source, out _) &&
+            TryMakeCountedSampler(handle, pc, out var countedSamplerSource))
+            return countedSamplerSource;
 
         if (expected == ScalarValueKind.ImageHandle)
         {
@@ -1160,6 +1165,7 @@ public sealed partial class ResourceTracker
 
             if (TryMakeIndirectImage(handle, memory.Pc, out var plan) ||
                 TryMakeDenseIndirectImage(handle, memory.Pc, out plan) ||
+                TryMakeCountedImage(handle, memory.Pc, out plan) ||
                 TryMakeDirectImage(handle, out plan))
             {
                 _indirectImages.Add(plan);

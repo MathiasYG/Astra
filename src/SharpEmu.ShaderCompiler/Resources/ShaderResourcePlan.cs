@@ -114,7 +114,10 @@ public sealed class ShaderResourcePlan
 
         foreach (var sampler in plan.Info.Samplers)
         {
-            materialization.Add(sampler.Source);
+            if (plan.DescriptorSources[(int)sampler.Source].CountedSampler is not null)
+                plan.RequiresSpecializationMemory = true;
+            else
+                materialization.Add(sampler.Source);
         }
 
         plan.MaterializationSources = materialization;
@@ -143,6 +146,12 @@ public sealed class ShaderResourcePlan
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.MaterialSource], cleanSlots);
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
             }
+        }
+
+        foreach (var sampler in plan.Info.Samplers)
+        {
+            if (plan.DescriptorSources[(int)sampler.Source].CountedSampler is { } counted)
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)counted.HeapSource], cleanSlots);
         }
 
         plan.CleanFlatSlots = cleanSlots;
