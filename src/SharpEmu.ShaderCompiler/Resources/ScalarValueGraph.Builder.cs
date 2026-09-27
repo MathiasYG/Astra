@@ -1080,7 +1080,7 @@ public sealed partial class ScalarValueGraph
 
                 if (_recording)
                 {
-                    _graph.Accesses[memoryIndex] = new MemoryAccessBinding(handle, null, read);
+                    _graph.Accesses[memoryIndex] = new MemoryAccessBinding(handle, null, read) { ExecutionMask = state.Exec };
                 }
             }
         }
@@ -1612,7 +1612,7 @@ public sealed partial class ScalarValueGraph
                     }
                 }
 
-                _graph.Accesses[memoryIndex] = binding;
+                _graph.Accesses[memoryIndex] = binding is null ? null : binding with { ExecutionMask = state.Exec };
             }
 
             foreach (var destination in instruction.Destinations)
