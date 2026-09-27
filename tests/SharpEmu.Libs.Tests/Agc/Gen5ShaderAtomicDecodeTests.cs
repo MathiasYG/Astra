@@ -378,6 +378,19 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
     }
 
+    [Fact]
+    public void VLshlrevB16_DecodesRdna2Vop3Opcode314()
+    {
+        // RDNA2 ISA VOP3 opcode 788 (0x314): count is S0, shifted value is S1.
+        var instruction = DecodeSingle(0xD7140011, 0x00020081);
+
+        Assert.Equal("VLshlrevB16", instruction.Opcode);
+        Assert.Equal(
+            new[] { Gen5Operand.Source(129), Gen5Operand.Vector(0), Gen5Operand.Scalar(0) },
+            instruction.Sources);
+        Assert.Equal(new[] { Gen5Operand.Vector(17) }, instruction.Destinations);
+    }
+
     private static Gen5ShaderInstruction DecodeSingle(params uint[] words)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x1000);

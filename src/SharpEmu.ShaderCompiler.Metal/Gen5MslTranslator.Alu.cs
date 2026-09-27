@@ -361,6 +361,7 @@ public static partial class Gen5MslTranslator
                     $"((({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u)) | ({RawSource(instruction, 2)}))",
                 "VLshlB32" => $"(({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u))",
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
+                "VLshlrevB16" => EmitInteger16ShiftLeftReverse(instruction, destination),
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
@@ -1919,6 +1920,29 @@ public static partial class Gen5MslTranslator
             return ((control?.OperandSelect ?? 0) & 8) != 0
                 ? $"((v[{destination}] & 0x0000FFFFu) | (({packed}) << 16))"
                 : $"((v[{destination}] & 0xFFFF0000u) | ({packed}))";
+        }
+
+        private string EmitInteger16ShiftLeftReverse(
+            Gen5ShaderInstruction instruction,
+            uint destination)
+        {
+            var control = instruction.Control as Gen5Vop3Control;
+            var shift = RawSource(instruction, 0, applySdwaIntegerModifiers: false);
+            var value = RawSource(instruction, 1, applySdwaIntegerModifiers: false);
+            if ((control?.OperandSelect & 0x1) != 0)
+            {
+                shift = $"(({shift}) >> 16u)";
+            }
+
+            if ((control?.OperandSelect & 0x2) != 0)
+            {
+                value = $"(({value}) >> 16u)";
+            }
+
+            var low16 = $"(((({value}) & 0xFFFFu) << (({shift}) & 0xFu)) & 0xFFFFu)";
+            return (control?.OperandSelect & 0x8) != 0
+                ? $"((v[{destination}] & 0x0000FFFFu) | (({low16}) << 16u))"
+                : $"((v[{destination}] & 0xFFFF0000u) | ({low16}))";
         }
 
         /// <summary>

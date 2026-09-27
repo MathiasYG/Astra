@@ -1083,6 +1083,9 @@ public static partial class Gen5SpirvTranslator
                                 _module.Constant64(_ulongType, 32))));
                     break;
                 }
+                case "VLshlrevB16":
+                    result = EmitInteger16ShiftLeftReverse(instruction, destination);
+                    break;
                 case "VLshlB32":
                     result = EmitIntegerBinary(instruction, SpirvOp.ShiftLeftLogical);
                     break;
@@ -4687,6 +4690,40 @@ public static partial class Gen5SpirvTranslator
                 UInt(0xFFFF));
             var current = LoadV(destination);
 
+            return (control?.OperandSelect & 0x8) != 0
+                ? BitwiseOr(
+                    BitwiseAnd(current, UInt(0x0000_FFFF)),
+                    ShiftLeftLogical(low16, UInt(16)))
+                : BitwiseOr(
+                    BitwiseAnd(current, UInt(0xFFFF_0000)),
+                    low16);
+        }
+
+        private uint EmitInteger16ShiftLeftReverse(
+            Gen5ShaderInstruction instruction,
+            uint destination)
+        {
+            // RDNA2 V_LSHLREV_B16 is D.u16 = S1.u16 << S0.u4. VOP3 OPSEL
+            // chooses each source half and the destination half independently.
+            var control = instruction.Control as Gen5Vop3Control;
+            var shift = GetRawSource(instruction, 0, applySdwaIntegerModifiers: false);
+            var value = GetRawSource(instruction, 1, applySdwaIntegerModifiers: false);
+            if ((control?.OperandSelect & 0x1) != 0)
+            {
+                shift = ShiftRightLogical(shift, UInt(16));
+            }
+
+            if ((control?.OperandSelect & 0x2) != 0)
+            {
+                value = ShiftRightLogical(value, UInt(16));
+            }
+
+            var low16 = BitwiseAnd(
+                ShiftLeftLogical(
+                    BitwiseAnd(value, UInt(0xFFFF)),
+                    BitwiseAnd(shift, UInt(0xF))),
+                UInt(0xFFFF));
+            var current = LoadV(destination);
             return (control?.OperandSelect & 0x8) != 0
                 ? BitwiseOr(
                     BitwiseAnd(current, UInt(0x0000_FFFF)),

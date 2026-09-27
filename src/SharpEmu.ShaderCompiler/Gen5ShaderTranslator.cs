@@ -1292,6 +1292,9 @@ public static partial class Gen5ShaderTranslator
             0x178 => "VXor3B32",
             // VOP1 opcode 0x52 is available through VOP3 as opcode 0x1D2.
             0x1D2 => "VCvtU16F16",
+            0x300 => "VLshrrevB64",
+            // RDNA2 ISA VOP3 opcode 788 (0x314): V_LSHLREV_B16.
+            0x314 => "VLshlrevB16",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
