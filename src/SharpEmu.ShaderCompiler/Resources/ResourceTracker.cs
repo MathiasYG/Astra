@@ -653,8 +653,10 @@ public sealed partial class ResourceTracker
         sourceIndex = 0;
         ScalarValue? bufferHandle = null;
         var hasBufferRead = false;
-        foreach (var word in source.Dwords)
+        foreach (var operand in source.Dwords)
         {
+            var word = _graph.ResolveInvariantPhi(operand);
+            if (word is null) return false;
             if (word.IsConstant && word.ConstantU32 == 0) continue;
             if (word.Kind != ScalarValueKind.ScalarBufferWord || word.Operands.Length != 2)
                 return false;

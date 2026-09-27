@@ -448,6 +448,33 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void ZeroExtentDescriptorLoadsRemainNullAcrossInvariantLoopPhis()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 28, count: 4),
+            ReadFirstLane(8, 10, 0),
+            ScalarBufferLoad(12, 28, destination: 16, count: 8, dynamicOffsetRegister: 10),
+            ScalarBufferLoad(20, 28, destination: 24, count: 4, dynamicOffsetRegister: 10),
+            Nop(28),
+            Branch(32, "SCbranchScc1", -2),
+            Image(36, "ImageSample", 16, 24),
+            EndProgram(44));
+        var plan = Extract(program, userDataCount: 2);
+        Assert.True(plan.Memory.TryGetIndex(36, 0, out var imageMemoryIndex));
+        Assert.Equal(ScalarValueKind.Phi, plan.Accesses[imageMemoryIndex]!.Handle!.Operands[0].Kind);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].ZeroExtentBufferSource);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Samplers[0].Source].ZeroExtentBufferSource);
+
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[8], RequireAlignment = true };
+        memory.At(0x1000) = 0x2000;
+        memory.At(0x1004) = 8u << 16;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], memory.Read, memory.Read),
+            ref snapshot, ref specialization));
+    }
+
+    [Fact]
     public void MaterialKeyImmediateIsReadAfterTheWrappedSelectorOffset()
     {
         var plan = Extract(IndirectImageProgram(false, materialImmediate: 4));
