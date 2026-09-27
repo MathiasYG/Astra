@@ -89,15 +89,16 @@ public static partial class NetExports
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
         var eventsAddress = ctx[CpuRegister.Rsi];
         var maxEvents = unchecked((int)ctx[CpuRegister.Rdx]);
-        var timeoutMicroseconds = unchecked((int)ctx[CpuRegister.Rcx]);
+        var timeoutMilliseconds = unchecked((int)ctx[CpuRegister.Rcx]);
         if (!EpollInstances.TryGetValue(id, out var instance))
             return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
-        if (eventsAddress == 0 || maxEvents <= 0 || maxEvents > 4096 || timeoutMicroseconds < -1)
+        if (eventsAddress == 0 || maxEvents <= 0 || maxEvents > 4096 || timeoutMilliseconds < -1)
             return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
 
-        var deadline = timeoutMicroseconds < 0
+        // sceNetEpollWait uses the same millisecond timeout unit as epoll_wait.
+        var deadline = timeoutMilliseconds < 0
             ? DateTime.MaxValue
-            : DateTime.UtcNow.AddTicks((long)timeoutMicroseconds * 10);
+            : DateTime.UtcNow.AddTicks((long)timeoutMilliseconds * TimeSpan.TicksPerMillisecond);
         while (true)
         {
             KeyValuePair<int, byte[]>[] watches;
