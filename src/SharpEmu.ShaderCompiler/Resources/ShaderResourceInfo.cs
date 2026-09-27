@@ -226,6 +226,9 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    // A descriptor assembled from scalar loads can be all zero when its source
+    // buffer has no addressable bytes, regardless of the shader's dynamic offset.
+    public uint? ZeroExtentBufferSource { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.

@@ -401,10 +401,50 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void MalformedIndirectImage_IsRejected()
+    public void MalformedIndirectImage_RejectsNonemptyDynamicBuffer()
     {
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(IndirectImageProgram(true)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        var plan = Extract(IndirectImageProgram(true));
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Null(source.IndirectImage);
+        Assert.NotNull(source.ZeroExtentBufferSource);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.False(ResourceMaterializer.Materialize(
+            plan,
+            Inputs([0x1000, 224u << 16, 2, 0, 0x2000, 16u << 16, 4, 0, 7],
+                readCleanMemory: LinearMemory().Read),
+            ref snapshot,
+            ref specialization));
+    }
+
+    [Fact]
+    public void DynamicDescriptorsFromZeroExtentBufferAreNullOnlyWhileTheBufferIsEmpty()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 28, count: 4),
+            ReadFirstLane(8, 10, 0),
+            ScalarBufferLoad(12, 28, destination: 16, count: 8, dynamicOffsetRegister: 10),
+            ScalarBufferLoad(20, 28, destination: 24, count: 4, dynamicOffsetRegister: 10),
+            Image(28, "ImageSample", 16, 24),
+            EndProgram(36));
+        var plan = Extract(program, userDataCount: 2);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].ZeroExtentBufferSource);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Samplers[0].Source].ZeroExtentBufferSource);
+
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[8], RequireAlignment = true };
+        memory.At(0x1000) = 0x2000;
+        memory.At(0x1004) = 8u << 16;
+        var inputs = Inputs([0x1000, 0], memory.Read, memory.Read);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.All(snapshot.Images[0], word => Assert.Equal(0u, word));
+        Assert.All(snapshot.Samplers[0], word => Assert.Equal(0u, word));
+
+        var priorSnapshot = snapshot;
+        memory.At(0x1008) = 1;
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Same(priorSnapshot, snapshot);
     }
 
     [Fact]

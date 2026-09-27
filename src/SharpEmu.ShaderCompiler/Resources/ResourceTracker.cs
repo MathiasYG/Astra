@@ -318,7 +318,8 @@ public sealed partial class ResourceTracker
         for (var candidate = 0; candidate < _sources.Count; candidate++)
         {
             var current = _sources[candidate];
-            if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage))
+            if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage) ||
+                current.ZeroExtentBufferSource != source.ZeroExtentBufferSource)
             {
                 continue;
             }
@@ -428,47 +429,22 @@ public sealed partial class ResourceTracker
         }
 
         var source = MakeSource(handle, width, sampler, sampleAdjust, pc);
-        var nonContiguousImage = expected == ScalarValueKind.ImageHandle && !IsContiguousScalarBufferRecord(source);
-
-        // Image descriptors loaded straight from a scalar buffer at a dynamically-uniform
-        // offset (e.g. a bindless material heap entry read via S_BUFFER_LOAD, without going
-        // through the explicit TryMakeIndirectImage/TryMakeDirectImage heap-record shapes)
-        // used to be rejected outright here. But RuntimeValueValidator/RuntimeValueEvaluator
-        // already handle ScalarBufferWord dwords generically (the same mechanism buffer
-        // descriptors rely on via MaterializationSources), so let ValidateSource below be the
-        // single source of truth instead of a narrower, ImageHandle-specific blanket ban.
-        var badDword = 0u;
-        var controlDependent = false;
-        if (nonContiguousImage || !ValidateSource(source, out badDword, out controlDependent))
+        if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle &&
+            TryMakeZeroExtentBufferSource(source, pc, out var zeroExtentSource))
         {
-            // A bindless image/sampler descriptor whose dwords resolve through a
-            // control-dependent phi (e.g. a hash-table/linear-probe material lookup, as seen
-            // in Ghost of Yotei) has no single compile-time source: real support needs
-            // GPU-side dynamic descriptor indexing, which this resource tracker doesn't
-            // implement. Rather than fail shader recompilation outright, degrade to a null
-            // descriptor for that one access and let it read as a null/black texture,
-            // mirroring KytyPS5's fallback for the same case (feat/shader-control-dependent-
-            // descriptor). Buffer/sampler-adjacent handles or any other validation failure
-            // still hard-fail, since those aren't safe to silently zero.
-            var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
-                (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
-                 (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))));
-            if (dynamicImageFallback)
+            return zeroExtentSource;
+        }
+
+        if (expected == ScalarValueKind.ImageHandle)
+        {
+            for (uint dword = 0; dword < source.DwordCount; dword++)
             {
-                source = new DescriptorSource
-                {
-                    Dwords = Enumerable.Repeat(_graph.Constant(0u), (int)source.DwordCount).ToArray(),
-                };
-            }
-            else
-            {
-                throw Failure(
-                    pc,
-                    $"{memoryOpcode ?? "memory"} ({memoryAccess}) {expected} dword {badDword} is not a valid runtime value" +
-                        DescribeUndefinedLeaves(source.Dwords[badDword]) +
-                        $" (value: {DescribeValueShape(source.Dwords[badDword])})");
+                if (source.Dwords[dword].Kind == ScalarValueKind.ScalarBufferWord)
+                    throw Failure(pc, $"{expected} dword {dword} is not a valid runtime value");
             }
         }
+        if (!ValidateSource(source, out var badDword))
+            throw Failure(pc, $"{expected} dword {badDword} is not a valid runtime value");
 
         return InternSource(source);
     }
@@ -670,6 +646,35 @@ public sealed partial class ResourceTracker
         {
             visiting.Remove(value);
         }
+    }
+
+    private bool TryMakeZeroExtentBufferSource(DescriptorSource source, uint pc, out uint sourceIndex)
+    {
+        sourceIndex = 0;
+        ScalarValue? bufferHandle = null;
+        var hasBufferRead = false;
+        foreach (var word in source.Dwords)
+        {
+            if (word.IsConstant && word.ConstantU32 == 0) continue;
+            if (word.Kind != ScalarValueKind.ScalarBufferWord || word.Operands.Length != 2)
+                return false;
+            var current = word.Operands[0];
+            if (bufferHandle is not null && !_graph.Equivalent(bufferHandle, current))
+                return false;
+            bufferHandle = current;
+            hasBufferRead = true;
+        }
+
+        if (!hasBufferRead || bufferHandle is null ||
+            !MakeRuntimeBufferSource(bufferHandle, pc, out var bufferSource, out _))
+            return false;
+
+        sourceIndex = InternSource(new DescriptorSource
+        {
+            Dwords = Enumerable.Repeat(_graph.Constant(0u), (int)source.DwordCount).ToArray(),
+            ZeroExtentBufferSource = bufferSource,
+        });
+        return true;
     }
 
     // ---- dense tables ----
