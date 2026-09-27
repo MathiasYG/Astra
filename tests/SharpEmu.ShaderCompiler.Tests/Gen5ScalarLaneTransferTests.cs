@@ -139,6 +139,25 @@ public sealed class Gen5ScalarLaneTransferTests
         Assert.Contains((ushort)SpirvOp.Select, opcodes);
         Assert.Contains((ushort)SpirvOp.IMul, opcodes);
         Assert.Contains((ushort)SpirvOp.BitCount, opcodes);
+        AssertBitCountsUse32BitOperands(compiled.Spirv);
+    }
+
+    private static void AssertBitCountsUse32BitOperands(byte[] spirv)
+    {
+        var integerWidths = new Dictionary<uint, uint>();
+        for (var offset = 5 * sizeof(uint); offset < spirv.Length;)
+        {
+            var header = BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset));
+            var length = (int)(header >> 16);
+            Assert.True(length > 0);
+            uint Operand(int index) => BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset + index * sizeof(uint)));
+            if ((header & 0xFFFF) == (uint)SpirvOp.TypeInt)
+                integerWidths.Add(Operand(1), Operand(2));
+            if ((header & 0xFFFF) == (uint)SpirvOp.BitCount)
+                Assert.Equal(32u, integerWidths[Operand(1)]);
+            offset += length * sizeof(uint);
+        }
     }
 
     [Fact]

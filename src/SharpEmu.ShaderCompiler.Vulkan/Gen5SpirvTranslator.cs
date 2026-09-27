@@ -165,8 +165,10 @@ public static partial class Gen5SpirvTranslator
         private uint _storageUintPointer;
         private uint _lds;
         private uint _ldsElementPointer;
-        private uint _lds64ElementPointer;
         private uint _ldsDwordMask;
+        private uint _lds64;
+        private uint _lds64ElementPointer;
+        private bool _ldsExplicitLayout;
         private uint _scratch;
         private uint _scratchElementPointer;
         private uint _scratchDwordCount;
@@ -686,6 +688,44 @@ public static partial class Gen5SpirvTranslator
             _ldsDwordMask = dwordCount - 1;
 
             var ldsArrayType = _module.TypeArray(_uintType, dwordCount);
+            _ldsExplicitLayout = _request.Program.Instructions.Any(instruction =>
+                instruction.Opcode == "DsAddU64" &&
+                instruction.Control is Gen5DataShareControl { Gds: false });
+            if (_ldsExplicitLayout)
+            {
+                if (storageClass != SpirvStorageClass.Workgroup)
+                {
+                    throw new InvalidOperationException("64-bit LDS atomics require a compute workgroup");
+                }
+
+                // The two block variables alias one 32 KiB Workgroup allocation.
+                // Both views are needed: ordinary DS instructions address dwords,
+                // while OpAtomicIAdd must address a genuine 64-bit integer.
+                _module.AddCapability(SpirvCapability.Int64Atomics);
+                _module.AddCapability(SpirvCapability.WorkgroupMemoryExplicitLayoutKhr);
+                _module.AddExtension("SPV_KHR_workgroup_memory_explicit_layout");
+                _module.AddDecoration(ldsArrayType, SpirvDecoration.ArrayStride, sizeof(uint));
+                var lds64ArrayType = _module.TypeArray(_ulongType, dwordCount / 2);
+                _module.AddDecoration(lds64ArrayType, SpirvDecoration.ArrayStride, sizeof(ulong));
+                var ldsBlock = _module.TypeStruct(ldsArrayType);
+                var lds64Block = _module.TypeStruct(lds64ArrayType);
+                _module.AddDecoration(ldsBlock, SpirvDecoration.Block);
+                _module.AddDecoration(lds64Block, SpirvDecoration.Block);
+                _module.AddMemberDecoration(ldsBlock, 0, SpirvDecoration.Offset, 0);
+                _module.AddMemberDecoration(lds64Block, 0, SpirvDecoration.Offset, 0);
+                _ldsElementPointer = _module.TypePointer(storageClass, _uintType);
+                _lds64ElementPointer = _module.TypePointer(storageClass, _ulongType);
+                _lds = _module.AddGlobalVariable(_module.TypePointer(storageClass, ldsBlock), storageClass);
+                _lds64 = _module.AddGlobalVariable(_module.TypePointer(storageClass, lds64Block), storageClass);
+                _module.AddDecoration(_lds, SpirvDecoration.Aliased);
+                _module.AddDecoration(_lds64, SpirvDecoration.Aliased);
+                _module.AddName(_lds, "lds32");
+                _module.AddName(_lds64, "lds64");
+                _interfaces.Add(_lds);
+                _interfaces.Add(_lds64);
+                return;
+            }
+
             var ldsPointer = _module.TypePointer(storageClass, ldsArrayType);
             _ldsElementPointer = _module.TypePointer(storageClass, _uintType);
             _lds64ElementPointer = _module.TypePointer(storageClass, _ulongType);
@@ -2230,10 +2270,24 @@ public static partial class Gen5SpirvTranslator
             var index = BitwiseAnd(
                 ShiftRightLogical(addressWithOffset, UInt(2)),
                 UInt(_ldsDwordMask));
+            return _ldsExplicitLayout
+                ? _module.AddInstruction(SpirvOp.AccessChain, _ldsElementPointer, _lds, UInt(0), index)
+                : _module.AddInstruction(SpirvOp.AccessChain, _ldsElementPointer, _lds, index);
+        }
+
+        private uint Lds64Pointer(uint address, uint offsetBytes)
+        {
+            var addressWithOffset = offsetBytes == 0
+                ? address
+                : IAdd(address, UInt(offsetBytes));
+            var index = BitwiseAnd(
+                ShiftRightLogical(addressWithOffset, UInt(3)),
+                UInt(_ldsDwordMask >> 1));
             return _module.AddInstruction(
                 SpirvOp.AccessChain,
-                _ldsElementPointer,
-                _lds,
+                _lds64ElementPointer,
+                _lds64,
+                UInt(0),
                 index);
         }
 
@@ -2280,6 +2334,39 @@ public static partial class Gen5SpirvTranslator
                         semantics: 0x108,
                         value: () => updated,
                         comparator: () => original);
+                });
+                return true;
+            }
+
+            if (instruction.Opcode == "DsAddU64")
+            {
+                if (_lds64 == 0 || instruction.Sources.Count < 3)
+                {
+                    error = "missing 64-bit LDS atomic storage or operands";
+                    return false;
+                }
+
+                var address64 = GetRawSource(instruction, 0);
+                var pointer64 = Lds64Pointer(address64, control.SingleOffsetBytes);
+                EmitExecConditional(() =>
+                {
+                    var low = _module.AddInstruction(
+                        SpirvOp.UConvert, _ulongType, GetRawSource(instruction, 1));
+                    var high = _module.AddInstruction(
+                        SpirvOp.UConvert, _ulongType, GetRawSource(instruction, 2));
+                    var value64 = _module.AddInstruction(
+                        SpirvOp.BitwiseOr,
+                        _ulongType,
+                        low,
+                        ShiftLeftLogical64(high, ULong(32)));
+                    EmitAtomic(
+                        SpirvOp.AtomicIAdd,
+                        _ulongType,
+                        pointer64,
+                        scope: 2,
+                        semantics: 0x108,
+                        value: () => value64,
+                        comparator: () => ULong(0));
                 });
                 return true;
             }
@@ -7368,6 +7455,19 @@ public static partial class Gen5SpirvTranslator
                     _longType,
                     Bitcast(_longType, left),
                     BitwiseAnd64(right, _module.Constant64(_ulongType, 63))));
+        private uint BitCount64(uint value)
+        {
+            // Vulkan without maintenance9 only permits 32-bit OpBitCount operands.
+            // Counting both halves preserves the 64-bit guest instruction result.
+            var low = _module.AddInstruction(SpirvOp.UConvert, _uintType, value);
+            var high = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(value, ULong(32)));
+            return IAdd(
+                _module.AddInstruction(SpirvOp.BitCount, _uintType, low),
+                _module.AddInstruction(SpirvOp.BitCount, _uintType, high));
+        }
 
         private uint BitwiseAnd(uint left, uint right) =>
             _module.AddInstruction(SpirvOp.BitwiseAnd, _uintType, left, right);
@@ -7576,20 +7676,23 @@ public static partial class Gen5SpirvTranslator
                 widened);
         }
 
-        private uint WaveMaskScratchPointer(uint index) =>
-            _module.AddInstruction(
-                SpirvOp.AccessChain,
-                _waveMaskScratchElementPointer,
-                _waveScratchInLds ? _lds : _waveMaskScratch,
-                _waveScratchInLds ? IAdd(UInt(LdsDwordCount - 3), index) : index);
+        private uint WaveMaskScratchPointer(uint index)
+        {
+            var offset = _waveScratchInLds ? IAdd(UInt(LdsDwordCount - 3), index) : index;
+            return _waveScratchInLds && _ldsExplicitLayout
+                ? _module.AddInstruction(SpirvOp.AccessChain, _waveMaskScratchElementPointer, _lds, UInt(0), offset)
+                : _module.AddInstruction(
+                    SpirvOp.AccessChain,
+                    _waveMaskScratchElementPointer,
+                    _waveScratchInLds ? _lds : _waveMaskScratch,
+                    offset);
+        }
 
         private uint WaveBroadcastScratchPointer() =>
             _waveScratchInLds
-                ? _module.AddInstruction(
-                    SpirvOp.AccessChain,
-                    _ldsElementPointer,
-                    _lds,
-                    UInt(LdsDwordCount - 1))
+                ? (_ldsExplicitLayout
+                    ? _module.AddInstruction(SpirvOp.AccessChain, _ldsElementPointer, _lds, UInt(0), UInt(LdsDwordCount - 1))
+                    : _module.AddInstruction(SpirvOp.AccessChain, _ldsElementPointer, _lds, UInt(LdsDwordCount - 1)))
                 : _waveBroadcastScratch;
 
         private void EmitWave64Barrier()

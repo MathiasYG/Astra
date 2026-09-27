@@ -166,6 +166,20 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void DsAddU64_UsesBothDataWordsAndHasNoDestination()
+    {
+        // DS_ADD_U64 v0, v[1:2]
+        var instruction = DecodeSingle(0xD9000000, 0x00000100);
+
+        Assert.Equal("DsAddU64", instruction.Opcode);
+        Assert.Equal(
+            new[] { Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2) },
+            instruction.Sources);
+        Assert.Empty(instruction.Destinations);
+        Assert.True(Gen5ShaderTranslator.IsDataShareAtomic(instruction.Opcode));
+    }
+
+    [Fact]
     public void DsAddRtnU32_WritesReturnRegister()
     {
         // DS_ADD_RTN_U32 v3, v0, v1
@@ -277,6 +291,41 @@ public sealed class Gen5ShaderAtomicDecodeTests
             new[] { Gen5Operand.Vector(0), Gen5Operand.Vector(3) },
             instruction.Sources);
         Assert.Empty(instruction.Destinations);
+    }
+
+    [Fact]
+    public void VCmpNeU16_DecodesUnsignedHalfwordCompare()
+    {
+        // V_CMP_NE_U16 v0, v3 (RDNA2 VOPC opcode 0xAD).
+        var instruction = DecodeSingle(0x7D5A0700);
+
+        Assert.Equal("VCmpNeU16", instruction.Opcode);
+        Assert.Equal(
+            new[] { Gen5Operand.Vector(0), Gen5Operand.Vector(3) },
+            instruction.Sources);
+        Assert.Empty(instruction.Destinations);
+    }
+
+    [Theory]
+    [InlineData(0xA9u, "VCmpLtU16")]
+    [InlineData(0xAAu, "VCmpEqU16")]
+    [InlineData(0xABu, "VCmpLeU16")]
+    [InlineData(0xACu, "VCmpGtU16")]
+    [InlineData(0xAEu, "VCmpGeU16")]
+    [InlineData(0xB9u, "VCmpxLtU16")]
+    [InlineData(0xBAu, "VCmpxEqU16")]
+    [InlineData(0xBBu, "VCmpxLeU16")]
+    [InlineData(0xBCu, "VCmpxGtU16")]
+    [InlineData(0xBDu, "VCmpxNeU16")]
+    [InlineData(0xBEu, "VCmpxGeU16")]
+    public void UnsignedHalfwordComparesFollowRdna2OpcodeTable(uint opcode, string expected)
+    {
+        var instruction = DecodeSingle(0x7C000700u | (opcode << 17));
+
+        Assert.Equal(expected, instruction.Opcode);
+        Assert.Equal(
+            new[] { Gen5Operand.Vector(0), Gen5Operand.Vector(3) },
+            instruction.Sources);
     }
 
     [Fact]

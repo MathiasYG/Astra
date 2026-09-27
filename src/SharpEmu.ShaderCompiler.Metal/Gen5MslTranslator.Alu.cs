@@ -231,7 +231,15 @@ public static partial class Gen5MslTranslator
                     instruction,
                     destination,
                     $"rsqrt({F16(instruction, 0)})"),
+                "VSqrtF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"sqrt({F16(instruction, 0)})"),
                 "VRcpF32" or "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
+                "VRcpF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"(1.0f / {F16(instruction, 0)})"),
                 "VLogF32" => FloatResult(instruction, $"log2({F(instruction, 0)})"),
                 "VExpF32" => FloatResult(instruction, $"exp2({F(instruction, 0)})"),
                 // GCN sin/cos take revolutions; mirror the SPIR-V Tau prescale.
@@ -693,6 +701,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
+                     "VCmpTU16" or "VCmpxTU16" or
                      "VCmpTI32" or "VCmpTU32")
             {
                 condition = "true";
@@ -700,6 +709,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpFF32" or "VCmpxFF32" or
                      "VCmpFF16" or "VCmpxFF16" or
+                     "VCmpFU16" or "VCmpxFU16" or
                      "VCmpFI32" or "VCmpFU32")
             {
                 condition = "false";
@@ -790,6 +800,11 @@ public static partial class Gen5MslTranslator
 
                 var left = wide ? RawSource64(instruction, 0) : RawSource(instruction, 0);
                 var right = wide ? RawSource64(instruction, 1) : RawSource(instruction, 1);
+                if (opcode.EndsWith("U16", StringComparison.Ordinal))
+                {
+                    left = $"(({left}) & 0xFFFFu)";
+                    right = $"(({right}) & 0xFFFFu)";
+                }
                 condition = signed
                     ? signed16
                         ? $"(int(short(({left}) & 0xFFFFu)) {op} int(short(({right}) & 0xFFFFu)))"

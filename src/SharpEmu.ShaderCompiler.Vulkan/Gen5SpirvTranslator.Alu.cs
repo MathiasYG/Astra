@@ -449,6 +449,16 @@ public static partial class Gen5SpirvTranslator
                             Float(1),
                             GetFloatSource(instruction, 0)));
                     break;
+                case "VRcpF16":
+                    result = EmitFloat16Result(
+                        instruction,
+                        destination,
+                        _module.AddInstruction(
+                            SpirvOp.FDiv,
+                            _floatType,
+                            Float(1),
+                            GetFloat16Source(instruction, 0)));
+                    break;
                 case "VLogF32":
                     result = EmitFloatResult(
                         instruction,
@@ -511,6 +521,12 @@ public static partial class Gen5SpirvTranslator
                         instruction,
                         destination,
                         Ext(32, _floatType, GetFloat16Source(instruction, 0)));
+                    break;
+                case "VSqrtF16":
+                    result = EmitFloat16Result(
+                        instruction,
+                        destination,
+                        Ext(31, _floatType, GetFloat16Source(instruction, 0)));
                     break;
                 case "VFractF32":
                     result = EmitFloatResult(
@@ -2301,6 +2317,7 @@ public static partial class Gen5SpirvTranslator
             else if (opcode is
                      "VCmpFF32" or "VCmpxFF32" or
                      "VCmpFF16" or "VCmpxFF16" or
+                     "VCmpFU16" or "VCmpxFU16" or
                      "VCmpFI32" or "VCmpFU32" or
                      "VCmpFI64" or "VCmpxFI64" or "VCmpFU64" or "VCmpxFU64")
             {
@@ -2309,6 +2326,7 @@ public static partial class Gen5SpirvTranslator
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
+                     "VCmpTU16" or "VCmpxTU16" or
                      "VCmpTI32" or "VCmpTU32" or
                      "VCmpTI64" or "VCmpxTI64" or "VCmpTU64" or "VCmpxTU64")
             {
@@ -2470,6 +2488,7 @@ public static partial class Gen5SpirvTranslator
                     ? GetRawSource64(instruction, 1)
                     : GetRawSource(instruction, 1);
                 var signed16 = opcode.EndsWith("I16", StringComparison.Ordinal);
+                var unsigned16 = opcode.EndsWith("U16", StringComparison.Ordinal);
                 var signed = signed16 ||
                     opcode.EndsWith("I32", StringComparison.Ordinal) ||
                     opcode.EndsWith("I64", StringComparison.Ordinal);
@@ -2487,6 +2506,11 @@ public static partial class Gen5SpirvTranslator
                         Bitcast(_intType, right),
                         UInt(0),
                         UInt(16));
+                }
+                else if (unsigned16)
+                {
+                    left = BitwiseAnd(left, UInt(0xFFFF));
+                    right = BitwiseAnd(right, UInt(0xFFFF));
                 }
                 if (signed)
                 {
@@ -2511,6 +2535,13 @@ public static partial class Gen5SpirvTranslator
                     "VCmpNeU32" or "VCmpxNeU32" => SpirvOp.INotEqual,
                     "VCmpEqI16" or "VCmpxEqI16" => SpirvOp.IEqual,
                     "VCmpNeI16" or "VCmpxNeI16" => SpirvOp.INotEqual,
+                    "VCmpNeU16" => SpirvOp.INotEqual,
+                    "VCmpxNeU16" => SpirvOp.INotEqual,
+                    "VCmpEqU16" or "VCmpxEqU16" => SpirvOp.IEqual,
+                    "VCmpLtU16" or "VCmpxLtU16" => SpirvOp.ULessThan,
+                    "VCmpLeU16" or "VCmpxLeU16" => SpirvOp.ULessThanEqual,
+                    "VCmpGtU16" or "VCmpxGtU16" => SpirvOp.UGreaterThan,
+                    "VCmpGeU16" or "VCmpxGeU16" => SpirvOp.UGreaterThanEqual,
                     "VCmpNeU64" or "VCmpxNeU64" or
                     "VCmpNeI64" or "VCmpxNeI64" => SpirvOp.INotEqual,
                     "VCmpLtI16" or "VCmpxLtI16" => SpirvOp.SLessThan,
@@ -2663,15 +2694,7 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SBcnt1I32B64")
             {
-                // Vulkan only allows OpBitCount on 32-bit operands without
-                // maintenance9, so count each half separately.
-                var wide = GetRawSource64(instruction, 0);
-                var bitCountResult = IAdd(
-                    _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(wide)),
-                    _module.AddInstruction(
-                        SpirvOp.BitCount,
-                        _uintType,
-                        Narrow(ShiftRightLogical64(wide, _module.Constant64(_ulongType, 32)))));
+                var bitCountResult = BitCount64(GetRawSource64(instruction, 0));
                 StoreS(destination, bitCountResult);
                 Store(_scc, IsNotZero(bitCountResult));
                 return true;

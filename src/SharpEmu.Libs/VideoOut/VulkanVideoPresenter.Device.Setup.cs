@@ -906,15 +906,27 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
                 PNext = &addressFeatures,
             };
+            var workgroupLayoutFeatures = new PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKhr,
+                PNext = &atomicInt64Features,
+            };
+            var hasWorkgroupLayoutExtension =
+                IsDeviceExtensionAvailable("VK_KHR_workgroup_memory_explicit_layout");
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = &atomicInt64Features,
+                PNext = hasWorkgroupLayoutExtension ? &workgroupLayoutFeatures : &atomicInt64Features,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
+            var supportsSharedInt64Atomics = atomicInt64Features.ShaderSharedInt64Atomics;
+            var supportsWorkgroupExplicitLayout =
+                hasWorkgroupLayoutExtension && workgroupLayoutFeatures.WorkgroupMemoryExplicitLayout;
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan 64-bit LDS atomic support shared_atomic={(supportsSharedInt64Atomics ? "true" : "false")} " +
+                $"explicit_layout={supportsWorkgroupExplicitLayout}");
             var supportsTimelineSemaphore = timelineSemaphoreFeatures.TimelineSemaphore;
             var supportsBufferDeviceAddress = addressFeatures.BufferDeviceAddress;
-            var supportsSharedInt64Atomics = atomicInt64Features.ShaderSharedInt64Atomics;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -967,9 +979,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var viewportIndexLayerExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_shader_viewport_index_layer");
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
+            var workgroupLayoutExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_workgroup_memory_explicit_layout");
             try
             {
-                var extensions = stackalloc byte*[14];
+                var extensions = stackalloc byte*[15];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -1016,6 +1029,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     extensions[extensionCount++] = robustness2Extension;
                 }
 
+                if (supportsWorkgroupExplicitLayout)
+                {
+                    extensions[extensionCount++] = workgroupLayoutExtension;
+                }
+
                 if (IsDeviceExtensionAvailable(PortabilitySubsetExtensionName))
                 {
                     // The spec requires enabling this when the (MoltenVK)
@@ -1052,18 +1070,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     BufferDeviceAddress = true,
                     PNext = &timelineSemaphoreFeatures,
                 };
-                void* renderingChain = &addressFeatures;
-                if (supportsSharedInt64Atomics)
+                atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
                 {
-                    atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
-                    {
-                        SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
-                        ShaderSharedInt64Atomics = true,
-                        PNext = renderingChain,
-                    };
-                    renderingChain = &atomicInt64Features;
-                }
-
+                    SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
+                    ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
+                    PNext = &addressFeatures,
+                };
+                workgroupLayoutFeatures = new PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
+                {
+                    SType = StructureType.PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKhr,
+                    WorkgroupMemoryExplicitLayout = supportsWorkgroupExplicitLayout,
+                    PNext = &atomicInt64Features,
+                };
+                void* renderingChain = supportsWorkgroupExplicitLayout
+                    ? &workgroupLayoutFeatures
+                    : &atomicInt64Features;
                 if (_supportsFragmentShaderBarycentric)
                 {
                     barycentricFeatures.PNext = renderingChain;
@@ -1162,6 +1183,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)pushDescriptorExtension);
                 SilkMarshal.Free((nint)barycentricExtension);
                 SilkMarshal.Free((nint)viewportIndexLayerExtension);
+                SilkMarshal.Free((nint)workgroupLayoutExtension);
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);

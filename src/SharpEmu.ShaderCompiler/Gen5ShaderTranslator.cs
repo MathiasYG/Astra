@@ -985,7 +985,7 @@ public static partial class Gen5ShaderTranslator
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
         name = VopcOpcodeName(opcode);
-        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
+        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2} word=0x{word:X8}", out error);
     }
 
     // VOPC names, shared by the VOP3 encoding of the same compares (VOP3 opcodes 0x000-0x0FF).
@@ -1074,6 +1074,14 @@ public static partial class Gen5ShaderTranslator
             0xA5 => "VCmpNeI64",
             0xA6 => "VCmpGeI64",
             0xA7 => "VCmpTI64",
+            0xA8 => "VCmpFU16",
+            0xA9 => "VCmpLtU16",
+            0xAA => "VCmpEqU16",
+            0xAB => "VCmpLeU16",
+            0xAC => "VCmpGtU16",
+            0xAD => "VCmpNeU16",
+            0xAE => "VCmpGeU16",
+            0xAF => "VCmpTU16",
             0xB0 => "VCmpxFI64",
             0xB1 => "VCmpxLtI64",
             0xB2 => "VCmpxEqI64",
@@ -1082,6 +1090,14 @@ public static partial class Gen5ShaderTranslator
             0xB5 => "VCmpxNeI64",
             0xB6 => "VCmpxGeI64",
             0xB7 => "VCmpxTI64",
+            0xB8 => "VCmpxFU16",
+            0xB9 => "VCmpxLtU16",
+            0xBA => "VCmpxEqU16",
+            0xBB => "VCmpxLeU16",
+            0xBC => "VCmpxGtU16",
+            0xBD => "VCmpxNeU16",
+            0xBE => "VCmpxGeU16",
+            0xBF => "VCmpxTU16",
             0xC0 => "VCmpFU32",
             0xC1 => "VCmpLtU32",
             0xC2 => "VCmpEqU32",
@@ -1931,7 +1947,7 @@ public static partial class Gen5ShaderTranslator
 
     public static bool IsDataShareAtomic(string name) => name switch
     {
-        "DsAddU32" or "DsSubU32" or "DsIncU32" or "DsDecU32" or
+        "DsAddU32" or "DsAddU64" or "DsSubU32" or "DsIncU32" or "DsDecU32" or
         "DsMinI32" or "DsMaxI32" or "DsMinU32" or "DsMaxU32" or
         "DsMinF32" or "DsMaxF32" or
         "DsAndB32" or "DsOrB32" or "DsXorB32" or "DsCmpstB32" or
@@ -2444,6 +2460,11 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorData0),
                     ],
                     "DsWriteB64" => [
+                        Gen5Operand.Vector(vectorAddress),
+                        Gen5Operand.Vector(vectorData0),
+                        Gen5Operand.Vector(vectorData0 + 1),
+                    ],
+                    "DsAddU64" => [
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorData0),
                         Gen5Operand.Vector(vectorData0 + 1),
