@@ -396,7 +396,16 @@ public sealed partial class ScalarValueGraph
             {
                 case Gen5ShaderEncoding.Sop1:
                 case Gen5ShaderEncoding.Sop2:
+                    ApplyScalarAlu(instruction, state);
+                    return;
                 case Gen5ShaderEncoding.Sopk:
+                    if (instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal))
+                    {
+                        ApplyScalarCompareK(instruction, state);
+                        if (_recording) _graph.ScalarCompareConditions[instruction.Pc] = state.Scc;
+                        return;
+                    }
+
                     ApplyScalarAlu(instruction, state);
                     return;
                 case Gen5ShaderEncoding.Sopc:
@@ -1037,6 +1046,28 @@ public sealed partial class ScalarValueGraph
             }
 
             state.Scc = Compare(opcode["SCmp".Length..], left, right);
+        }
+
+        private void ApplyScalarCompareK(Gen5ShaderInstruction instruction, RegisterState state)
+        {
+            if (instruction.Destinations.Count != 1 ||
+                instruction.Destinations[0] is not { Kind: Gen5OperandKind.ScalarRegister, Value: < ScalarRegisterCount } source ||
+                instruction.Words.Count == 0)
+            {
+                state.Scc = _graph.Undefined(ScalarValueType.Bool);
+                return;
+            }
+
+            var simm16 = instruction.Words[0] & 0xFFFF;
+            var immediate = instruction.Opcode.EndsWith("I32", StringComparison.Ordinal) &&
+                !instruction.Opcode.EndsWith("U32", StringComparison.Ordinal)
+                ? unchecked((uint)(int)(short)simm16)
+                : simm16;
+
+            // SOPK compare instructions encode the source SGPR in the SDST field.
+            // They update SCC and leave that SGPR unchanged.
+            state.Scc = Compare(instruction.Opcode["SCmp".Length..],
+                state.Scalars[source.Value], _graph.Constant(immediate));
         }
 
         private ScalarValue Compare(string suffix, ScalarValue left, ScalarValue right) => suffix switch
