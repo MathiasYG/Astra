@@ -44,6 +44,57 @@ public sealed class CountedImageTests
         return data;
     }
 
+    private static Gen5ShaderProgram ScalarBranchTableProgram(bool skipLoadsOnFalse = true, bool incrementFromZero = true)
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            MoveScalar(0, 8, incrementFromZero ? 0u : 0xFFFFFFFFu),
+            Sop2(4, "SLshlB32", 10, Gen5Operand.Scalar(8), Operand(5)),
+            Sopc(8, "SCmpLtI32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(9)),
+            Branch(12, skipLoadsOnFalse ? "SCbranchScc0" : "SCbranchScc1", 8),
+            ScalarLoad(16, 0, 40, count: 4, immediateOffset: 0x2B8),
+            ScalarLoad(24, 0, 32, count: 8, dynamicOffsetRegister: 10),
+            Image(32, "ImageSampleLz", 32, 40),
+            Sop2(40, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+            Branch(44, "SBranch", -11),
+            EndProgram(48),
+        };
+        return Program([.. instructions]);
+    }
+
+    [Fact]
+    public void SignedScalarBranchGuardsShiftedDescriptorTable()
+    {
+        var plan = Extract(ScalarBranchTableProgram());
+        var image = Assert.Single(plan.Info.Images);
+        var selector = Assert.IsType<IndirectImageSelector>(plan.DescriptorSources[(int)image.Source].IndirectImage);
+        Assert.Equal(32u, selector.EntryStride);
+        Assert.NotNull(selector.RuntimeKeyBound);
+
+        var memory = ResourceTrackerTests.LinearMemory();
+        var descriptor = ResourceTrackerTests.ImageDescriptor();
+        ResourceTrackerTests.WriteImage(memory, 0x1000, descriptor);
+        ResourceTrackerTests.WriteImage(memory, 0x1000 + 32, descriptor);
+        for (uint dword = 0; dword < 4; dword++)
+            memory.At(0x1000 + 0x2B8 + dword * 4) = 0;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(UserData(2), readMemory: memory.Read,
+                readCleanMemory: memory.Read),
+            ref snapshot, ref specialization));
+        Assert.Equal(descriptor, Assert.Single(snapshot.Images));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void ScalarBranchMustSkipReadsAndStartAtZero(bool skipsOnFalse, bool startsAtZero)
+    {
+        var error = Assert.Throws<ResourcePlanException>(() =>
+            Extract(ScalarBranchTableProgram(skipsOnFalse, startsAtZero)));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
     private static TestWordMemory Table(uint count, bool varyingSampler = false)
     {
         var memory = ResourceTrackerTests.LinearMemory();

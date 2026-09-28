@@ -15,19 +15,66 @@ internal static class CountedImageBound
         foreach (var (comparePc, condition) in graph.ScalarCompareConditions)
         {
             if (comparePc >= imagePc || condition.Kind != ScalarValueKind.Operation ||
-                condition.Operation != ScalarOperation.ULessThan32 || condition.Operands.Length != 2 ||
+                condition.Operation is not (ScalarOperation.ULessThan32 or ScalarOperation.SLessThan32) ||
+                condition.Operands.Length != 2 ||
                 !graph.Equivalent(condition.Operands[0], key))
                 continue;
 
             var candidate = graph.ResolveInvariantPhi(condition.Operands[1]);
             if (candidate is null || !plan.ValidateRuntimeValue(candidate) ||
-                !ProvesGuard(graph, comparePc, imagePc, firstReadPc))
+                (condition.Operation == ScalarOperation.SLessThan32 && !IsZeroBasedIncrementing(key)) ||
+                !(ProvesGuard(graph, comparePc, imagePc, firstReadPc) ||
+                  ProvesScalarBranchGuard(graph, comparePc, imagePc, firstReadPc)))
                 continue;
 
             bound = candidate;
             return true;
         }
         return false;
+    }
+
+    // A scalar branch on SCC=0 skips the descriptor loads and the image access.
+    // For signed comparisons, the zero-based unit increment proves the key
+    // cannot become negative before a bounded iteration count is reached.
+    private static bool ProvesScalarBranchGuard(ScalarValueGraph graph, uint comparePc, uint imagePc, uint firstReadPc)
+    {
+        var flow = graph.ControlFlow;
+        var compareBlock = FindBlock(flow, comparePc);
+        var readBlock = FindBlock(flow, firstReadPc);
+        var imageBlock = FindBlock(flow, imagePc);
+        if (compareBlock < 0 || readBlock < 0 || imageBlock < 0 ||
+            !Dominates(flow, compareBlock, readBlock) || !Dominates(flow, compareBlock, imageBlock))
+            return false;
+
+        var instructions = graph.Program.Instructions;
+        var compareIndex = instructions.ToList().FindIndex(instruction => instruction.Pc == comparePc);
+        if (compareIndex < 0 || compareIndex + 1 >= instructions.Count)
+            return false;
+        var branch = instructions[compareIndex + 1];
+        if (branch.Opcode != "SCbranchScc0" || FindBlock(flow, branch.Pc) != compareBlock ||
+            branch.Pc >= firstReadPc)
+            return false;
+
+        var displacement = unchecked((short)(branch.Words[0] & 0xFFFF));
+        var targetPc = unchecked((uint)((long)branch.Pc + 4 + (long)displacement * 4));
+        var targetBlock = FindBlock(flow, targetPc);
+        return targetPc > imagePc && targetBlock >= 0 &&
+            !ReachableWithoutGuard(flow, targetBlock, readBlock, compareBlock) &&
+            !ReachableWithoutGuard(flow, targetBlock, imageBlock, compareBlock);
+    }
+
+    private static bool IsZeroBasedIncrementing(ScalarValue key)
+    {
+        if (key.Kind != ScalarValueKind.Phi || key.Operands.Length != 2)
+            return false;
+        var start = key.Operands[0];
+        var next = key.Operands[1];
+        if (!start.IsConstant || start.ConstantU32 != 0 ||
+            next.Kind != ScalarValueKind.Operation || next.Operation != ScalarOperation.IAdd32 ||
+            next.Operands.Length != 2)
+            return false;
+        return (ReferenceEquals(next.Operands[0], key) && next.Operands[1].IsConstant && next.Operands[1].ConstantU32 == 1) ||
+            (ReferenceEquals(next.Operands[1], key) && next.Operands[0].IsConstant && next.Operands[0].ConstantU32 == 1);
     }
 
     private static bool ProvesGuard(ScalarValueGraph graph, uint comparePc, uint imagePc, uint firstReadPc)

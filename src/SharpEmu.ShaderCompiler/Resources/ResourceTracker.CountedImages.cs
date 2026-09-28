@@ -67,16 +67,22 @@ public sealed partial class ResourceTracker
             else return false;
         }
 
-        if (dynamicOffset.Kind != ScalarValueKind.Operation ||
-            dynamicOffset.Operation != ScalarOperation.IMul32 || dynamicOffset.Operands.Length != 2)
+        if (dynamicOffset.Kind != ScalarValueKind.Operation || dynamicOffset.Operands.Length != 2)
             return false;
         ScalarValue key;
-        if (dynamicOffset.Operands[0].IsConstant)
+        if (dynamicOffset.Operation == ScalarOperation.ShiftLeft32 &&
+            dynamicOffset.Operands[1].IsConstant &&
+            dynamicOffset.Operands[1].ConstantU32 < 32)
+        {
+            stride = 1u << (int)dynamicOffset.Operands[1].ConstantU32;
+            key = dynamicOffset.Operands[0];
+        }
+        else if (dynamicOffset.Operation == ScalarOperation.IMul32 && dynamicOffset.Operands[0].IsConstant)
         {
             stride = dynamicOffset.Operands[0].ConstantU32;
             key = dynamicOffset.Operands[1];
         }
-        else if (dynamicOffset.Operands[1].IsConstant)
+        else if (dynamicOffset.Operation == ScalarOperation.IMul32 && dynamicOffset.Operands[1].IsConstant)
         {
             stride = dynamicOffset.Operands[1].ConstantU32;
             key = dynamicOffset.Operands[0];
