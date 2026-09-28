@@ -30,7 +30,10 @@ public sealed partial class ResourceTracker
         uint immediate = 0;
         for (var dword = 0; dword < width; dword++)
         {
-            var read = handle.Operands[dword];
+            // A descriptor loaded before an inner loop is carried through a
+            // self-referential phi. The value is still the same scalar load.
+            var read = _graph.ResolveInvariantPhi(handle.Operands[dword]);
+            if (read is null) return false;
             if (read.Kind != ScalarValueKind.ScalarAddressWord || read.Operands.Length != 2 ||
                 read.MemoryIndex < 0 || read.MemoryIndex >= _plan.Memory.Count ||
                 !MemoryIndexBelongsTo(read.MemoryIndex, read)) return false;
@@ -101,10 +104,17 @@ public sealed partial class ResourceTracker
     private bool TryMakeCountedImage(ScalarValue handle, uint pc, out IndirectImagePlan plan)
     {
         plan = null!;
-        if (handle.Kind != ScalarValueKind.ImageHandle ||
-            !TryMatchCountedTable(handle, 8, pc, out var reads, out var memoryIndices,
-                out var heapSource, out var tableOffset, out var dynamicBase, out var stride, out var bound) ||
-            reads.Any(read => !UsesOnly(read, [handle]))) return false;
+        if (handle.Kind != ScalarValueKind.ImageHandle) return false;
+        if (!TryMatchCountedTable(handle, 8, pc, out var reads, out var memoryIndices,
+                out var heapSource, out var tableOffset, out var dynamicBase, out var stride, out var bound))
+            return false;
+        if (reads.Where((read, index) => !ReferenceEquals(read, handle.Operands[index]))
+                .Any(read => !_uses.TryGetValue(read, out var users) ||
+                    users.Any(user => user.Kind != ScalarValueKind.Phi ||
+                        _graph.ResolveInvariantPhi(user) is not { } invariant ||
+                        !_graph.Equivalent(invariant, read))) ||
+            reads.Where((read, index) => ReferenceEquals(read, handle.Operands[index]))
+                .Any(read => !UsesOnly(read, [handle]))) return false;
 
         var heap = _sources[(int)heapSource];
         var dwords = Enumerable.Repeat(reads[0], 8).ToArray();

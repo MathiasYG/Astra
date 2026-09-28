@@ -14,23 +14,65 @@ internal static class CountedImageBound
         var graph = plan.Graph;
         foreach (var (comparePc, condition) in graph.ScalarCompareConditions)
         {
-            if (comparePc >= imagePc || condition.Kind != ScalarValueKind.Operation ||
+            if (condition.Kind != ScalarValueKind.Operation ||
                 condition.Operation is not (ScalarOperation.ULessThan32 or ScalarOperation.SLessThan32) ||
                 condition.Operands.Length != 2 ||
-                !graph.Equivalent(condition.Operands[0], key))
+                !(graph.Equivalent(condition.Operands[0], key) ||
+                  comparePc > imagePc && IsIncrementOfKey(graph, condition.Operands[0], key)))
                 continue;
 
             var candidate = graph.ResolveInvariantPhi(condition.Operands[1]);
             if (candidate is null || !plan.ValidateRuntimeValue(candidate) ||
                 (condition.Operation == ScalarOperation.SLessThan32 && !IsZeroBasedIncrementing(key)) ||
-                !(ProvesGuard(graph, comparePc, imagePc, firstReadPc) ||
-                  ProvesScalarBranchGuard(graph, comparePc, imagePc, firstReadPc)))
+                !(comparePc < imagePc &&
+                    (ProvesGuard(graph, comparePc, imagePc, firstReadPc) ||
+                     ProvesScalarBranchGuard(graph, comparePc, imagePc, firstReadPc)) ||
+                  comparePc > imagePc && ProvesPostTestLoopGuard(graph, key, candidate,
+                      comparePc, imagePc, firstReadPc)))
                 continue;
 
             bound = candidate;
             return true;
         }
         return false;
+    }
+
+    // A do-while loop reads index zero once, increments by one, and branches
+    // back only while the incremented index is below a positive fixed bound.
+    // Removing the latch block must leave no path back to the descriptor load.
+    private static bool ProvesPostTestLoopGuard(
+        ScalarValueGraph graph, ScalarValue key, ScalarValue bound, uint comparePc, uint imagePc, uint firstReadPc)
+    {
+        if (!bound.IsConstant || bound.ConstantU32 is 0 or > 4096 ||
+            !IsZeroBasedIncrementing(key)) return false;
+
+        var instructions = graph.Program.Instructions;
+        var compareIndex = instructions.ToList().FindIndex(instruction => instruction.Pc == comparePc);
+        if (compareIndex < 0 || compareIndex + 1 >= instructions.Count) return false;
+        var branch = instructions[compareIndex + 1];
+        if (branch.Opcode != "SCbranchScc1") return false;
+        var targetPc = unchecked((uint)((long)branch.Pc + 4 +
+            (long)unchecked((short)(branch.Words[0] & 0xFFFF)) * 4));
+        if (targetPc > firstReadPc) return false;
+
+        var flow = graph.ControlFlow;
+        var readBlock = FindBlock(flow, firstReadPc);
+        var imageBlock = FindBlock(flow, imagePc);
+        var compareBlock = FindBlock(flow, comparePc);
+        var targetBlock = FindBlock(flow, targetPc);
+        var exitBlock = FindBlock(flow, branch.Pc + 4);
+        if (readBlock < 0 || imageBlock < 0 || compareBlock < 0 || targetBlock < 0 ||
+            exitBlock < 0 ||
+            !Dominates(flow, readBlock, imageBlock) ||
+            !Dominates(flow, targetBlock, readBlock) ||
+            branch.Pc <= imagePc ||
+            ReachableWithoutGuard(flow, exitBlock, readBlock, compareBlock)) return false;
+
+        foreach (var successor in flow.Successors[imageBlock])
+        {
+            if (ReachableWithoutGuard(flow, successor, readBlock, compareBlock)) return false;
+        }
+        return true;
     }
 
     // A scalar branch on SCC=0 skips the descriptor loads and the image access.
@@ -73,8 +115,25 @@ internal static class CountedImageBound
             next.Kind != ScalarValueKind.Operation || next.Operation != ScalarOperation.IAdd32 ||
             next.Operands.Length != 2)
             return false;
-        return (ReferenceEquals(next.Operands[0], key) && next.Operands[1].IsConstant && next.Operands[1].ConstantU32 == 1) ||
-            (ReferenceEquals(next.Operands[1], key) && next.Operands[0].IsConstant && next.Operands[0].ConstantU32 == 1);
+        return (ReferenceEquals(CollapseSelfPhi(next.Operands[0]), key) && next.Operands[1].IsConstant && next.Operands[1].ConstantU32 == 1) ||
+            (ReferenceEquals(CollapseSelfPhi(next.Operands[1]), key) && next.Operands[0].IsConstant && next.Operands[0].ConstantU32 == 1);
+    }
+
+    private static bool IsIncrementOfKey(ScalarValueGraph graph, ScalarValue value, ScalarValue key) =>
+        value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.IAdd32 &&
+        value.Operands.Length == 2 &&
+        ((graph.Equivalent(CollapseSelfPhi(value.Operands[0]), key) && value.Operands[1].IsConstant && value.Operands[1].ConstantU32 == 1) ||
+         (graph.Equivalent(CollapseSelfPhi(value.Operands[1]), key) && value.Operands[0].IsConstant && value.Operands[0].ConstantU32 == 1));
+
+    private static ScalarValue CollapseSelfPhi(ScalarValue value)
+    {
+        while (value.Kind == ScalarValueKind.Phi && value.Operands.Length == 2)
+        {
+            if (ReferenceEquals(value.Operands[0], value)) value = value.Operands[1];
+            else if (ReferenceEquals(value.Operands[1], value)) value = value.Operands[0];
+            else break;
+        }
+        return value;
     }
 
     private static bool ProvesGuard(ScalarValueGraph graph, uint comparePc, uint imagePc, uint firstReadPc)

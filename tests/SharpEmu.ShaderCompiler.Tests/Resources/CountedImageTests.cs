@@ -62,6 +62,50 @@ public sealed class CountedImageTests
         return Program([.. instructions]);
     }
 
+    private static Gen5ShaderProgram NestedLoopImageTableProgram(bool continueOnTrue = true, uint bound = 6) => Program(
+        MoveScalar(0, 8, 0),
+        Sop2(4, "SLshlB32", 10, Gen5Operand.Scalar(8), Operand(5)),
+        ScalarLoad(8, 0, 32, count: 8, dynamicOffsetRegister: 10),
+        MoveScalar(16, 9, 0),
+        Image(20, "ImageLoad", 32),
+        Sop2(28, "SAddI32", 9, Gen5Operand.Scalar(9), Operand(1)),
+        Sopc(32, "SCmpLtI32", Gen5Operand.Scalar(9), Operand(4)),
+        Branch(36, "SCbranchScc1", -5),
+        Sop2(40, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+        Sopc(44, "SCmpLtI32", Gen5Operand.Scalar(8), Operand(bound)),
+        Branch(48, continueOnTrue ? "SCbranchScc1" : "SCbranchScc0", -12),
+        EndProgram(52));
+
+    [Theory]
+    [InlineData(false, 6u)]
+    [InlineData(true, 0u)]
+    public void PostTestLoopNeedsPositiveBoundAndCorrectBranch(bool continueOnTrue, uint bound)
+    {
+        var error = Assert.Throws<ResourcePlanException>(() =>
+            Extract(NestedLoopImageTableProgram(continueOnTrue, bound)));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    [Fact]
+    public void NestedLoopCarriesBoundedImageDescriptorAcrossInnerLoop()
+    {
+        var plan = Extract(NestedLoopImageTableProgram());
+        var image = Assert.Single(plan.Info.Images);
+        var selector = Assert.IsType<IndirectImageSelector>(plan.DescriptorSources[(int)image.Source].IndirectImage);
+        Assert.Equal(32u, selector.EntryStride);
+        Assert.NotNull(selector.RuntimeKeyBound);
+
+        var memory = ResourceTrackerTests.LinearMemory();
+        var descriptor = ResourceTrackerTests.ImageDescriptor();
+        for (ulong index = 0; index < 6; index++)
+            ResourceTrackerTests.WriteImage(memory, 0x1000 + index * 32, descriptor);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(UserData(6), readMemory: memory.Read,
+            readCleanMemory: memory.Read), ref snapshot, ref specialization));
+        Assert.Equal(descriptor, Assert.Single(snapshot.Images));
+    }
+
     [Fact]
     public void SignedScalarBranchGuardsShiftedDescriptorTable()
     {
