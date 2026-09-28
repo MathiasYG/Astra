@@ -362,7 +362,7 @@ public static class AudioOut2Exports
         // A nonblocking push must not wait for a silent grain. The caller may
         // hold its own mutex while pushing; sleeping here stalls other guest
         // workers even though no audio was submitted to the host queue.
-        if (!TrySubmitContextAudio(ctx, context) && blocking != 0)
+        if (!TrySubmitContextAudio(ctx, context, out _) && blocking != 0)
         {
             context.PaceAdvance();
         }
@@ -379,7 +379,8 @@ public static class AudioOut2Exports
     {
         if (Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var state))
         {
-            if (!TrySubmitContextAudio(ctx, state))
+            var submitted = TrySubmitContextAudio(ctx, state, out var hasPcm);
+            if (!submitted && hasPcm)
             {
                 state.PaceAdvance();
             }
@@ -897,8 +898,9 @@ public static class AudioOut2Exports
         }
     }
 
-    private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context)
+    private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context, out bool hasPcm)
     {
+        hasPcm = false;
         var frames = checked((int)context.GrainSamples);
         if (frames <= 0)
         {
@@ -952,6 +954,8 @@ public static class AudioOut2Exports
                     TraceSubmitSkipped(context, frames, "no-ports");
                     return false;
                 }
+
+                hasPcm = true;
 
                 var outputSpan = output.AsSpan(0, frames * AudioPcmConversion.OutputFrameSize);
                 var peak = 0f;
