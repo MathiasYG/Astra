@@ -359,9 +359,10 @@ public static class AudioOut2Exports
             return SetReturn(ctx, 0);
         }
 
-        // Host Submit already blocks on the waveOut queue; only fall back to
-        // software pacing when nothing was queued (silence / non-primary ctx).
-        if (!TrySubmitContextAudio(ctx, context))
+        // A nonblocking push must not wait for a silent grain. The caller may
+        // hold its own mutex while pushing; sleeping here stalls other guest
+        // workers even though no audio was submitted to the host queue.
+        if (!TrySubmitContextAudio(ctx, context) && blocking != 0)
         {
             context.PaceAdvance();
         }
