@@ -52,6 +52,22 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
     private static readonly ShaderImageShape Sampled2D = new(false, false, false, false, TextureNumericClass.Float);
 
+    [Fact]
+    public void TiledStorageViewCanStartInsideSurfaceAllocation()
+    {
+        const ulong address = 0x152BDE4800;
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits16_16_16_16Float,
+            16, 16, tile: GuestTileMode.Standard4KB);
+        var shape = Sampled2D with { Storage = true };
+
+        var request = ImageRequestBuilders.Texture(words, shape).Request;
+
+        Assert.Equal(address, request.Description.Data.Address);
+        Assert.Equal(4096u, request.Description.Data.Size);
+        Assert.Equal(GuestTileMode.Standard4KB, request.Description.TileMode);
+        Assert.Equal(ImageRole.StorageImage, request.Role);
+    }
+
     [Theory]
     [InlineData(GuestPixelFormat.Bits16UNorm, Format.D16Unorm, Format.R16Unorm)]
     [InlineData(GuestPixelFormat.Bits32Float, Format.D32Sfloat, Format.R32Sfloat)]
