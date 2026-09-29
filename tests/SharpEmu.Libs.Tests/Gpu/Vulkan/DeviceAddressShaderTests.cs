@@ -196,6 +196,78 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     }
 
     [Fact]
+    public void Float64Multiply_RoundsDeepSubnormalAndPreservesNegativeSubnormalSign()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        var run = new Run(vulkan, Float64MultiplyProgram());
+        run.MapPage(GuestBase, new byte[64]);
+
+        // RDNA2 V_MUL_F64 supports gradual underflow and rounds to nearest-even.
+        CheckMultiply(0x8010_0000_0000_0000, 0x3FE0_0000_0000_0000, 0x8008_0000_0000_0000);
+        CheckMultiply(0x8000_0000_0000_0001, 0x0000_0000_0000_0001, 0x8000_0000_0000_0000);
+
+        // The product has a set guard bit, an even retained quotient, and sticky
+        // bits in the low product word while bit zero is clear. It must round up.
+        CheckMultiply(0x0010_0000_0000_0000, 0x3F20_0000_0000_1002, 0x0000_0080_0000_0001);
+
+        run.Finish(output, nameof(Float64Multiply_RoundsDeepSubnormalAndPreservesNegativeSubnormalSign));
+
+        void CheckMultiply(ulong left, ulong right, ulong expected)
+        {
+            var scalarInputs = new uint[16];
+            scalarInputs[8] = (uint)left;
+            scalarInputs[9] = (uint)(left >> 32);
+            scalarInputs[10] = (uint)right;
+            scalarInputs[11] = (uint)(right >> 32);
+            run.Dispatch(GuestBase, writtenRange: (GuestBase, 64), scalarInputs: scalarInputs);
+
+            var actual = ((ulong)run.PageWord(GuestBase, 4) << 32) | run.PageWord(GuestBase, 0);
+            Assert.Equal(expected, actual);
+        }
+    }
+
+    [Fact]
+    public void Float64Fma_PreservesNegativeSubnormalSign()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        var run = new Run(vulkan, Float64FmaProgram());
+        run.MapPage(GuestBase, new byte[64]);
+
+        CheckFma(0x3FF0_0000_0000_0000, 0x3FF0_0000_0000_0000, 0x3FF0_0000_0000_0000, 0x4000_0000_0000_0000);
+        CheckFma(0x0010_0000_0000_0000, 0x3FE0_0000_0000_0000, 0, 0x0008_0000_0000_0000);
+
+        // (-min-normal * 0.5) + 0 is an exactly representable negative subnormal.
+        CheckFma(0x8010_0000_0000_0000, 0x3FE0_0000_0000_0000, 0, 0x8008_0000_0000_0000);
+        CheckFma(0x8000_0000_0000_0001, 0x3FE0_0000_0000_0000, 0x8000_0000_0000_0000, 0x8000_0000_0000_0000);
+        run.Finish(output, nameof(Float64Fma_PreservesNegativeSubnormalSign));
+
+        void CheckFma(ulong left, ulong right, ulong addend, ulong expected)
+        {
+            var scalarInputs = new uint[16];
+            scalarInputs[8] = (uint)left;
+            scalarInputs[9] = (uint)(left >> 32);
+            scalarInputs[10] = (uint)right;
+            scalarInputs[11] = (uint)(right >> 32);
+            scalarInputs[12] = (uint)addend;
+            scalarInputs[13] = (uint)(addend >> 32);
+            run.Dispatch(GuestBase, writtenRange: (GuestBase, 64), scalarInputs: scalarInputs);
+
+            var actual = ((ulong)run.PageWord(GuestBase, 4) << 32) | run.PageWord(GuestBase, 0);
+            Assert.Equal(expected, actual);
+        }
+    }
+
+    [Fact]
     public void AtomicThroughThePageTable_ReturnsTheOldValue()
     {
         var vulkan = fixture.Vulkan;
@@ -320,6 +392,34 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
             EndProgram(32));
     }
 
+    private static Gen5ShaderProgram Float64MultiplyProgram() => Program(
+        MoveVector(0, OffsetRegister, 0),
+        Vop1(8, "VMovB32", 0, Gen5Operand.Scalar(8)),
+        Vop1(16, "VMovB32", 1, Gen5Operand.Scalar(9)),
+        Vop1(24, "VMovB32", 4, Gen5Operand.Scalar(10)),
+        Vop1(32, "VMovB32", 5, Gen5Operand.Scalar(11)),
+        Vop3(40, "VMulF64", 12, Gen5Operand.Vector(0), Gen5Operand.Vector(4), Gen5Operand.Scalar(0)) with
+        {
+            Destinations = [Gen5Operand.Vector(12), Gen5Operand.Vector(13)],
+        },
+        GlobalMemory(48, "GlobalStoreDwordx2", AddressLow, OffsetRegister, 12, 12, dwords: 2),
+        EndProgram(56));
+
+    private static Gen5ShaderProgram Float64FmaProgram() => Program(
+        MoveVector(0, OffsetRegister, 0),
+        Vop1(8, "VMovB32", 0, Gen5Operand.Scalar(8)),
+        Vop1(16, "VMovB32", 1, Gen5Operand.Scalar(9)),
+        Vop1(24, "VMovB32", 4, Gen5Operand.Scalar(10)),
+        Vop1(32, "VMovB32", 5, Gen5Operand.Scalar(11)),
+        Vop1(40, "VMovB32", 6, Gen5Operand.Scalar(12)),
+        Vop1(48, "VMovB32", 7, Gen5Operand.Scalar(13)),
+        Vop3(56, "VFmaF64", 14, Gen5Operand.Vector(0), Gen5Operand.Vector(4), Gen5Operand.Vector(6)) with
+        {
+            Destinations = [Gen5Operand.Vector(14), Gen5Operand.Vector(15)],
+        },
+        GlobalMemory(64, "GlobalStoreDwordx2", AddressLow, OffsetRegister, 14, 14, dwords: 2),
+        EndProgram(72));
+
     // v3 = 0; v2 = value; v1 = preset; v1 = atomic_add(s[0:1] + offset, v2) glc; result[0] = v1.
     private static Gen5ShaderProgram AtomicProgram(int offset, uint value, uint preset = 0) => Program(
         MoveVector(0, OffsetRegister, 0),
@@ -370,10 +470,18 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
             return bytes;
         }
 
-        public void Dispatch(ulong guestAddress, (ulong Base, ulong Size)? writtenRange = null)
+        public void Dispatch(
+            ulong guestAddress,
+            (ulong Base, ulong Size)? writtenRange = null,
+            uint[]? scalarInputs = null)
         {
             _pageTable = _runner.CreatePageTable(_tableEntries, _pages.Select(page => (page.Key, page.Value, 0ul)));
             var registers = new uint[256];
+            if (scalarInputs is not null)
+            {
+                Array.Copy(scalarInputs, registers, Math.Min(scalarInputs.Length, registers.Length));
+            }
+
             registers[AddressLow] = (uint)guestAddress;
             registers[AddressHigh] = (uint)(guestAddress >> 32);
             registers[ResultRegister + 2] = ResultBytes;
