@@ -159,6 +159,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xF0;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         var state = DrawAndTakeState(banks);
 
         Assert.Equal((1u, (byte)0b1), (state.ColorWriteCount, state.ColorWriteEnableMask));
@@ -357,9 +358,25 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         _host.ImageSamples[SecondColorBase] = 4;
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
         Assert.Contains("imageSamples=4 targetSamples=1", fatal.Message);
+    }
+
+    [Fact]
+    public void Attachments_MrtDisabledByShaderMaskDoesNotJoinTheRenderingScope()
+    {
+        var banks = Banks();
+        banks.Context.ColorTargets[7] = RegisterWords.Color(SecondColorBase, 64, 64, samplesLog2: 1, fragmentsLog2: 1);
+        banks.Context.RenderTargetMask = 0xF000000F;
+        banks.Context.ShaderInterface.ColorShaderMask = 0x0000000F;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(1u, rendering.ColorAttachmentCount);
+        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color 0 ", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("acquire_color 7 ", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -527,6 +544,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         var alternate = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.ColorTargets[2] = alternate with { Info = alternate.Info | (2u << 11) };
         banks.Context.RenderTargetMask = 0xF0F;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xF0F;
         _executor.DrawIndexed(1, banks, Indexed(3));
 
         var mapping = Assert.Single(_pipelines.ExportMappings);
@@ -605,6 +623,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         _host.ImageSamples[SecondColorBase] = 4;
         Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
 

@@ -12,12 +12,14 @@ public sealed partial class RenderExecutor
 {
     // Every draw resolves its targets against layer zero of the view range.
     private const uint DrawLayerOffset = 0;
+    private const byte ColorModeNormal = 1;
 
     // Finds the color and depth targets; false when the draw has nothing to render into.
     private bool TryResolveDrawTargets(RegisterBanks banks, in DrawCall draw, ref DrawState state)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawTargetResolution);
         var context = banks.Context;
+        state.PixelActive = HasActivePixelShader(banks);
         if (TryResolveMultisampleColor(context))
         {
             TraceDrawDisposition(banks, in draw, "multisample-color-resolve");
@@ -26,6 +28,13 @@ public sealed partial class RenderExecutor
 
         for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
         {
+            // In normal color mode, a zero CB_SHADER_MASK field disables the MRT.
+            // Leaving that image out of the Vulkan scope avoids imposing its sample count on this draw.
+            if (state.PixelActive && context.ColorControl.Mode == ColorModeNormal && context.ShaderInterface.ColorShaderMaskForSlot(slot) == 0)
+            {
+                continue;
+            }
+
             if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
             {
                 continue;
@@ -50,7 +59,6 @@ public sealed partial class RenderExecutor
             state.Depth = new DepthAttachmentState(in depthTarget, image);
         }
 
-        state.PixelActive = HasActivePixelShader(banks);
         if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive)
         {
             TraceDrawDisposition(banks, in draw, "no-framebuffer");
@@ -205,7 +213,7 @@ public sealed partial class RenderExecutor
         ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
 
     // Acquires every attachment through the host and assembles the rendering scope.
-    private RenderingState AcquireAttachments(ref DrawState state)
+    private RenderingState AcquireAttachments(ref DrawState state, in ContextRegisters context)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawAttachmentPreparation);
         var rendering = new RenderingState

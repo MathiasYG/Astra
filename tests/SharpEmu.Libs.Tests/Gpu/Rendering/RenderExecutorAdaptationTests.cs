@@ -61,6 +61,7 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         _executor.DrawAuto(1, banks, Auto(3));
 
         Assert.Contains("clear_targets 0,1 0.25,0.5,0.75,1", _host.Calls);
@@ -90,6 +91,7 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
         banks.Context.ColorTargets[0] = first with { Info = first.Info | FastClearBit };
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         _executor.DrawAuto(1, banks, Auto(3));
         _host.EndRendering();
         _executor.DrawAuto(2, banks, Auto(3));

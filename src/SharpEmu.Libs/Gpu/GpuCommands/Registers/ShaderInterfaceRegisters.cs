@@ -42,6 +42,8 @@ public sealed class ShaderInterfaceRegisters
 
     public uint ExportCount => 1u + ((VertexOutputConfiguration >> 1) & 0x1Fu);
 
+    public uint ColorShaderMaskForSlot(uint slot) => (ColorShaderMask >> (int)(slot * 4)) & 0xFu;
+
     public uint ExportVerticesPerSubgroup => GeometryOnChipControl & 0x7FFu;
 
     public uint GeometryPrimitivesPerSubgroup => (GeometryOnChipControl >> 11) & 0x7FFu;
