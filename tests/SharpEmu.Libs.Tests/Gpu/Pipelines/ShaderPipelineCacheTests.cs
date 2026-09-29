@@ -75,6 +75,19 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         StaticParameters = parameters,
     };
 
+    private static GraphicsPipelineDescription With(GraphicsPipelineDescription description, PipelineRenderingState rendering) => new()
+    {
+        Rendering = rendering,
+        VertexInput = description.VertexInput,
+        VertexInfo = description.VertexInfo,
+        VertexProgram = description.VertexProgram,
+        VertexStage = description.VertexStage,
+        PixelInfo = description.PixelInfo,
+        PixelProgram = description.PixelProgram,
+        PixelStage = description.PixelStage,
+        StaticParameters = description.StaticParameters,
+    };
+
     [Fact]
     public void StaticParameters_FoldTheBlendCullAndTopologyRegisters()
     {
@@ -209,6 +222,18 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             PixelProgram = description.PixelProgram, PixelStage = description.PixelStage, StaticParameters = description.StaticParameters,
         };
         Assert.NotEqual(key, ShaderPipelineCache.KeyOf(renderingChanged));
+
+        var sampleCountChanged = new PipelineRenderingState
+        {
+            ColorCount = description.Rendering.ColorCount,
+            DepthFormat = description.Rendering.DepthFormat,
+            StencilFormat = description.Rendering.StencilFormat,
+            DepthSamples = description.Rendering.DepthSamples,
+        };
+        Array.Copy(description.Rendering.ColorFormats, sampleCountChanged.ColorFormats, sampleCountChanged.ColorFormats.Length);
+        Array.Copy(description.Rendering.ColorSamples, sampleCountChanged.ColorSamples, sampleCountChanged.ColorSamples.Length);
+        sampleCountChanged.ColorSamples[0] = 2;
+        Assert.NotEqual(key, ShaderPipelineCache.KeyOf(With(description, sampleCountChanged)));
         Assert.Equal(key, ShaderPipelineCache.KeyOf(With(description, description.StaticParameters)));
     }
 

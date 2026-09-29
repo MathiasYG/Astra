@@ -388,12 +388,18 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
-    public void Attachments_SingleSampleColorWithMultisampledDepthIsFatal()
+    public void Attachments_SingleSampleColorWithMultisampledDepthUsesGuestRasterizationSamples()
     {
         var banks = Banks(withDepth: true);
         banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, samplesLog2: 2);
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
-        Assert.Contains("color=1 depth=4", fatal.Message);
+        banks.Context.AntialiasingConfig.SampleCountLog2 = 2;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(4u, rendering.Samples);
+        Assert.Equal(1u, rendering.ColorAttachments[0].Samples);
+        Assert.Equal(4u, rendering.DepthStencilAttachment.Samples);
+        Assert.Equal(4u, Assert.Single(_pipelines.PipelineRenderings).Samples);
     }
 
     [Fact]

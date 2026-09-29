@@ -241,6 +241,11 @@ public sealed partial class RenderExecutor
                 throw _host.Fatal($"The color attachment does not match its target: slot={target.Slot} imageSamples={acquired.Samples} targetSamples={samples} view=0x{acquired.View.Handle:X}.");
             }
 
+            if (!IsSupportedSampleCount(samples))
+            {
+                throw _host.Fatal($"The color target requests an unsupported sample count: slot={target.Slot} samples={samples}.");
+            }
+
             if (attachmentSamples == 0)
             {
                 attachmentSamples = samples;
@@ -267,7 +272,8 @@ public sealed partial class RenderExecutor
                 HasDepth: false,
                 DepthClear: false,
                 HasStencil: false,
-                StencilClear: false);
+                StencilClear: false,
+                Samples: samples);
         }
 
         if (state.Depth.HasTarget)
@@ -282,13 +288,14 @@ public sealed partial class RenderExecutor
                 throw _host.Fatal($"The depth attachment does not match its target: imageSamples={acquired.Samples} targetSamples={target.Samples} view=0x{acquired.View.Handle:X}.");
             }
 
+            if (!IsSupportedSampleCount(target.Samples))
+            {
+                throw _host.Fatal($"The depth target requests an unsupported sample count: samples={target.Samples}.");
+            }
+
             if (attachmentSamples == 0)
             {
                 attachmentSamples = target.Samples;
-            }
-            else if (attachmentSamples != target.Samples)
-            {
-                throw _host.Fatal($"Mixed color and depth sample counts are not supported: color={attachmentSamples} depth={target.Samples}.");
             }
 
             var loadState = depth.LoadState;
@@ -311,7 +318,8 @@ public sealed partial class RenderExecutor
                 HasDepth: (aspects & ImageAspectFlags.DepthBit) != 0,
                 DepthClear: depth.LoadClear,
                 HasStencil: (aspects & ImageAspectFlags.StencilBit) != 0,
-                StencilClear: depth.Target.State.StencilClearEnabled);
+                StencilClear: depth.Target.State.StencilClearEnabled,
+                Samples: target.Samples);
         }
 
         if (state.ColorCount == 0 && !state.Depth.HasTarget)
@@ -324,6 +332,14 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The render state has no valid attachments: samples={attachmentSamples} colors={state.ColorCount} depth={state.Depth.HasTarget}.");
         }
 
+        var rasterizationSamples = 1u << context.AntialiasingConfig.SampleCountLog2;
+        if (!IsSupportedSampleCount(rasterizationSamples))
+        {
+            throw _host.Fatal(
+                $"The draw requests an unsupported rasterization sample count: samples={rasterizationSamples} " +
+                $"sampleCountLog2={context.AntialiasingConfig.SampleCountLog2}.");
+        }
+
         if (rendering.Layers == uint.MaxValue)
         {
             rendering.Layers = 1;
@@ -334,7 +350,7 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The rendering area is invalid: width={rendering.Width} height={rendering.Height} layers={rendering.Layers}.");
         }
 
-        rendering.Samples = attachmentSamples == 0 ? 1 : attachmentSamples;
+        rendering.Samples = rasterizationSamples;
         return rendering;
     }
 }

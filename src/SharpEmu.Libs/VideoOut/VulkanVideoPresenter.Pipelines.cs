@@ -606,6 +606,89 @@ internal static unsafe partial class VulkanVideoPresenter
                 BuildVertexAttributes(description, vertexAttributes, vertexBindings);
                 var colorCount = (int)parameters.ColorCount;
                 var blends = new PipelineColorBlendAttachmentState[colorCount];
+                var attachmentColorSamples = new SampleCountFlags[colorCount];
+                var rasterizationSamples = ImageDescription.VulkanSampleCount(parameters.Samples);
+                if (rasterizationSamples == 0)
+                {
+                    throw SubmissionScheduler.Fatal(
+                        $"The graphics pipeline requests an unsupported rasterization sample count: samples={parameters.Samples}.");
+                }
+
+                var firstColorSamples = (SampleCountFlags)0;
+                var usesMixedAttachmentSamples = false;
+                for (var index = 0; index < colorCount; index++)
+                {
+                    var colorSamples = rendering.ColorSamples[index];
+                    var colorSamplesFlag = ImageDescription.VulkanSampleCount(colorSamples);
+                    if (colorSamplesFlag == 0)
+                    {
+                        throw SubmissionScheduler.Fatal(
+                            $"The graphics pipeline has an unsupported color attachment sample count: attachment={index} samples={colorSamples}.");
+                    }
+
+                    attachmentColorSamples[index] = colorSamplesFlag;
+                    if (index == 0)
+                    {
+                        firstColorSamples = colorSamplesFlag;
+                    }
+                    else if (firstColorSamples != colorSamplesFlag)
+                    {
+                        throw SubmissionScheduler.Fatal(
+                            $"Vulkan cannot represent different sample counts between color attachments: " +
+                            $"first={firstColorSamples} next={colorSamplesFlag} attachment={index}.");
+                    }
+
+                    usesMixedAttachmentSamples |= colorSamples != parameters.Samples;
+                }
+
+                var depthStencilSamplesFlag = (SampleCountFlags)0;
+                var hasDepthStencilAttachment = rendering.DepthFormat != Format.Undefined || rendering.StencilFormat != Format.Undefined;
+                if (hasDepthStencilAttachment)
+                {
+                    var depthStencilSamples = rendering.DepthSamples;
+                    depthStencilSamplesFlag = ImageDescription.VulkanSampleCount(depthStencilSamples);
+                    if (depthStencilSamplesFlag == 0)
+                    {
+                        throw SubmissionScheduler.Fatal(
+                            $"The graphics pipeline has an unsupported depth/stencil sample count: samples={depthStencilSamples}.");
+                    }
+
+                    usesMixedAttachmentSamples |= depthStencilSamples != parameters.Samples;
+                }
+
+                if (usesMixedAttachmentSamples)
+                {
+                    if (!_supportsNvFramebufferMixedSamples || !_supportsNvCoverageReductionMode)
+                    {
+                        throw SubmissionScheduler.Fatal(
+                            $"The guest render state requires mixed attachment sampling that this Vulkan device cannot " +
+                            $"represent with guest coverage semantics: rasterization={parameters.Samples} " +
+                            $"color={firstColorSamples} depthStencil={depthStencilSamplesFlag} " +
+                            $"framebufferMixedSamples={_supportsNvFramebufferMixedSamples} " +
+                            $"truncateCoverage={_supportsNvCoverageReductionMode}.");
+                    }
+
+                    var supportedTuple = (
+                        CoverageReductionModeNV.TruncateNV,
+                        rasterizationSamples,
+                        depthStencilSamplesFlag,
+                        firstColorSamples);
+                    if (!_supportedNvMixedSamples.Contains(supportedTuple))
+                    {
+                        var otherCoverageModes = string.Join(",", _supportedNvMixedSamples
+                            .Where(entry => entry.RasterizationSamples == rasterizationSamples &&
+                                            entry.DepthStencilSamples == depthStencilSamplesFlag &&
+                                            entry.ColorSamples == firstColorSamples)
+                            .Select(entry => entry.Mode)
+                            .Distinct());
+                        throw SubmissionScheduler.Fatal(
+                            $"The Vulkan device does not report the required truncate mixed-sample combination: " +
+                            $"rasterization={rasterizationSamples} color={firstColorSamples} " +
+                            $"depthStencil={depthStencilSamplesFlag} stencilTest={parameters.StencilTestEnable} " +
+                            $"depthBoundsTest={parameters.DepthBoundsTestEnable} otherReportedCoverageModes={otherCoverageModes}.");
+                    }
+                }
+
                 for (var index = 0; index < colorCount; index++)
                 {
                     var mask = parameters.GetColorMask(index);
@@ -645,6 +728,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 fixed (VertexInputAttributeDescription* attributePointer = vertexAttributes)
                 fixed (PipelineColorBlendAttachmentState* blendPointer = blends)
                 fixed (Format* colorFormatPointer = colorFormats)
+                fixed (SampleCountFlags* attachmentColorSamplePointer = attachmentColorSamples)
                 {
                     var vertexInput = new PipelineVertexInputStateCreateInfo
                     {
@@ -690,9 +774,18 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         SType = StructureType.PipelineMultisampleStateCreateInfo,
                         SampleShadingEnable = parameters.SampleShadingEnable,
-                        RasterizationSamples = ImageDescription.VulkanSampleCount(parameters.Samples),
+                        RasterizationSamples = rasterizationSamples,
                         MinSampleShading = 1f,
                     };
+                    var coverageReduction = new PipelineCoverageReductionStateCreateInfoNV
+                    {
+                        SType = StructureType.PipelineCoverageReductionStateCreateInfoNV,
+                        CoverageReductionMode = CoverageReductionModeNV.TruncateNV,
+                    };
+                    if (usesMixedAttachmentSamples)
+                    {
+                        multisample.PNext = &coverageReduction;
+                    }
                     var colorBlend = new PipelineColorBlendStateCreateInfo
                     {
                         SType = StructureType.PipelineColorBlendStateCreateInfo,
@@ -744,10 +837,24 @@ internal static unsafe partial class VulkanVideoPresenter
                         DepthAttachmentFormat = rendering.DepthFormat,
                         StencilAttachmentFormat = rendering.StencilFormat,
                     };
+                    var attachmentSampleCountInfo = new AttachmentSampleCountInfoNV
+                    {
+                        SType = StructureType.AttachmentSampleCountInfoNV,
+                        ColorAttachmentCount = (uint)colorCount,
+                        PColorAttachmentSamples = colorCount == 0 ? null : attachmentColorSamplePointer,
+                        DepthStencilAttachmentSamples = depthStencilSamplesFlag,
+                    };
+                    void* pipelinePNext = &renderingInfo;
+                    if (usesMixedAttachmentSamples)
+                    {
+                        attachmentSampleCountInfo.PNext = &renderingInfo;
+                        pipelinePNext = &attachmentSampleCountInfo;
+                    }
+
                     var pipelineInfo = new GraphicsPipelineCreateInfo
                     {
                         SType = StructureType.GraphicsPipelineCreateInfo,
-                        PNext = &renderingInfo,
+                        PNext = pipelinePNext,
                         StageCount = stageCount,
                         PStages = shaderStages,
                         PVertexInputState = &vertexInput,
