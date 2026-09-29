@@ -19,6 +19,41 @@ public static partial class Gen5SpirvTranslator
         private const uint InterpolateAtCentroid = 76;
         private const uint InterpolateAtSample = 77;
         private const uint InterpolateAtOffset = 78;
+        private const uint PixelInputPerspectiveSample = 0x0001;
+        private const uint PixelInputLinearSample = 0x0010;
+        private const uint PixelInputInterpolationModes = 0x007F;
+
+        private uint ActiveSampleInterpolationMode
+        {
+            get
+            {
+                // With one active mode, every ordinary VINTRP input uses the same sample position.
+                // Mixed modes need source-register-aware lowering and must not be guessed here.
+                var activeModes = _pixelInputEnable & _pixelInputAddress & PixelInputInterpolationModes;
+                return activeModes is PixelInputPerspectiveSample or PixelInputLinearSample ? activeModes : 0;
+            }
+        }
+
+        private void DecorateSampleInterpolant(uint variable)
+        {
+            var mode = ActiveSampleInterpolationMode;
+            if (mode == 0)
+            {
+                return;
+            }
+
+            _module.AddCapability(SpirvCapability.SampleRateShading);
+            switch (mode)
+            {
+                case PixelInputPerspectiveSample:
+                    _module.AddDecoration(variable, SpirvDecoration.Sample);
+                    break;
+                case PixelInputLinearSample:
+                    _module.AddDecoration(variable, SpirvDecoration.NoPerspective);
+                    _module.AddDecoration(variable, SpirvDecoration.Sample);
+                    break;
+            }
+        }
 
         private void DeclareInterpolationParameters()
         {

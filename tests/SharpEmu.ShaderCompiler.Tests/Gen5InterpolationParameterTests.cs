@@ -69,6 +69,28 @@ public sealed class Gen5InterpolationParameterTests
             Request(0, false, opcode: "VInterpP2F32"), out var shader, out var error), error);
         Assert.DoesNotContain(Instructions(shader.Spirv), instruction => instruction.Opcode == SpirvOp.Capability &&
             instruction.Operands[0] == (uint)SpirvCapability.FragmentBarycentricKhr);
+        Assert.DoesNotContain(Instructions(shader.Spirv), instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.Sample);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(1u, false)]
+    [InlineData(0x10u, true)]
+    public void SingleSampleInterpolationMode_UsesSampleQualifiedVaryings(uint inputs, bool noPerspective)
+    {
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(
+            Request(0, false, inputs, opcode: "VInterpP2F32", inputCntl: 0), out var shader, out var error), error);
+        var decorations = Instructions(shader.Spirv)
+            .Where(instruction => instruction.Opcode == SpirvOp.Decorate)
+            .ToArray();
+        var sampleDecorations = decorations.Where(instruction =>
+            instruction.Operands[1] == (uint)SpirvDecoration.Sample).ToArray();
+        Assert.True(sampleDecorations.Length == 1,
+            string.Join(";", decorations.Select(instruction => string.Join(",", instruction.Operands))));
+        var input = sampleDecorations[0].Operands[0];
+        Assert.Equal(noPerspective, decorations.Any(instruction => instruction.Operands[0] == input &&
+            instruction.Operands[1] == (uint)SpirvDecoration.NoPerspective));
         ValidateWhenAvailable(shader.Spirv);
     }
 
