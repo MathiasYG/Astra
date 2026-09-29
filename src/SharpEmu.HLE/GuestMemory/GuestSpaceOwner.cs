@@ -47,7 +47,7 @@ public sealed class GuestSpaceOwner : IDisposable
         {
             var megabytes = backingSize / (1024 * 1024);
             OnFatal(OperatingSystem.IsWindows()
-                ? $"Could not allocate {megabytes} MB for guest direct memory. Windows requires this amount of available system commit. Close other applications or increase the paging file size."
+                ? $"Could not create the {megabytes} MB guest direct-memory backing. Windows could not reserve the paging-file-backed range."
                 : $"Could not allocate {megabytes} MB for guest direct memory.");
         }
     }

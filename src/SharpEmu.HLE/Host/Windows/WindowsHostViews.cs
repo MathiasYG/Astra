@@ -25,7 +25,7 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     private const uint PAGE_EXECUTE_READ = 0x20;
     private const uint PAGE_EXECUTE_READWRITE = 0x40;
     private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
-    private const uint SEC_COMMIT = 0x8000000;
+    private const uint SEC_RESERVE = 0x4000000;
     private const uint FILE_MAP_READ_WRITE = 0x6;
     private static readonly nint InvalidHandle = -1;
 
@@ -49,7 +49,7 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             return false;
         }
 
-        var handle = CreateFileMappingW(InvalidHandle, null, PAGE_EXECUTE_READWRITE | SEC_COMMIT, (uint)(size >> 32), (uint)size, null);
+        var handle = CreateFileMappingW(InvalidHandle, null, PAGE_EXECUTE_READWRITE | SEC_RESERVE, (uint)(size >> 32), (uint)size, null);
         if (handle == 0)
         {
             return false;
@@ -62,9 +62,36 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             return false;
         }
 
-        backing = new HostBackingObject((ulong)alias, size, ReleaseBackingObject) { Handle = handle };
+        var pageCount = size / PageSize + (size % PageSize == 0 ? 0UL : 1UL);
+        var bitmapBytes = (pageCount + 7) / 8;
+        byte[]? committedPageBitmap = null;
+        if (bitmapBytes <= int.MaxValue)
+        {
+            try
+            {
+                committedPageBitmap = new byte[(int)bitmapBytes];
+            }
+            catch (OutOfMemoryException)
+            {
+                // Keep the backing usable; it will fall back to committing each requested range.
+            }
+        }
+
+        backing = new HostBackingObject((ulong)alias, size, ReleaseBackingObject)
+        {
+            Handle = handle,
+            CommittedPageBitmap = committedPageBitmap,
+        };
         failure = HostViewFailure.None;
         return true;
+    }
+
+    public HostViewFailure CommitBacking(HostBackingObject backing, ulong offset, ulong size)
+    {
+        lock (backing.Gate)
+        {
+            return CommitBackingLocked(backing, offset, size);
+        }
     }
 
     public ulong ReserveHole(ulong address, ulong size)
@@ -158,6 +185,13 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             if (!HostViewMemory.IsValidOffset(backing, offset, size, PageSize))
             {
                 failure = HostViewFailure.OffsetOutOfBounds;
+                return false;
+            }
+
+            var commitFailure = CommitBackingLocked(backing, offset, size);
+            if (commitFailure != HostViewFailure.None)
+            {
+                failure = commitFailure;
                 return false;
             }
 
@@ -262,6 +296,86 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
 
     private static ulong AlignDown(ulong value, ulong alignment) => value - value % alignment;
 
+    private HostViewFailure CommitBackingLocked(HostBackingObject backing, ulong offset, ulong size)
+    {
+        if (backing.IsDisposed)
+        {
+            return HostViewFailure.BackingUnavailable;
+        }
+
+        if (size == 0)
+        {
+            return offset <= backing.Size ? HostViewFailure.None : HostViewFailure.OffsetOutOfBounds;
+        }
+
+        if (offset >= backing.Size || size > backing.Size - offset)
+        {
+            return HostViewFailure.OffsetOutOfBounds;
+        }
+
+        var end = offset + size;
+        var pageStart = AlignDown(offset, PageSize);
+        if (end > ulong.MaxValue - (PageSize - 1))
+        {
+            return HostViewFailure.OffsetOutOfBounds;
+        }
+
+        var pageEnd = AlignUp(end, PageSize);
+        var backingPageEnd = backing.Size > ulong.MaxValue - (PageSize - 1)
+            ? ulong.MaxValue - ulong.MaxValue % PageSize
+            : AlignUp(backing.Size, PageSize);
+        if (pageEnd > backingPageEnd || backing.AliasBase > ulong.MaxValue - pageStart)
+        {
+            return HostViewFailure.OffsetOutOfBounds;
+        }
+
+        var bitmap = backing.CommittedPageBitmap;
+        var firstPage = pageStart / PageSize;
+        var endPage = pageEnd / PageSize;
+        var currentPage = firstPage;
+        while (currentPage < endPage)
+        {
+            if (bitmap is not null && IsPageCommitted(bitmap, currentPage))
+            {
+                currentPage++;
+                continue;
+            }
+
+            var runStart = currentPage;
+            currentPage++;
+            while (currentPage < endPage &&
+                   (bitmap is null || !IsPageCommitted(bitmap, currentPage)))
+            {
+                currentPage++;
+            }
+
+            var runOffset = runStart * PageSize;
+            var address = backing.AliasBase + runOffset;
+            var commitSize = (currentPage - runStart) * PageSize;
+            var committed = VirtualAlloc((void*)address, (nuint)commitSize, MEM_COMMIT, PAGE_READWRITE);
+            if ((ulong)committed != address)
+            {
+                return HostViewFailure.BackingCommitFailed;
+            }
+
+            if (bitmap is not null)
+            {
+                for (var page = runStart; page < currentPage; page++)
+                {
+                    SetPageCommitted(bitmap, page);
+                }
+            }
+        }
+
+        return HostViewFailure.None;
+    }
+
+    private static bool IsPageCommitted(byte[] bitmap, ulong pageIndex) =>
+        (bitmap[(int)(pageIndex / 8)] & (1 << (int)(pageIndex % 8))) != 0;
+
+    private static void SetPageCommitted(byte[] bitmap, ulong pageIndex) =>
+        bitmap[(int)(pageIndex / 8)] |= (byte)(1 << (int)(pageIndex % 8));
+
     private static void ReleaseBackingObject(HostBackingObject backing)
     {
         UnmapViewOfFile((void*)backing.AliasBase);
@@ -328,6 +442,9 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial void* MapViewOfFile(nint fileMapping, uint desiredAccess, uint offsetHigh, uint offsetLow, nuint bytesToMap);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial void* VirtualAlloc(void* address, nuint size, uint allocationType, uint protect);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

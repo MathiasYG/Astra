@@ -51,6 +51,11 @@ public sealed unsafe class SharedBackingViews : IDisposable
                 return false;
             }
 
+            if (_host.CommitBacking(_backing!, offset, size) != HostViewFailure.None)
+            {
+                return false;
+            }
+
             NativeMemory.Clear((void*)(AliasBase + offset), (nuint)size);
             return true;
         }

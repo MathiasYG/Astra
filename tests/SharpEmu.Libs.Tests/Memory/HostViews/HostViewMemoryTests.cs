@@ -88,6 +88,77 @@ public sealed unsafe class HostViewMemoryTests
     }
 
     [Fact]
+    public void BackingPages_AreCommittedOnDemand()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        using var backing = CreateBacking(views);
+        var page = views.PageSize;
+        var touchedOffset = 4 * page;
+
+        Assert.Equal(MEM_RESERVE, QueryState(backing.AliasBase));
+        Assert.Equal(MEM_RESERVE, QueryState(backing.AliasBase + touchedOffset));
+        Assert.Equal(HostViewFailure.None, views.CommitBacking(backing, touchedOffset + 1, 1));
+        Assert.Equal(MEM_RESERVE, QueryState(backing.AliasBase));
+        Assert.Equal(MEM_COMMIT, QueryState(backing.AliasBase + touchedOffset));
+        Assert.Equal(MEM_RESERVE, QueryState(backing.AliasBase + touchedOffset + page));
+
+        *(ulong*)(backing.AliasBase + touchedOffset) = Marker;
+        Assert.Equal(Marker, *(ulong*)(backing.AliasBase + touchedOffset));
+    }
+
+    [Fact]
+    public void FullGuestBacking_CanBeReservedAndCommitOnlyTheTouchedPage()
+    {
+        if (!OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        Assert.True(views.TryCreateBacking(SharpEmu.HLE.GuestMemoryLayout.BackingBytes, out var backing, out var failure));
+        Assert.Equal(HostViewFailure.None, failure);
+        var backingObject = backing!;
+        using (backingObject)
+        {
+            var page = views.PageSize;
+            var lastPage = backingObject.Size - page;
+            Assert.Equal(HostViewFailure.None, views.CommitBacking(backingObject, lastPage, page));
+            Assert.Equal(MEM_RESERVE, QueryState(backingObject.AliasBase));
+            Assert.Equal(MEM_COMMIT, QueryState(backingObject.AliasBase + lastPage));
+            *(ulong*)(backingObject.AliasBase + lastPage) = Marker;
+            Assert.Equal(Marker, *(ulong*)(backingObject.AliasBase + lastPage));
+        }
+    }
+
+    [Fact]
+    public void ExecutableGuestView_CanMapFromLazyBacking()
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        using var backing = CreateBacking(views);
+        var hole = HoleSize(views);
+        var address = ReserveFreeHole(views, hole);
+        Assert.True(views.SplitHole(address, Segment));
+        Assert.True(views.TryMapView(backing, address, 0, Segment, HostPageProtection.ReadWriteExecute, out var failure));
+        Assert.Equal(HostViewFailure.None, failure);
+        *(ulong*)address = Marker;
+        Assert.Equal(Marker, *(ulong*)address);
+
+        Assert.True(views.UnmapView(address, Segment));
+        Assert.True(views.JoinHoles(address, hole));
+        Assert.True(views.FreeHole(address, hole));
+    }
+
+    [Fact]
     public void AliasWrites_AreVisibleThroughANoAccessThenReadOnlyView()
     {
         if (!Supported)

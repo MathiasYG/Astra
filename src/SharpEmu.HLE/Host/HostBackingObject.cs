@@ -10,6 +10,7 @@ public sealed class HostBackingObject : IDisposable
     internal readonly object Gate = new();
     internal nint Handle;
     internal int Descriptor = -1;
+    internal byte[]? CommittedPageBitmap { get; init; }
 
     internal HostBackingObject(ulong aliasBase, ulong size, Action<HostBackingObject> release)
     {

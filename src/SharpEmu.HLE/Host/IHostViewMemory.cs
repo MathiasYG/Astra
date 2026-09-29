@@ -14,6 +14,9 @@ public interface IHostViewMemory
 
     bool TryCreateBacking(ulong size, out HostBackingObject? backing, out HostViewFailure failure);
 
+    // Paging-file-backed sections may reserve their full range and commit pages on demand.
+    HostViewFailure CommitBacking(HostBackingObject backing, ulong offset, ulong size) => HostViewFailure.None;
+
     ulong ReserveHole(ulong address, ulong size);
 
     IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize) => [];

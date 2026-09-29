@@ -97,6 +97,29 @@ public sealed unsafe class SharedBackingViewsTests
     }
 
     [Fact]
+    public void ClearBeforeMapping_CommitsAndInitializesTheBackingRange()
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        var host = HostViewMemory.Create();
+        using var store = new SharedBackingViews(host, BackingSize);
+        var hole = HoleSize(host);
+        var address = ReserveFreeHole(host, hole);
+        Assert.True(host.SplitHole(address, Segment));
+
+        Assert.True(store.Clear(Segment, Segment));
+        Assert.True(store.TryMapReservedRange(address, Segment, Segment, HostPageProtection.ReadWrite, out _));
+        Assert.Equal(0UL, *(ulong*)address);
+
+        Assert.True(store.Unmap(address, Segment, out _));
+        Assert.True(host.JoinHoles(address, hole));
+        Assert.True(host.FreeHole(address, hole));
+    }
+
+    [Fact]
     public void TwoViewsOfOneOffset_ShareBytesAndTheSecondSurvives()
     {
         if (!Supported)
