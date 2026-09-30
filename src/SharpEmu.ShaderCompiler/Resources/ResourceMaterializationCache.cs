@@ -83,13 +83,10 @@ public sealed class ResourceMaterializationCache
         Misses++;
         Interlocked.Increment(ref _totalMisses);
         var recorder = new ReadRecorder();
-        var recording = new ResourceRuntimeInputs
+        var recording = inputs with
         {
-            UserData = inputs.UserData,
-            ShaderBase = inputs.ShaderBase,
             ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-            ComputeState = inputs.ComputeState,
             TablePhase = recorder.SetTablePhase,
         };
         if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
@@ -140,13 +137,10 @@ public sealed class ResourceMaterializationCache
             return false;
 
         var recorder = new ReadRecorder();
-        var recording = new ResourceRuntimeInputs
+        var recording = inputs with
         {
-            UserData = inputs.UserData,
-            ShaderBase = inputs.ShaderBase,
             ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-            ComputeState = inputs.ComputeState,
         };
         var cachedTable = cached.Snapshot.FlattenedResourceTable;
         if (!ResourceMaterializer.TryEvaluateTable(plan, recording, out var table) || recorder.Failed || table.Length != cachedTable.Length)
