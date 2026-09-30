@@ -32,8 +32,13 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.IsMetadataCleared(entries[2], 0, out var fill));
         Assert.Equal(0xffffffffu, fill);
         Assert.False(harness.Images.IsMetadataCleared(entries[0], 0));
-        Assert.False(harness.Images.IsMetadataCleared(entries[2], 32));
-        Assert.False(harness.Images.SetMetadataSlice(entries[2], 32, true));
+        Assert.True(harness.Images.IsMetadataCleared(entries[2], 32));
+        Assert.True(harness.Images.IsMetadataCleared(entries[2], 80));
+        Assert.True(harness.Images.SetMetadataSlice(entries[2], 80, false));
+        Assert.False(harness.Images.IsMetadataCleared(entries[2], 80));
+        Assert.True(harness.Images.IsMetadataCleared(entries[2], 81));
+        Assert.True(harness.Images.SetMetadataSlice(entries[2], 80, true));
+        Assert.True(harness.Images.IsMetadataCleared(entries[2], 80));
         Assert.False(harness.Images.IsMetadata(address + 0x3000));
         Assert.False(harness.Images.ClearMetadata(address + 0x3000));
         harness.Shutdown();
