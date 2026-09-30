@@ -1265,6 +1265,16 @@ public sealed partial class ResourceTracker
             }
         }
 
+        if (value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.ShiftLeft32 &&
+            value.Operands.Length == 2 && value.Operands[1].IsConstant)
+        {
+            // Scalar shifts mask the count to five bits. A constant left shift is
+            // the same wrapped 32-bit affine offset as multiplication by 2^count.
+            stride = 1u << (int)(value.Operands[1].ConstantU32 & 31);
+            selector = value.Operands[0];
+            return stride != 0 && selector.Kind == ScalarValueKind.FirstLane;
+        }
+
         if (value.Kind != ScalarValueKind.Operation || value.Operation != ScalarOperation.IMul32)
         {
             return false;
