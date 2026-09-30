@@ -461,16 +461,6 @@ public static partial class Gen5SpirvTranslator
                             Float(1),
                             GetFloatSource(instruction, 0)));
                     break;
-                case "VRcpF16":
-                    result = EmitFloat16Result(
-                        instruction,
-                        destination,
-                        _module.AddInstruction(
-                            SpirvOp.FDiv,
-                            _floatType,
-                            Float(1),
-                            GetFloat16Source(instruction, 0)));
-                    break;
                 case "VLogF32":
                     result = EmitFloatResult(
                         instruction,
@@ -497,9 +487,6 @@ public static partial class Gen5SpirvTranslator
                     break;
                 case "VRcpF16":
                     result = EmitFloat16Result(instruction, destination, _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), GetFloat16Source(instruction, 0)));
-                    break;
-                case "VSqrtF16":
-                    result = EmitFloat16Result(instruction, destination, Ext(31, _floatType, GetFloat16Source(instruction, 0)));
                     break;
                 case "VLogF16":
                     result = EmitFloat16Result(instruction, destination, Ext(30, _floatType, GetFloat16Source(instruction, 0)));
@@ -700,9 +687,7 @@ public static partial class Gen5SpirvTranslator
                         Bitcast(_floatType, EmitClampToUnitInterval(Bitcast(_uintType, dot))));
                     break;
                 }
-                case "VMin3F16":
                 case "VMax3F16":
-                case "VMed3F16":
                 {
                     // Every f16 value widens to f32 exactly, and min/max pick one
                     // input, so the f32 result narrows back without rounding.
@@ -1594,9 +1579,6 @@ public static partial class Gen5SpirvTranslator
                     break;
                 case "VAddNcI16":
                 case "VSubNcU16":
-                case "VSubNcI16":
-                case "VLshrrevB16":
-                case "VLshlrevB16":
                 case "VAshrrevI16":
                 case "VMaxU16":
                 case "VMinU16":
@@ -4541,12 +4523,12 @@ public static partial class Gen5SpirvTranslator
                     SpirvOp.ISub,
                     _uintType,
                     UInt(31),
-                    Ext(74, _uintType, high));
+                    Ext(75, _uintType, high));
                 var lowClz = _module.AddInstruction(
                     SpirvOp.ISub,
                     _uintType,
                     UInt(31),
-                    Ext(74, _uintType, low));
+                    Ext(75, _uintType, low));
                 var lowResult = IAdd(lowClz, UInt(32));
                 var leadingZeroResult = _module.AddInstruction(
                     SpirvOp.Select,
@@ -4605,15 +4587,6 @@ public static partial class Gen5SpirvTranslator
             }
 
             var left = GetRawSource(instruction, 0);
-            if (instruction.Opcode == "SBitreplicateB64B32")
-            {
-                // S_BITREPLICATE_B64_B32 broadcasts the source dword into both
-                // halves of its 64-bit SGPR destination and does not update SCC.
-                StoreS(destination, left);
-                StoreS(destination + 1, left);
-                return true;
-            }
-
             if (instruction.Opcode.EndsWith("SaveexecB32", StringComparison.Ordinal))
             {
                 var oldExec64 = BooleanToWaveMask(Load(_boolType, _exec));

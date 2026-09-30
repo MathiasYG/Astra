@@ -462,13 +462,6 @@ public sealed partial class ScalarValueGraph
                 case "SMovB32":
                     state.WriteScalar(destinationRegister, Read(instruction.Sources[0], state));
                     return;
-                case "SBitreplicateB64B32":
-                {
-                    var replicated = Read(instruction.Sources[0], state);
-                    state.WriteScalar(destinationRegister, replicated);
-                    state.WriteScalar(destinationRegister + 1, replicated);
-                    return;
-                }
                 case "SMovkI32":
                     state.WriteScalar(destinationRegister, _graph.Constant(unchecked((uint)(short)instruction.Sources[0].Value)));
                     return;

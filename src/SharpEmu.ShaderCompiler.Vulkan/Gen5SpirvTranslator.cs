@@ -1890,6 +1890,7 @@ public static partial class Gen5SpirvTranslator
                     return true;
                 }
                 case "DsAddU64":
+                    return TryEmitDataShareAtomic(instruction, control, out error);
                 case "DsOrB64":
                 {
                     if (instruction.Sources.Count < 3)
