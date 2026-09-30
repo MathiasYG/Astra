@@ -1570,6 +1570,21 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (instruction.Opcode == "SBitset0B64")
+            {
+                if (instruction.Sources.Count == 0)
+                {
+                    error = "missing scalar bit index for SBitset0B64";
+                    return false;
+                }
+
+                var bitIndex = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
+                var current = Temp("ulong", Scalar64Expression(destination));
+                var cleared = Temp("ulong", $"{current} & ~(1ul << {bitIndex})");
+                StoreScalar64(destination, cleared);
+                return true;
+            }
+
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {

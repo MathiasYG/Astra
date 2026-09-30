@@ -5249,6 +5249,12 @@ public static partial class Gen5SpirvTranslator
             // scalar 64-bit source operand.
             if (instruction.Opcode is "SBitset0B64" or "SBitset1B64")
             {
+                if (instruction.Sources.Count == 0)
+                {
+                    error = $"missing scalar bit index for {instruction.Opcode}";
+                    return false;
+                }
+
                 var bitIndex = Widen(BitwiseAnd(GetRawSource(instruction, 0), UInt(63)));
                 var selected = ShiftLeftLogical64(
                     _module.Constant64(_ulongType, 1),
