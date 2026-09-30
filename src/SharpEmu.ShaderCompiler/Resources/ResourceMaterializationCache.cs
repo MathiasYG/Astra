@@ -304,6 +304,7 @@ public sealed class ResourceMaterializationCache
     private sealed class ReadRecorder
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private readonly Dictionary<ulong, int> _readIndex = new();
         private bool _inTable;
 
         public bool Failed { get; private set; }
@@ -324,9 +325,24 @@ public sealed class ResourceMaterializationCache
                     return false;
                 }
 
-                _reads.Add((address, word, clean, _inTable));
+                Record(address, word, clean);
                 return true;
             };
+        }
+
+        private void Record(ulong address, uint word, bool clean)
+        {
+            if (_readIndex.TryGetValue(address, out var index))
+            {
+                var previous = _reads[index];
+                // A changing input during one materialization cannot be represented
+                // by a cache entry that validates only one value for this address.
+                if (previous.Word != word) Failed = true;
+                _reads[index] = (address, previous.Word, previous.Clean || clean, previous.Table && _inTable);
+                return;
+            }
+            _readIndex.Add(address, _reads.Count);
+            _reads.Add((address, word, clean, _inTable));
         }
 
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,
