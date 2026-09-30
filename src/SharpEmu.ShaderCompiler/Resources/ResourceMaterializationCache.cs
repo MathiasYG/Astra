@@ -87,6 +87,7 @@ public sealed class ResourceMaterializationCache
         {
             ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+            ReadCleanWords = recorder.Wrap(inputs.ReadCleanWords),
             TablePhase = recorder.SetTablePhase,
         };
         if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
@@ -141,6 +142,7 @@ public sealed class ResourceMaterializationCache
         {
             ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+            ReadCleanWords = recorder.Wrap(inputs.ReadCleanWords),
         };
         var cachedTable = cached.Snapshot.FlattenedResourceTable;
         if (!ResourceMaterializer.TryEvaluateTable(plan, recording, out var table) || recorder.Failed || table.Length != cachedTable.Length)
@@ -326,6 +328,20 @@ public sealed class ResourceMaterializationCache
                 }
 
                 Record(address, word, clean);
+                return true;
+            };
+        }
+
+        public GuestWordsReader? Wrap(GuestWordsReader? inner)
+        {
+            if (inner is null) return null;
+            return (ulong address, Span<uint> words) =>
+            {
+                // A refused range falls back to individual reads; only those
+                // determine whether the materialization is uncacheable.
+                if (!inner(address, words)) return false;
+                for (var index = 0; index < words.Length; index++)
+                    Record(address + (ulong)index * sizeof(uint), words[index], true);
                 return true;
             };
         }

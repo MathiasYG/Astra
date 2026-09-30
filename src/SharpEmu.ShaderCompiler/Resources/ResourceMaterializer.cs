@@ -665,11 +665,14 @@ public static class ResourceMaterializer
         {
             var candidate = new uint[8];
             var heapOffset = key << 5;
-            for (uint dword = 0; dword < 8; dword++)
+            if (!ScalarBufferRangeRead.TryRead(heap.Dwords, heapOffset, 0, inputs, candidate))
             {
-                if (!ReadScalarBufferWord(heap.Dwords, heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                for (uint dword = 0; dword < 8; dword++)
                 {
-                    return false;
+                    if (!ReadScalarBufferWord(heap.Dwords, heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                    {
+                        return false;
+                    }
                 }
             }
 
