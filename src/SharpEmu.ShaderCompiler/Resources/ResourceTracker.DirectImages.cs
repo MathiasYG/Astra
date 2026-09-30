@@ -115,7 +115,12 @@ public sealed partial class ResourceTracker
             var overwritten = false;
             foreach (var instruction in instructions.Where(instruction => instruction.Pc >= position.Start && instruction.Pc < block.EndPc))
             {
-                if (instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+                // RDNA2 V_MOVREL* indexes only VGPRs through M0. It cannot
+                // alias the SGPR descriptor being checked here. Its explicit
+                // scalar operands are still checked by ReadsScalar below.
+                var vectorRelativeMove = instruction.Encoding == Gen5ShaderEncoding.Vop1 &&
+                    instruction.Opcode is "VMovrelsB32" or "VMovreldB32" or "VMovrelsdB32" or "VMovrelsd2B32";
+                if (instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) && !vectorRelativeMove ||
                     instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal)) return false;
                 var allowedImage = instruction.Control is Gen5ImageControl &&
                     _plan.Memory.TryGetIndex(instruction.Pc, 0, out var imageIndex) &&
