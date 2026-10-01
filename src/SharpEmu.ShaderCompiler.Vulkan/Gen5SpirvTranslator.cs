@@ -4721,6 +4721,14 @@ public static partial class Gen5SpirvTranslator
                     }
                 }
 
+                // Narrow sRGB images use RGBA backing. Stores cannot change absent guest channels.
+                if (resource.ConversionFormat is GuestImageFormat.Format8Srgb or GuestImageFormat.Format8x2Srgb)
+                {
+                    if (resource.ConversionFormat == GuestImageFormat.Format8Srgb) components[1] = Float(0);
+                    components[2] = Float(0);
+                    components[3] = Float(1);
+                }
+
                 var texel = _module.AddInstruction(
                     SpirvOp.CompositeConstruct,
                     resource.VectorType,

@@ -13,6 +13,21 @@ public sealed class RegisterBanksTests
     private static RegisterBanks NewBanks() => new(static message => new InvalidOperationException(message));
 
     [Fact]
+    public void DepthOrderPreferenceIsSeparateFromForcedDepthBeforeShader()
+    {
+        var preference = DepthShaderControlRegisters.Decode(0x10);
+        Assert.Equal(1, preference.DepthExportOrder);
+        Assert.False(preference.DepthBeforeShader);
+        var forced = DepthShaderControlRegisters.Decode(0x1010);
+        Assert.Equal(preference.DepthExportOrder, forced.DepthExportOrder);
+        Assert.True(forced.DepthBeforeShader);
+        Assert.Equal(0u, forced.RemainingBits);
+        Assert.Equal(0x80000000u, DepthShaderControlRegisters.Decode(0x80001010).RemainingBits);
+        Assert.False(DepthRenderOverrideRegisters.Decode(0).ForceShaderZOrder);
+        Assert.True(DepthRenderOverrideRegisters.Decode(0x40).ForceShaderZOrder);
+    }
+
+    [Fact]
     public void Defaults_MatchTheHardwareResetValues()
     {
         var context = NewBanks().Context;

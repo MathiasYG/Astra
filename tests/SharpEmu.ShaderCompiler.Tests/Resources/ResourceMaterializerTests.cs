@@ -265,6 +265,30 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(ImageNumericClass.Float, image.NumericClass);
     }
 
+    [Theory]
+    [InlineData(GuestImageFormat.Format8Srgb)]
+    [InlineData(GuestImageFormat.Format8x2Srgb)]
+    public void NarrowSrgbStorage_RetainsFormatWithoutChangingSampledSpecialization(uint format)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, format));
+        instructions.AddRange(SamplerWords(ref pc, 24, 0));
+        instructions.Add(Image(pc, "ImageSample", 16, 24)); pc += 8;
+        instructions.Add(Image(pc, "ImageStore", 16)); pc += 8;
+        instructions.Add(EndProgram(pc));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        var storage = Assert.Single(applied.Info.Images, image => image.ResourceClass == ImageResourceClass.Storage);
+        var sampled = Assert.Single(applied.Info.Images, image => image.ResourceClass == ImageResourceClass.Sampled);
+        Assert.Equal(format, storage.ConversionFormat);
+        Assert.Equal(GuestImageFormat.Invalid, sampled.ConversionFormat);
+        Assert.False(Assert.Single(applied.Info.Samplers).ForcePointFiltering);
+    }
+
     // Three images share one sampler; the packed and signed ones need point filtering,
     // so the sampler splits and their accesses sample through the duplicate.
     [Fact]
