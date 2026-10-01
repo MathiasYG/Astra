@@ -45,7 +45,6 @@ public sealed class TilerParityTests : IClassFixture<HeadlessVulkanFixture>
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new ImageTestHarness(_vulkan);
-        using var runner = new TilerComputeRunner(harness);
         const uint width = 257, height = 3, sourceBase = 3, wideBase = 4, narrowBase = 1;
         var narrowStride = width * channels + 5;
         const uint wideStride = width * 4 + 12;
@@ -68,23 +67,24 @@ public sealed class TilerParityTests : IClassFixture<HeadlessVulkanFixture>
         }
         var source = harness.Upload(input);
         var wideOutput = harness.CreateDeviceLocalBuffer((ulong)expectedWide.Length);
-        var unused = harness.Upload(new byte[64]);
-        var widening = runner.CreatePipeline(TilerShaders.CreateNarrowColorConversion(channels, true), ReadOnlySpan<uint>.Empty);
-        var push = new TileTransferArguments { SourceBase = sourceBase, DestinationBase = wideBase, Width = width, Height = height, PitchBytes = narrowStride, SliceBytes = wideStride };
+        var layout = new DepthConversionLayout { Width = width, Height = height, Layers = 1, SourceRowStride = narrowStride, TargetRowStride = wideStride,
+            SourceSliceStride = height * narrowStride, TargetSliceStride = height * wideStride };
         harness.Run(() =>
         {
             wideOutput.Fill(0, wideOutput.Size, 0x5a5a5a5a);
-            runner.Dispatch(widening, source, wideOutput, unused, 0, push, (width + 63) / 64, height, 1);
+            harness.Tiler.ConvertNarrowColor(new TilerBufferSpan(source.Handle, sourceBase, source.Size - sourceBase),
+                new TilerBufferSpan(wideOutput.Handle, wideBase, wideOutput.Size - wideBase), channels, true, layout);
         });
         Assert.Equal(expectedWide, harness.ReadBack(wideOutput.Handle, 0, wideOutput.Size));
         var wideSource = harness.Upload(expectedWide);
         var narrowOutput = harness.CreateDeviceLocalBuffer((ulong)expectedNarrow.Length);
-        var narrowing = runner.CreatePipeline(TilerShaders.CreateNarrowColorConversion(channels, false), ReadOnlySpan<uint>.Empty);
-        push = new TileTransferArguments { SourceBase = wideBase, DestinationBase = narrowBase, Width = width, Height = height, PitchBytes = wideStride, SliceBytes = narrowStride };
+        layout = new DepthConversionLayout { Width = width, Height = height, Layers = 1, SourceRowStride = wideStride, TargetRowStride = narrowStride,
+            SourceSliceStride = height * wideStride, TargetSliceStride = height * narrowStride };
         harness.Run(() =>
         {
             narrowOutput.Fill(0, narrowOutput.Size, 0x5a5a5a5a);
-            runner.Dispatch(narrowing, wideSource, narrowOutput, unused, 0, push, (width + 63) / 64, height, 1);
+            harness.Tiler.ConvertNarrowColor(new TilerBufferSpan(wideSource.Handle, wideBase, wideSource.Size - wideBase),
+                new TilerBufferSpan(narrowOutput.Handle, narrowBase, narrowOutput.Size - narrowBase), channels, false, layout);
         });
         Assert.Equal(expectedNarrow, harness.ReadBack(narrowOutput.Handle, 0, narrowOutput.Size));
         harness.AssertNoValidationMessages();
