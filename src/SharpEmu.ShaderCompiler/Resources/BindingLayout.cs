@@ -442,7 +442,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         }
 
         var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
-        var sourceWidth = instruction.Opcode == "SBitreplicateB64B32" ? 1u : width;
+        var sourceWidth = instruction.Opcode is "SBitreplicateB64B32" or "SBitset0B64" ? 1u : width;
         foreach (var source in instruction.Sources)
         {
             if (source.Kind == Gen5OperandKind.ScalarRegister)
@@ -451,13 +451,13 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             }
         }
 
-        if (instruction.Opcode is "SBitset0B32" or "SBitset1B32")
+        if (instruction.Opcode is "SBitset0B32" or "SBitset1B32" or "SBitset0B64")
         {
             foreach (var destination in instruction.Destinations)
             {
                 if (destination.Kind == Gen5OperandKind.ScalarRegister)
                 {
-                    Use(destination.Value, 1);
+                    Use(destination.Value, instruction.Opcode == "SBitset0B64" ? 2u : 1u);
                 }
             }
         }
