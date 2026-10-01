@@ -101,7 +101,8 @@ public sealed class WindowsCrashCaptureTests
         startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(BuildProbe(eventName, scenario))));
         startInfo.Environment["DOTNET_DbgEnableMiniDump"] = "0";
         using var target = Process.Start(startInfo)!;
-        var standardOutput = target.StandardOutput.ReadToEndAsync();
+        var probeReady = target.StandardOutput.ReadLineAsync();
+        Task<string>? standardOutput = null;
         var standardError = target.StandardError.ReadToEndAsync();
         var helper = Task.Factory.StartNew(() => WindowsCrashCapture.RunHelper(
             [WindowsCrashCapture.HelperArgument, target.Id.ToString(), readyEventName, dumpPath]),
@@ -110,6 +111,10 @@ public sealed class WindowsCrashCaptureTests
         {
             using var helperExited = ((IAsyncResult)helper).AsyncWaitHandle;
             await Task.Run(() => WindowsCrashCapture.WaitForHelper(readyEvent, helperExited)).WaitAsync(TimeSpan.FromSeconds(45));
+            // Break only after Add-Type and probe initialization have finished.
+            // Debugger attachment alone does not mean the application is ready.
+            Assert.Equal("probe-ready", await probeReady.WaitAsync(TimeSpan.FromSeconds(45)));
+            standardOutput = target.StandardOutput.ReadToEndAsync();
             if (scenario.StartsWith("debugger-breaks", StringComparison.Ordinal))
             {
                 for (var breakIndex = 1; breakIndex <= 3; breakIndex++)
@@ -121,7 +126,7 @@ public sealed class WindowsCrashCaptureTests
             startEvent.Set();
             await target.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(45));
             var helperResult = await helper.WaitAsync(TimeSpan.FromSeconds(45));
-            var output = await standardOutput + await standardError;
+            var output = await standardOutput! + await standardError;
             Assert.Contains("probe-started", output);
             Assert.Equal(scenario == "dump-failure" ? 1 : 0, helperResult);
             Assert.Equal(expectDump, File.Exists(dumpPath));
@@ -292,6 +297,7 @@ public sealed class WindowsCrashCaptureTests
         }
         '@
         $start = [System.Threading.EventWaitHandle]::OpenExisting('{{eventName}}')
+        Write-Output 'probe-ready'
         $null = $start.WaitOne()
         Write-Output 'probe-started'
         [CrashProbe]::Run('{{scenario}}')
