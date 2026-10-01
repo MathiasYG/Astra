@@ -114,8 +114,10 @@ public sealed class Gen5DataShareWrite64Tests
 
 public sealed class Gen5DataShareAtomic64Tests
 {
-    [Fact]
-    public void MixedWidthLdsAccessesProduceValidSpirv()
+    [Theory]
+    [InlineData(32u)]
+    [InlineData(64u)]
+    public void MixedWidthLdsAccessesProduceValidSpirv(uint waveSize)
     {
         var program = Program(
             MoveVector(0, 0, 0),
@@ -133,8 +135,9 @@ public sealed class Gen5DataShareAtomic64Tests
         var (plan, resources, layout) = Prepare(program);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            LocalSizeX = 1,
-            ThreadCountX = 1,
+            LocalSizeX = waveSize,
+            ThreadCountX = waveSize,
+            WaveSize = waveSize,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
 
