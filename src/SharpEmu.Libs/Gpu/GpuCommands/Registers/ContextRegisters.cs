@@ -194,6 +194,7 @@ public struct ColorControlRegisters
 
 public struct DepthRenderOverrideRegisters
 {
+    public bool ForceShaderZOrder;
     public bool ForceZValid;
     public bool ForceZDirty;
     public bool ForceStencilValid;
@@ -201,6 +202,7 @@ public struct DepthRenderOverrideRegisters
 
     public static DepthRenderOverrideRegisters Decode(uint value) => new()
     {
+        ForceShaderZOrder = RegisterField.Bit(value, 6),
         ForceZValid = (value & 0x2000_0000u) != 0,
         ForceZDirty = (value & 0x0800_0000u) != 0,
         ForceStencilValid = (value & 0x4000_0000u) != 0,
@@ -247,6 +249,7 @@ public struct DepthShaderControlRegisters
     public uint RemainingBits;
     public byte ConservativeDepthExport;
     public byte DepthExportOrder;
+    public bool DepthBeforeShader;
     public bool KillEnable;
     public bool DepthExportEnable;
     public bool MaskExportEnable;
@@ -256,9 +259,10 @@ public struct DepthShaderControlRegisters
 
     public static DepthShaderControlRegisters Decode(uint value) => new()
     {
-        RemainingBits = value & 0xFFFF_908Eu,
+        RemainingBits = value & 0xFFFF_808Eu,
         ConservativeDepthExport = (byte)RegisterField.Get(value, 13, 0x3),
         DepthExportOrder = (byte)RegisterField.Get(value, 4, 0x3),
+        DepthBeforeShader = RegisterField.Bit(value, 12),
         KillEnable = RegisterField.Bit(value, 6),
         DepthExportEnable = RegisterField.Bit(value, 0),
         MaskExportEnable = RegisterField.Bit(value, 8),
