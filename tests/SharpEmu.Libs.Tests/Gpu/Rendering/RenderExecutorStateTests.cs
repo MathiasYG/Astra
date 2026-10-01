@@ -459,8 +459,9 @@ public sealed class RenderExecutorStateTests : IDisposable
                 _executor.Dispatch(3, Banks(), 1, 1, 1, 0x41);
             }
 
-            Sequence();
-            Sequence();
+            // Warm recorder capacity and tiered runtime paths before comparing allocations.
+            for (var warmup = 0; warmup < 64; warmup++)
+                Sequence();
             var baselineReads = _host.GuestReads;
             var before = GC.GetAllocatedBytesForCurrentThread();
             Sequence();

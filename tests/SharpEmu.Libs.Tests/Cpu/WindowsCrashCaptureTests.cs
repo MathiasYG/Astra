@@ -9,6 +9,9 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Cpu;
 
+// Native debugger probes and full-memory dumps should not compete with other test collections.
+[CollectionDefinition(nameof(WindowsCrashCaptureTests), DisableParallelization = true)]
+[Collection(nameof(WindowsCrashCaptureTests))]
 public sealed class WindowsCrashCaptureTests
 {
     [Fact]
