@@ -121,12 +121,18 @@ public sealed class Gen5InterpolationParameterTests
     [Theory]
     [InlineData(0u)]
     [InlineData(1u)]
-    public void VertexDifferenceMove_KeepsPerVertexInputWithoutPerVertexSupport(uint selector)
+    public void VertexDifferenceMove_FallsBackToInterpolatedInputWithoutPerVertexSupport(uint selector)
     {
         var request = Request(selector, false, inputCntl: 0x1, supportsPerVertex: false);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
-        Assert.Contains(Instructions(shader.Spirv), instruction => instruction.Opcode == SpirvOp.Decorate &&
+        var instructions = Instructions(shader.Spirv);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.Capability &&
+            instruction.Operands[0] == (uint)SpirvCapability.FragmentBarycentricKhr);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
             instruction.Operands[1] == (uint)SpirvDecoration.PerVertexKhr);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.Flat);
+        ValidateWhenAvailable(shader.Spirv);
     }
 
     [Fact]

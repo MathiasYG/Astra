@@ -69,7 +69,11 @@ public static partial class Gen5SpirvTranslator
             if (!_request.SupportsPerVertexPixelInputs)
             {
                 // Reading P0 alone is the provoking vertex value, which a flat input gives.
-                // Other parameters still need the per-vertex values.
+                // Preserve that exact case. For selectors that need P1/P2, fall back to the
+                // ordinary interpolated input. This is not an exact reconstruction of the
+                // three vertex values, but it keeps shaders usable on devices without
+                // fragmentShaderBarycentric (notably pre-Turing NVIDIA hardware) and avoids
+                // emitting SPV_KHR_fragment_shader_barycentric on an unsupported device.
                 foreach (var attribute in _perVertexAttributes.ToArray())
                 {
                     if (_request.Program.Instructions.All(instruction =>
@@ -81,6 +85,9 @@ public static partial class Gen5SpirvTranslator
                         _flatParameterAttributes.Add(attribute);
                     }
                 }
+
+                _perVertexAttributes.Clear();
+                return;
             }
 
             if (_perVertexAttributes.Count == 0)
