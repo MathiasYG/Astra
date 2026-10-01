@@ -1125,7 +1125,9 @@ public static class ResourceMaterializer
             }
 
             var storage = baseImage.ResourceClass == ImageResourceClass.Storage;
-            var conversionFormat = ImageConversionFormat(format);
+            // Preserve narrow storage formats so widened backing channels can be kept at guest defaults.
+            var conversionFormat = storage && (format is GuestImageFormat.Format8Srgb or GuestImageFormat.Format8x2Srgb)
+                ? format : ImageConversionFormat(format);
             var shaderSwizzle = storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
             var rawSintStorage = storage && format == GuestImageFormat.Format32Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             var numericClass = GuestImageFormat.SampledNumericClass(format);
