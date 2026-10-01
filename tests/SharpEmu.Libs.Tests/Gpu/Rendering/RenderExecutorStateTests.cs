@@ -452,12 +452,8 @@ public sealed class RenderExecutorStateTests : IDisposable
         {
             void Sequence()
             {
-                _host.Calls.Clear();
-                _host.BegunRenderings.Clear();
-                _host.DynamicStates.Clear();
-                _pipelines.Calls.Clear();
-                _pipelines.PipelineRenderings.Clear();
-                _pipelines.PipelineRequests.Clear();
+                _host.ClearRecording();
+                _pipelines.ClearRecording();
                 _executor.DrawIndexed(1, Banks(), Indexed(3));
                 _executor.DrawAuto(2, Banks(), Auto(3));
                 _executor.Dispatch(3, Banks(), 1, 1, 1, 0x41);
