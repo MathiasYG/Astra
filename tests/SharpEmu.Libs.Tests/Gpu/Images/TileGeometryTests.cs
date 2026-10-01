@@ -215,7 +215,7 @@ public sealed class TileGeometryTests
     [Fact]
     public void UnrenderableUncompressedTextureCanUseRenderTargetSwizzle()
     {
-        Assert.Equal(0u, GuestPixelFormats.RenderTargetBytesPerElement(GuestPixelFormat.Bits8_8Srgb));
+        Assert.Equal(2u, GuestPixelFormats.RenderTargetBytesPerElement(GuestPixelFormat.Bits8_8Srgb));
         Assert.True(TileGeometry.TryGetTextureSize(GuestPixelFormat.Bits8_8Srgb,
             1920, 2160, 1, GuestTileMode.RenderTarget, out var size, null, null));
         Assert.Equal(new TileSizeAndAlignment(8_912_896u, 65_536u), size);

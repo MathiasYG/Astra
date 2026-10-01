@@ -30,9 +30,9 @@ public sealed class ShaderPlanningDumpTests
             Environment.SetEnvironmentVariable(names[2], outputDirectory);
             using var fatalScope = new FatalScope();
             var guest = new PipelineTestGuest();
-            // A lane-derived offset reads an image descriptor without a material-table selector.
+            // The image uses s[124:131], which has no defined descriptor provenance.
             guest.RegisterProgram(codeAddress, PipelineTestGuest.MemoryBase + 0x8000,
-                [0x7E100500, 0xF42C0402, 0x10000000, 0xF0000108, 0x00040000, 0xBF810000]);
+                [0x7E100500, 0xF42C0402, 0x10000000, 0xF0000108, 0x001F0000, 0xBF810000]);
             var source = guest.Source(codeAddress, ShaderStage.Compute, new uint[8]);
             var cursor = 0u;
             var failure = Assert.Throws<SchedulerFatalException>(() =>
