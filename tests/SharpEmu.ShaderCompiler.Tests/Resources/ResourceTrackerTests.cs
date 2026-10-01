@@ -418,6 +418,30 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void UniformScalarBufferSamplerUsesTheSelectedNonemptyRecord()
+    {
+        var program = Program(
+            Sop2(0, "SLshlB32", 20, Gen5Operand.Scalar(4), Operand(4)),
+            ScalarBufferLoad(4, 0, destination: 16, count: 4, dynamicOffsetRegister: 20),
+            Image(12, "ImageSample", 8, 16),
+            EndProgram(20));
+        var plan = Extract(program, userDataCount: 16);
+        var userData = new uint[16];
+        userData[0] = 0x1000;
+        userData[1] = 16u << 16;
+        userData[2] = 16;
+        userData[4] = 4;
+        ImageDescriptor().CopyTo(userData, 8);
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[64], RequireAlignment = true };
+        uint[] sampler = [0x123, 0, 0, 0];
+        for (var index = 0; index < sampler.Length; index++) memory.At(0x1040 + (ulong)index * 4) = sampler[index];
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref snapshot, ref specialization));
+        Assert.Equal(sampler, snapshot.Samplers[0]);
+    }
+
+    [Fact]
     public void DynamicDescriptorsFromZeroExtentBufferAreNullOnlyWhileTheBufferIsEmpty()
     {
         var program = Program(

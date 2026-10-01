@@ -442,6 +442,10 @@ public sealed partial class ResourceTracker
         }
 
         var source = MakeSource(handle, width, sampler, sampleAdjust, pc);
+        // A host-evaluable sampler read uses the real descriptor, including nonempty buffers.
+        // The zero-extent fallback is only for reads that cannot be materialized normally.
+        if (sampler && ValidateSource(source, out _))
+            return InternSource(source);
         if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle &&
             TryMakeZeroExtentBufferSource(source, pc, out var zeroExtentSource))
         {
