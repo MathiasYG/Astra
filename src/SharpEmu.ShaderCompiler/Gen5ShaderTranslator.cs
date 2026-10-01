@@ -2240,9 +2240,17 @@ public static partial class Gen5ShaderTranslator
                 // ordinary vector destination leaves every invocation with a
                 // different value and corrupts scalar addresses derived from
                 // lane data.
-                destinations = opcode == "VReadfirstlaneB32"
-                    ? [Gen5Operand.Scalar((word >> 17) & 0x7F)]
-                    : [Gen5Operand.Vector((word >> 17) & 0xFF)];
+                var vop1Destination = (word >> 17) & 0xFF;
+                destinations = opcode switch
+                {
+                    "VReadfirstlaneB32" => [Gen5Operand.Scalar((word >> 17) & 0x7F)],
+                    "VCvtF64I32" or "VRcpF64" =>
+                    [
+                        Gen5Operand.Vector(vop1Destination),
+                        Gen5Operand.Vector(vop1Destination + 1),
+                    ],
+                    _ => [Gen5Operand.Vector(vop1Destination)],
+                };
                 break;
             case Gen5ShaderEncoding.Vop2:
                 if (isDpp8)
@@ -2371,7 +2379,10 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
-                destinations = [Gen5Operand.Vector(word & 0xFF)];
+                var vop3Destination = word & 0xFF;
+                destinations = opcode is "VMulF64" or "VFmaF64"
+                    ? [Gen5Operand.Vector(vop3Destination), Gen5Operand.Vector(vop3Destination + 1)]
+                    : [Gen5Operand.Vector(vop3Destination)];
                 if (opcode == "VReadlaneB32")
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the
