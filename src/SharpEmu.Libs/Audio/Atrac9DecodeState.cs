@@ -92,6 +92,8 @@ internal sealed class Atrac9DecodeState
             catch (Exception exception) when (
                 exception is ArgumentException or InvalidDataException or InvalidOperationException)
             {
+                Trace($"initialize_failed config={Convert.ToHexString(configData[..4])} " +
+                    $"error={exception.GetType().Name}: {exception.Message}");
                 Clear();
                 return false;
             }

@@ -86,6 +86,18 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public int GuestReads { get; private set; }
 
+    // Reset recorder-only state so allocation measurements compare identical
+    // histories and identifier widths, without discarding cached GPU resources.
+    public void ClearRecording()
+    {
+        Calls.Clear();
+        BegunRenderings.Clear();
+        DynamicStates.Clear();
+        RetainedDraws.Clear();
+        _nextBindings = 1;
+        _transientOffset = 0;
+    }
+
     public bool Recording { get; set; } = true;
 
     public RenderHostLimits Limits { get; set; } = new(16384, 8192, 16384, 16384);
@@ -407,6 +419,15 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public bool LastDispatchThreadDimensions { get; private set; }
 
     public List<ColorComponentMap[]> ExportMappings { get; } = new();
+
+    public void ClearRecording()
+    {
+        Calls.Clear();
+        PipelineRenderings.Clear();
+        PipelineRequests.Clear();
+        ExportMappings.Clear();
+        DisableBlendingRequests.Clear();
+    }
 
     public GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,

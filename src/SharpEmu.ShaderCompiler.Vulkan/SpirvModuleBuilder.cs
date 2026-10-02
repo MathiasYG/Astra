@@ -213,6 +213,7 @@ public enum SpirvCapability : uint
     ShaderViewportIndexLayerExt = 5254,
     RuntimeDescriptorArray = 5302,
     PhysicalStorageBufferAddresses = 5347,
+    WorkgroupMemoryExplicitLayoutKhr = 4428,
 }
 
 public enum SpirvStorageClass : uint
@@ -248,9 +249,11 @@ public enum SpirvDecoration : uint
 {
     Block = 2,
     ArrayStride = 6,
+    Aliased = 20,
     BuiltIn = 11,
     NoPerspective = 13,
     Flat = 14,
+    Sample = 17,
     PerVertexKhr = 5285,
     Location = 30,
     Binding = 33,

@@ -452,10 +452,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             renderingState.ColorFormats[index] = format;
+            renderingState.ColorSamples[index] = rendering.ColorAttachments[index].Samples;
             // A target the pixel program never exports keeps its contents, as on hardware; the
             // host output would otherwise write an undefined value (e.g. depth-only passes that
             // leave a color target bound and export only to the null target).
-            var exported = pixelStage is null || ((pixelStage.PixelColorExportMasks >> (int)(color.Slot * 4)) & 0xFu) != 0;
+            var exported = pixelStage is not null && ((pixelStage.PixelColorExportMasks >> (int)(color.Slot * 4)) & 0xFu) != 0;
             var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;
             parameters.SetColorMask(index, colorMask);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -472,6 +473,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             renderingState.DepthFormat = rendering.DepthFormat;
             renderingState.StencilFormat = rendering.StencilFormat;
+            renderingState.DepthSamples = rendering.DepthStencilAttachment.Samples;
         }
 
         var samples = rendering.Samples;

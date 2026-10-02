@@ -396,11 +396,21 @@ public sealed partial class ScalarValueGraph
             {
                 case Gen5ShaderEncoding.Sop1:
                 case Gen5ShaderEncoding.Sop2:
+                    ApplyScalarAlu(instruction, state);
+                    return;
                 case Gen5ShaderEncoding.Sopk:
+                    if (instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal))
+                    {
+                        ApplyScalarCompareK(instruction, state);
+                        if (_recording) _graph.ScalarCompareConditions[instruction.Pc] = state.Scc;
+                        return;
+                    }
+
                     ApplyScalarAlu(instruction, state);
                     return;
                 case Gen5ShaderEncoding.Sopc:
                     ApplyScalarCompare(instruction, state);
+                    if (_recording) _graph.ScalarCompareConditions[instruction.Pc] = state.Scc;
                     return;
                 case Gen5ShaderEncoding.Sopp:
                     if (_recording)
@@ -452,13 +462,6 @@ public sealed partial class ScalarValueGraph
                 case "SMovB32":
                     state.WriteScalar(destinationRegister, Read(instruction.Sources[0], state));
                     return;
-                case "SBitreplicateB64B32":
-                {
-                    var replicated = Read(instruction.Sources[0], state);
-                    state.WriteScalar(destinationRegister, replicated);
-                    state.WriteScalar(destinationRegister + 1, replicated);
-                    return;
-                }
                 case "SMovkI32":
                     state.WriteScalar(destinationRegister, _graph.Constant(unchecked((uint)(short)instruction.Sources[0].Value)));
                     return;
@@ -481,6 +484,15 @@ public sealed partial class ScalarValueGraph
                 case "SMovB64":
                     ApplyMovePair(instruction, state, destinationRegister);
                     return;
+                case "SBitreplicateB64B32":
+                {
+                    var source = Read(instruction.Sources[0], state);
+                    state.WritePair(
+                        destinationRegister,
+                        ReplicateBits16(source),
+                        ReplicateBits16(Binary(ScalarOperation.ShiftRightLogical32, source, _graph.Constant(16u))));
+                    return;
+                }
                 case "SCselectB32":
                     state.WriteScalar(destinationRegister, _graph.Select(state.Scc, Read(instruction.Sources[0], state), Read(instruction.Sources[1], state)));
                     return;
@@ -580,6 +592,22 @@ public sealed partial class ScalarValueGraph
             }
 
             var left = Read(instruction.Sources[0], state);
+            if (opcode == "SBitset0B64")
+            {
+                var bitIndex = Binary(ScalarOperation.And32, left, _graph.Constant(63u));
+                var bit = Binary(ScalarOperation.ShiftLeft32, _graph.Constant(1u),
+                    Binary(ScalarOperation.And32, bitIndex, _graph.Constant(31u)));
+                var clearMask = Unary(ScalarOperation.Not32, bit);
+                var isLowWord = Bool(ScalarOperation.ULessThan32, bitIndex, _graph.Constant(32u));
+                var low = state.Scalars[destinationRegister];
+                var high = state.Scalars[destinationRegister + 1];
+                state.WritePair(
+                    destinationRegister,
+                    _graph.Select(isLowWord, Binary(ScalarOperation.And32, low, clearMask), low),
+                    _graph.Select(isLowWord, high, Binary(ScalarOperation.And32, high, clearMask)));
+                return;
+            }
+
             switch (opcode)
             {
                 case "SNotB32":
@@ -609,6 +637,17 @@ public sealed partial class ScalarValueGraph
                 case "SFF1I32B32":
                     state.WriteScalar(destinationRegister, _graph.FindLowestSetBit(left, instruction.Pc));
                     return;
+                case "SFlbitI32B32":
+                {
+                    // RDNA returns -1 for zero; otherwise this is the number of
+                    // zeros before the most significant set bit.
+                    var high = Unary(ScalarOperation.FindHighestBit32, left);
+                    var leading = Binary(ScalarOperation.ISub32, _graph.Constant(31u), high);
+                    state.WriteScalar(destinationRegister,
+                        _graph.Select(Bool(ScalarOperation.IEqual32, left, _graph.Constant(0u)),
+                            _graph.Constant(uint.MaxValue), leading));
+                    return;
+                }
                 case "SBitset0B32":
                 {
                     var bit = Binary(ScalarOperation.ShiftLeft32, _graph.Constant(1u), Binary(ScalarOperation.And32, left, _graph.Constant(31u)));
@@ -1018,6 +1057,28 @@ public sealed partial class ScalarValueGraph
             state.Scc = Compare(opcode["SCmp".Length..], left, right);
         }
 
+        private void ApplyScalarCompareK(Gen5ShaderInstruction instruction, RegisterState state)
+        {
+            if (instruction.Destinations.Count != 1 ||
+                instruction.Destinations[0] is not { Kind: Gen5OperandKind.ScalarRegister, Value: < ScalarRegisterCount } source ||
+                instruction.Words.Count == 0)
+            {
+                state.Scc = _graph.Undefined(ScalarValueType.Bool);
+                return;
+            }
+
+            var simm16 = instruction.Words[0] & 0xFFFF;
+            var immediate = instruction.Opcode.EndsWith("I32", StringComparison.Ordinal) &&
+                !instruction.Opcode.EndsWith("U32", StringComparison.Ordinal)
+                ? unchecked((uint)(int)(short)simm16)
+                : simm16;
+
+            // SOPK compare instructions encode the source SGPR in the SDST field.
+            // They update SCC and leave that SGPR unchanged.
+            state.Scc = Compare(instruction.Opcode["SCmp".Length..],
+                state.Scalars[source.Value], _graph.Constant(immediate));
+        }
+
         private ScalarValue Compare(string suffix, ScalarValue left, ScalarValue right) => suffix switch
         {
             "EqI32" or "EqU32" or "kEqI32" or "kEqU32" => Bool(ScalarOperation.IEqual32, left, right),
@@ -1080,7 +1141,7 @@ public sealed partial class ScalarValueGraph
 
                 if (_recording)
                 {
-                    _graph.Accesses[memoryIndex] = new MemoryAccessBinding(handle, null, read);
+                    _graph.Accesses[memoryIndex] = new MemoryAccessBinding(handle, null, read) { ExecutionMask = state.Exec };
                 }
             }
         }
@@ -1558,15 +1619,22 @@ public sealed partial class ScalarValueGraph
 
             var lane = instruction.Sources.Count > 1 ? Read(instruction.Sources[1], state) : _graph.Undefined(ScalarValueType.U32);
             if (instruction.Sources.Count < 2 ||
-                instruction.Sources[0] is not { Kind: Gen5OperandKind.VectorRegister } source ||
-                !lane.IsConstant ||
-                !state.Lanes.TryGetValue((source.Value, lane.ConstantU32 & 63), out var value))
+                instruction.Sources[0] is not { Kind: Gen5OperandKind.VectorRegister } source)
             {
                 state.WriteScalar(destination.Value, _graph.Undefined(ScalarValueType.U32));
                 return;
             }
 
-            state.WriteScalar(destination.Value, value);
+            if (lane.IsConstant && state.Lanes.TryGetValue((source.Value, lane.ConstantU32 & 63), out var value))
+            {
+                state.WriteScalar(destination.Value, value);
+                return;
+            }
+
+            var sourceValue = state.ReadVector(source.Value);
+            state.WriteScalar(destination.Value, !lane.IsConstant && sourceValue.IsUndefined
+                ? _graph.FirstLane(sourceValue, state.Exec, instruction.Pc)
+                : _graph.Undefined(ScalarValueType.U32));
         }
 
         // ---- memory instructions ----
@@ -1612,7 +1680,7 @@ public sealed partial class ScalarValueGraph
                     }
                 }
 
-                _graph.Accesses[memoryIndex] = binding;
+                _graph.Accesses[memoryIndex] = binding is null ? null : binding with { ExecutionMask = state.Exec };
             }
 
             foreach (var destination in instruction.Destinations)
@@ -1725,6 +1793,28 @@ public sealed partial class ScalarValueGraph
 
         private ScalarValue Unary(ScalarOperation operation, ScalarValue value) =>
             _graph.Operation(operation, ScalarValueType.U32, value);
+
+        private ScalarValue ReplicateBits16(ScalarValue source)
+        {
+            var value = Binary(ScalarOperation.And32, source, _graph.Constant(0xFFFFu));
+            foreach (var (shift, mask) in new (uint Shift, uint Mask)[]
+            {
+                (8, 0x00FF_00FF),
+                (4, 0x0F0F_0F0F),
+                (2, 0x3333_3333),
+                (1, 0x5555_5555),
+            })
+            {
+                value = Binary(
+                    ScalarOperation.And32,
+                    Binary(ScalarOperation.Or32, value,
+                        Binary(ScalarOperation.ShiftLeft32, value, _graph.Constant(shift))),
+                    _graph.Constant(mask));
+            }
+
+            return Binary(ScalarOperation.Or32, value,
+                Binary(ScalarOperation.ShiftLeft32, value, _graph.Constant(1u)));
+        }
 
         private ScalarValue Binary(ScalarOperation operation, ScalarValue left, ScalarValue right) =>
             _graph.Operation(operation, ScalarValueType.U32, left, right);

@@ -159,6 +159,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xF0;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         var state = DrawAndTakeState(banks);
 
         Assert.Equal((1u, (byte)0b1), (state.ColorWriteCount, state.ColorWriteEnableMask));
@@ -339,6 +340,19 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
+    public void Attachments_AColorTargetWithoutAnActivePixelShaderIsDroppedFromTheDepthPass()
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[0] = RegisterWords.Color(ColorBase, 32, 32);
+        banks.Context.ShaderInterface.ColorShaderMask = 0;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = _host.BegunRenderings[0];
+        Assert.Equal((0u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+        Assert.Contains("create_graphics_pipeline colors=0 depth=True topology=TriangleList restart=False", _pipelines.Calls);
+    }
+
+    [Fact]
     public void Attachments_StencilFormatIsReportedOnlyWithAStencilAspect()
     {
         var banks = Banks(withDepth: true);
@@ -357,9 +371,25 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         _host.ImageSamples[SecondColorBase] = 4;
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
         Assert.Contains("imageSamples=4 targetSamples=1", fatal.Message);
+    }
+
+    [Fact]
+    public void Attachments_MrtDisabledByShaderMaskDoesNotJoinTheRenderingScope()
+    {
+        var banks = Banks();
+        banks.Context.ColorTargets[7] = RegisterWords.Color(SecondColorBase, 64, 64, samplesLog2: 1, fragmentsLog2: 1);
+        banks.Context.RenderTargetMask = 0xF000000F;
+        banks.Context.ShaderInterface.ColorShaderMask = 0x0000000F;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(1u, rendering.ColorAttachmentCount);
+        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color 0 ", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("acquire_color 7 ", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -371,12 +401,18 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
-    public void Attachments_SingleSampleColorWithMultisampledDepthIsFatal()
+    public void Attachments_SingleSampleColorWithMultisampledDepthUsesGuestRasterizationSamples()
     {
         var banks = Banks(withDepth: true);
         banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, samplesLog2: 2);
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
-        Assert.Contains("color=1 depth=4", fatal.Message);
+        banks.Context.AntialiasingConfig.SampleCountLog2 = 2;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(4u, rendering.Samples);
+        Assert.Equal(1u, rendering.ColorAttachments[0].Samples);
+        Assert.Equal(4u, rendering.DepthStencilAttachment.Samples);
+        Assert.Equal(4u, Assert.Single(_pipelines.PipelineRenderings).Samples);
     }
 
     [Fact]
@@ -429,19 +465,16 @@ public sealed class RenderExecutorStateTests : IDisposable
         {
             void Sequence()
             {
-                _host.Calls.Clear();
-                _host.BegunRenderings.Clear();
-                _host.DynamicStates.Clear();
-                _pipelines.Calls.Clear();
-                _pipelines.PipelineRenderings.Clear();
-                _pipelines.PipelineRequests.Clear();
+                _host.ClearRecording();
+                _pipelines.ClearRecording();
                 _executor.DrawIndexed(1, Banks(), Indexed(3));
                 _executor.DrawAuto(2, Banks(), Auto(3));
                 _executor.Dispatch(3, Banks(), 1, 1, 1, 0x41);
             }
 
-            Sequence();
-            Sequence();
+            // Warm recorder capacity and tiered runtime paths before comparing allocations.
+            for (var warmup = 0; warmup < 64; warmup++)
+                Sequence();
             var baselineReads = _host.GuestReads;
             var before = GC.GetAllocatedBytesForCurrentThread();
             Sequence();
@@ -527,6 +560,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         var alternate = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.ColorTargets[2] = alternate with { Info = alternate.Info | (2u << 11) };
         banks.Context.RenderTargetMask = 0xF0F;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xF0F;
         _executor.DrawIndexed(1, banks, Indexed(3));
 
         var mapping = Assert.Single(_pipelines.ExportMappings);
@@ -605,6 +639,7 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         _host.ImageSamples[SecondColorBase] = 4;
         Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
 

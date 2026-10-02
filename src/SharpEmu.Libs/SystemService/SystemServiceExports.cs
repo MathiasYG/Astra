@@ -5,12 +5,14 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.VideoOut;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 
 namespace SharpEmu.Libs.SystemService;
 
 public static class SystemServiceExports
 {
     private const int OrbisSystemServiceErrorParameter = unchecked((int)0x80A10003);
+    private const int OrbisSystemServiceErrorNoEvent = unchecked((int)0x80A10004);
     private const int SystemServiceStatusSize = 0x0C;
     private const int DisplaySafeAreaInfoSize = sizeof(float) + 128;
     private const int HdrToneMapLuminanceSize = sizeof(float) * 3;
@@ -20,6 +22,28 @@ public static class SystemServiceExports
     private static string? _mainAppTitleId;
     private static int _noticeScreenSkipFlag;
     private static int _systemLanguage = 1;
+    private static readonly ConcurrentQueue<int> PendingEvents = new();
+
+    internal static void QueueEvent(int eventType) => PendingEvents.Enqueue(eventType);
+
+    [SysAbiExport(ExportName = "sceSystemServiceReceiveEvent",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSystemService")]
+    public static int SystemServiceReceiveEvent(CpuContext ctx)
+    {
+        var eventAddress = ctx[CpuRegister.Rdi];
+        if (eventAddress == 0)
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+        if (!PendingEvents.TryPeek(out var eventType))
+            return ctx.SetReturn(OrbisSystemServiceErrorNoEvent);
+
+        Span<byte> eventBytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(eventBytes, eventType);
+        if (!ctx.Memory.TryWrite(eventAddress, eventBytes))
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+
+        PendingEvents.TryDequeue(out _);
+        return ctx.SetReturn(0);
+    }
 
     public static void ConfigureApplicationInfo(string? titleId, int systemLanguage = 1)
     {
@@ -261,5 +285,6 @@ public static class SystemServiceExports
     {
         Volatile.Write(ref _noticeScreenSkipFlag, 0);
         Volatile.Write(ref _systemLanguage, 1);
+        PendingEvents.Clear();
     }
 }

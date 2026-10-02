@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using FFmpeg.AutoGen;
 using SharpEmu.Libs.VideoOut;
@@ -44,6 +45,7 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
     private int _swsSourceHeight;
     private AVPixelFormat _swsSourceFormat = AVPixelFormat.AV_PIX_FMT_NONE;
     private bool _disposed;
+    private bool _disposing;
 
     // Unbounded: access units are small, backpressure lives on the frame queue below.
     private readonly Channel<byte[]?> _workChannel =
@@ -53,14 +55,10 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
             SingleWriter = true,
         });
 
-    // Bounded and blocking-on-full: the backpressure that keeps decode paced to playback.
-    private readonly Channel<(byte[] Bgra, uint Width, uint Height)> _frameQueue =
-        Channel.CreateBounded<(byte[], uint, uint)>(new BoundedChannelOptions(FrameQueueCapacity)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = true,
-        });
+    // The worker and scheduler are dedicated threads, so use a synchronous
+    // bounded queue rather than blocking on asynchronous channel completions.
+    private readonly BlockingCollection<(byte[] Bgra, uint Width, uint Height)> _frameQueue =
+        new(new ConcurrentQueue<(byte[] Bgra, uint Width, uint Height)>(), FrameQueueCapacity);
 
     private readonly Thread _worker;
     private readonly Thread _scheduler;
@@ -181,10 +179,17 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
     }
 
     /// <summary>Queues an end-of-stream drain: flush FFmpeg and emit one more buffered picture, if any.</summary>
-    public void RequestDrain()
+    public bool RequestDrain()
     {
-        _workChannel.Writer.TryWrite(null);
+        if (Interlocked.Exchange(ref _drainRequested, 1) != 0)
+        {
+            return false;
+        }
+
+        return _workChannel.Writer.TryWrite(null);
     }
+
+    private int _drainRequested;
 
     /// <summary>Non-blocking: true exactly once per frame the worker has produced, in order.</summary>
     public bool TryConsumeProtocolReadySignal(out uint width, out uint height)
@@ -245,13 +250,13 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
             try
             {
                 // Blocks if the scheduler hasn't kept up; deliberate backpressure.
-                _frameQueue.Writer.WriteAsync((bgraFrame, width, height), token).AsTask().GetAwaiter().GetResult();
+                _frameQueue.Add((bgraFrame, width, height), token);
             }
             catch (OperationCanceledException)
             {
                 return;
             }
-            catch (ChannelClosedException)
+            catch (InvalidOperationException) when (_frameQueue.IsAddingCompleted)
             {
                 return;
             }
@@ -267,7 +272,6 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
 
     private void SchedulerLoop()
     {
-        var reader = _frameQueue.Reader;
         var token = _workerCts.Token;
         var haveDeadline = false;
         var nextDeadline = DateTime.MinValue;
@@ -278,19 +282,10 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
             (byte[] Bgra, uint Width, uint Height) item;
             try
             {
-                if (!reader.WaitToReadAsync(token).AsTask().GetAwaiter().GetResult())
+                if (!_frameQueue.TryTake(out item, Timeout.Infinite, token))
                 {
                     return;
                 }
-
-                if (!reader.TryRead(out item))
-                {
-                    continue;
-                }
-            }
-            catch (ChannelClosedException)
-            {
-                return;
             }
             catch (OperationCanceledException)
             {
@@ -312,11 +307,7 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
             var now = DateTime.UtcNow;
             if (nextDeadline > now)
             {
-                try
-                {
-                    Task.Delay(nextDeadline - now, token).GetAwaiter().GetResult();
-                }
-                catch (OperationCanceledException)
+                if (WaitUntilDeadline(token, nextDeadline))
                 {
                     return;
                 }
@@ -514,28 +505,59 @@ internal sealed unsafe class Videodec2Decoder : IDisposable
         return bgraFrame;
     }
 
+    internal static bool WaitUntilDeadline(CancellationToken token, DateTime deadline)
+    {
+        var cancellationWaitHandle = token.WaitHandle;
+        while (true)
+        {
+            if (token.IsCancellationRequested)
+            {
+                return true;
+            }
+
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                return false;
+            }
+
+            var remainingMilliseconds = Math.Ceiling(remaining.TotalMilliseconds);
+            var waitMilliseconds = remainingMilliseconds >= int.MaxValue
+                ? int.MaxValue
+                : Math.Max(1, (int)remainingMilliseconds);
+            if (cancellationWaitHandle.WaitOne(waitMilliseconds))
+            {
+                return true;
+            }
+        }
+    }
+
     public void Dispose()
     {
         lock (_gate)
         {
-            if (_disposed)
+            if (_disposed || _disposing)
             {
                 return;
             }
 
-            _disposed = true;
+            _disposing = true;
         }
 
-        // Outside _gate: the worker needs it to finish whatever item it's mid-call on.
-        _workerCts.Cancel();
+        RequestDrain();
+
+        // Finish all accepted access units before stopping the decode worker. Once it has
+        // exited, closing the frame queue lets the scheduler present every completed frame.
         _workChannel.Writer.TryComplete();
-        _frameQueue.Writer.TryComplete();
-        _worker.Join(TimeSpan.FromSeconds(2));
-        _scheduler.Join(TimeSpan.FromSeconds(2));
+        _worker.Join();
+        _frameQueue.CompleteAdding();
+        _scheduler.Join();
         _workerCts.Dispose();
 
         lock (_gate)
         {
+            _disposed = true;
+            _disposing = false;
             if (_swsContext != null)
             {
                 ffmpeg.sws_freeContext(_swsContext);

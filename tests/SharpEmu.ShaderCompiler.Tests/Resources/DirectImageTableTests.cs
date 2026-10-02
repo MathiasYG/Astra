@@ -7,6 +7,8 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using SharpEmu.ShaderCompiler;
+
 namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DirectImageTableTests
@@ -28,6 +30,41 @@ public sealed class DirectImageTableTests
             ScalarLoad(56, 0, 4, 8, immediateOffset: 0x100, dynamicOffsetRegister: 106),
             Image(64, "ImageLoad", 4, dmask: 1, vectorAddress: 1),
             EndProgram(72));
+    }
+
+    internal static Gen5ShaderProgram CreateWaveIndexedReadLaneProgram(bool selfAddressed, bool restoreExec = true)
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            ScalarLoad(0, 0, 16, immediateOffset: 0x80),
+            Sop1(8, "SFF1I32B32", 18, Gen5Operand.Scalar(16)),
+            Sop2(12, "SMulI32", 19, Gen5Operand.Scalar(18), new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x90)),
+            MoveVectorFromScalar(16, 34, 18),
+            Vop2(20, "VLshlrevB32", 15, Operand(4), Gen5Operand.Vector(34)),
+            Vop3(24, "VLshlAddU32", selfAddressed ? 15u : 16u, Gen5Operand.Vector(15), Operand(3), Gen5Operand.Vector(15)),
+            Sop2(32, "SLshlB32", 20, Operand(1), Gen5Operand.Scalar(18)),
+            Sop2(36, "SXorB32", 16, Gen5Operand.Scalar(20), Gen5Operand.Scalar(16)),
+            Vop2(40, "VAddI32", 15, new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x40), Gen5Operand.Vector(selfAddressed ? 15u : 16u)),
+            GlobalMemory(44, "GlobalLoadDword", 0, 15, 22, 0),
+            Sop1(52, "SMovB64", 12, Gen5Operand.Scalar(126)),
+            Sop1(56, "SFF1I32B64", 24, Gen5Operand.Scalar(12)),
+            new(60, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(22), Gen5Operand.Scalar(24), Gen5Operand.Scalar(24)], [Gen5Operand.Scalar(106)], null),
+            new(68, Gen5ShaderEncoding.Vop3, "VCmpEqU32", [0u, 0u],
+                [Gen5Operand.Scalar(106), Gen5Operand.Vector(22)], [Gen5Operand.Scalar(14)], new Gen5Vop3Control(0, 0, 0, false, 0, 14)),
+            Sop1(76, "SAndSaveexecB64", 28, Gen5Operand.Scalar(14)),
+            Branch(80, "SCbranchExecz", 8),
+            Sop2(84, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
+            Sop2(88, "SAddI32", 107, Gen5Operand.Scalar(106), Operand(16)),
+            ScalarLoad(92, 0, 4, 4, immediateOffset: 0x100, dynamicOffsetRegister: 106),
+            ScalarLoad(100, 0, 8, 4, immediateOffset: 0x100, dynamicOffsetRegister: 107),
+            Image(108, "ImageLoad", 4, dmask: 1, vectorAddress: 1),
+            Sop2(116, "SAndn2B64", 12, Gen5Operand.Scalar(12), Gen5Operand.Scalar(14)),
+            restoreExec ? Sop1(120, "SMovB64", 126, Gen5Operand.Scalar(28)) : Nop(120),
+            Branch(124, "SCbranchScc1", -18),
+            EndProgram(128),
+        };
+        return Program([.. instructions]);
     }
 
     public static Gen5ShaderProgram CreateProgram(uint mask = 1, bool split = true, bool bitScan = true)
@@ -107,41 +144,72 @@ public sealed class DirectImageTableTests
         Assert.Equal(0u, selector.KeyBound);
         Assert.Equal(new WaveIndexedImageSelector(0x80, 0x40, 0x90), selector.WaveIndexed);
 
-        bool Read(ulong address, out uint word)
-        {
-            word = 0;
-            if (address == 0x1000 + 0x80)
-            {
-                word = (1u << 1) | (1u << 4);
-                return true;
-            }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: ReadWaveIndexedMemory), ref snapshot, ref specialization));
+        Assert.Equal(2, snapshot.Images.Length);
+    }
 
-            if (address == 0x1000 + 0x40 + 0x90 || address == 0x1000 + 0x40 + 4 * 0x90)
-            {
-                word = address == 0x1000 + 0x40 + 0x90 ? 2u : 5u;
-                return true;
-            }
-
-            if (address < 0x1000 + 0x100 || address >= 0x1000 + 0x100 + 6 * 32)
-                return false;
-            var relative = address - 0x1000 - 0x100;
-            var record = relative / 32;
-            if (record is not (2 or 5))
-                return false;
-            word = (relative % 32 / 4) switch
-            {
-                0 => (record & 1) == 0 ? 0x2000u : 0x1000u,
-                1 => 20u << 20,
-                3 => 0xFACu | (9u << 28),
-                _ => 0,
-            };
-            return true;
-        }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReadLaneWaterfallSelectsWaveIndexedDescriptors(bool selfAddressed)
+    {
+        var program = CreateWaveIndexedReadLaneProgram(selfAddressed);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.True(selector.Dense, "dense");
+        Assert.Equal(0x100u, selector.TableOffset);
+        Assert.Equal(new WaveIndexedImageSelector(0x80, 0x40, 0x90), selector.WaveIndexed);
+        Assert.True(Assert.Single(plan.IndirectImages).KeyIsAddressOffset, "address-offset key");
 
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
-        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: ReadWaveIndexedMemory), ref snapshot, ref specialization, out var failure), $"materialize {failure}");
         Assert.Equal(2, snapshot.Images.Length);
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 2),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 64, ThreadCountX = 64 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Fact]
+    public void ReadLaneWithoutRestoredExecutionIsNotWaveIndexed()
+    {
+        Assert.Throws<ResourcePlanException>(() =>
+            ShaderResourcePlan.Extract(CreateWaveIndexedReadLaneProgram(selfAddressed: true, restoreExec: false), ShaderStage.Compute, Hash, 0, 2));
+    }
+
+    private static bool ReadWaveIndexedMemory(ulong address, out uint word)
+    {
+        word = 0;
+        if (address == 0x1000 + 0x80)
+        {
+            word = (1u << 1) | (1u << 4);
+            return true;
+        }
+
+        if (address == 0x1000 + 0x40 + 0x90 || address == 0x1000 + 0x40 + 4 * 0x90)
+        {
+            word = address == 0x1000 + 0x40 + 0x90 ? 2u : 5u;
+            return true;
+        }
+
+        if (address < 0x1000 + 0x100 || address >= 0x1000 + 0x100 + 6 * 32)
+            return false;
+        var relative = address - 0x1000 - 0x100;
+        var record = relative / 32;
+        if (record is not (2 or 5))
+            return false;
+        word = (relative % 32 / 4) switch
+        {
+            0 => (record & 1) == 0 ? 0x2000u : 0x1000u,
+            1 => 20u << 20,
+            3 => 0xFACu | (9u << 28),
+            _ => 0,
+        };
+        return true;
     }
 
     public static (ResourceSnapshot Snapshot, ShaderCompileRequest Request) PrepareMixedDimensions(uint mask, bool arrayFirst)
@@ -413,5 +481,227 @@ public sealed class DirectImageTableTests
         Assert.Equal(incompatible ? ResourceMaterializationFailure.IncompatibleImageCandidates : ResourceMaterializationFailure.Other, failure);
         Assert.Same(original, snapshot);
         Assert.Same(originalSpecialization, specialization);
+    }
+}
+
+public sealed class CountedImageTests
+{
+    private const uint Stride = 0x178;
+
+    private static Gen5ShaderProgram CountedProgram(bool clearExec = true, bool expandExec = false)
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            MoveScalar(0, 8, 0),
+            Sop2(4, "SMulI32", 10, Gen5Operand.Scalar(8), Operand(Stride)),
+            Sop2(8, "SAddU32", 11, Gen5Operand.Scalar(10), Operand(0x1B8)),
+            Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(9)),
+            clearExec ? Sop2(16, "SCselectB64", 36, Gen5Operand.Scalar(126), Operand(0)) : Nop(16),
+            clearExec ? Sop1(20, "SMovB64", 126, Gen5Operand.Scalar(36)) : Nop(20),
+            expandExec ? Sop1(24, "SMovB64", 126, Operand(1)) : Nop(24),
+            Branch(28, "SCbranchExecz", 8),
+            ScalarLoad(32, 0, 40, count: 4, immediateOffset: 0x2B8, dynamicOffsetRegister: 10),
+            ScalarLoad(40, 0, 32, count: 8, dynamicOffsetRegister: 11),
+            Image(48, "ImageSampleLz", 32, 40),
+            Sop2(56, "SAddU32", 8, Gen5Operand.Scalar(8), Operand(1)),
+            Branch(60, "SBranch", -15),
+            EndProgram(64),
+        };
+        return Program([.. instructions]);
+    }
+
+    private static uint[] UserData(uint count)
+    {
+        var data = new uint[16];
+        data[0] = 0x1000;
+        data[8] = 0;
+        data[9] = count;
+        return data;
+    }
+
+    private static Gen5ShaderProgram ScalarBranchTableProgram(bool skipLoadsOnFalse = true, bool incrementFromZero = true)
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            MoveScalar(0, 8, incrementFromZero ? 0u : 0xFFFFFFFFu),
+            Sop2(4, "SLshlB32", 10, Gen5Operand.Scalar(8), Operand(5)),
+            Sopc(8, "SCmpLtI32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(9)),
+            Branch(12, skipLoadsOnFalse ? "SCbranchScc0" : "SCbranchScc1", 8),
+            ScalarLoad(16, 0, 40, count: 4, immediateOffset: 0x2B8),
+            ScalarLoad(24, 0, 32, count: 8, dynamicOffsetRegister: 10),
+            Image(32, "ImageSampleLz", 32, 40),
+            Sop2(40, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+            Branch(44, "SBranch", -11),
+            EndProgram(48),
+        };
+        return Program([.. instructions]);
+    }
+
+    private static Gen5ShaderProgram NestedLoopImageTableProgram(bool continueOnTrue = true, uint bound = 6) => Program(
+        MoveScalar(0, 8, 0),
+        Sop2(4, "SLshlB32", 10, Gen5Operand.Scalar(8), Operand(5)),
+        ScalarLoad(8, 0, 32, count: 8, dynamicOffsetRegister: 10),
+        MoveScalar(16, 9, 0),
+        Image(20, "ImageLoad", 32),
+        Sop2(28, "SAddI32", 9, Gen5Operand.Scalar(9), Operand(1)),
+        Sopc(32, "SCmpLtI32", Gen5Operand.Scalar(9), Operand(4)),
+        Branch(36, "SCbranchScc1", -5),
+        Sop2(40, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+        Sopc(44, "SCmpLtI32", Gen5Operand.Scalar(8), Operand(bound)),
+        Branch(48, continueOnTrue ? "SCbranchScc1" : "SCbranchScc0", -12),
+        EndProgram(52));
+
+    [Theory]
+    [InlineData(false, 6u)]
+    [InlineData(true, 0u)]
+    public void PostTestLoopNeedsPositiveBoundAndCorrectBranch(bool continueOnTrue, uint bound)
+    {
+        var error = Assert.Throws<ResourcePlanException>(() =>
+            Extract(NestedLoopImageTableProgram(continueOnTrue, bound)));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    [Fact]
+    public void NestedLoopCarriesBoundedImageDescriptorAcrossInnerLoop()
+    {
+        var plan = Extract(NestedLoopImageTableProgram());
+        var image = Assert.Single(plan.Info.Images);
+        var selector = Assert.IsType<IndirectImageSelector>(plan.DescriptorSources[(int)image.Source].IndirectImage);
+        Assert.Equal(32u, selector.EntryStride);
+        Assert.NotNull(selector.RuntimeKeyBound);
+
+        var memory = ResourceTrackerTests.LinearMemory();
+        var descriptor = ResourceTrackerTests.ImageDescriptor();
+        for (ulong index = 0; index < 6; index++)
+            ResourceTrackerTests.WriteImage(memory, 0x1000 + index * 32, descriptor);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(UserData(6), readMemory: memory.Read,
+            readCleanMemory: memory.Read), ref snapshot, ref specialization));
+        Assert.Equal(descriptor, Assert.Single(snapshot.Images));
+    }
+
+    [Fact]
+    public void SignedScalarBranchGuardsShiftedDescriptorTable()
+    {
+        var plan = Extract(ScalarBranchTableProgram());
+        var image = Assert.Single(plan.Info.Images);
+        var selector = Assert.IsType<IndirectImageSelector>(plan.DescriptorSources[(int)image.Source].IndirectImage);
+        Assert.Equal(32u, selector.EntryStride);
+        Assert.NotNull(selector.RuntimeKeyBound);
+
+        var memory = ResourceTrackerTests.LinearMemory();
+        var descriptor = ResourceTrackerTests.ImageDescriptor();
+        ResourceTrackerTests.WriteImage(memory, 0x1000, descriptor);
+        ResourceTrackerTests.WriteImage(memory, 0x1000 + 32, descriptor);
+        for (uint dword = 0; dword < 4; dword++)
+            memory.At(0x1000 + 0x2B8 + dword * 4) = 0;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(UserData(2), readMemory: memory.Read,
+                readCleanMemory: memory.Read),
+            ref snapshot, ref specialization));
+        Assert.Equal(descriptor, Assert.Single(snapshot.Images));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void ScalarBranchMustSkipReadsAndStartAtZero(bool skipsOnFalse, bool startsAtZero)
+    {
+        var error = Assert.Throws<ResourcePlanException>(() =>
+            Extract(ScalarBranchTableProgram(skipsOnFalse, startsAtZero)));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    private static TestWordMemory Table(uint count, bool varyingSampler = false)
+    {
+        var memory = ResourceTrackerTests.LinearMemory();
+        var image = ResourceTrackerTests.ImageDescriptor();
+        for (uint entry = 0; entry < count; entry++)
+        {
+            ResourceTrackerTests.WriteImage(memory, 0x1000 + 0x1B8 + entry * Stride, image);
+            memory.At(0x1000 + 0x2B8 + entry * Stride) = varyingSampler && entry == 1 ? 1u : 0u;
+        }
+        return memory;
+    }
+
+    [Fact]
+    public void GuardedStridedTablesUseTheRuntimeCount()
+    {
+        var plan = Extract(CountedProgram());
+        var image = Assert.Single(plan.Info.Images);
+        var sampler = Assert.Single(plan.Info.Samplers);
+        var selector = Assert.IsType<IndirectImageSelector>(plan.DescriptorSources[(int)image.Source].IndirectImage);
+        Assert.Equal(Stride, selector.EntryStride);
+        Assert.NotNull(selector.RuntimeKeyBound);
+        Assert.NotNull(plan.DescriptorSources[(int)sampler.Source].CountedSampler);
+        Assert.Single(plan.IndirectImages);
+
+        var memory = Table(3);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(UserData(3), readCleanMemory: memory.Read),
+            ref snapshot, ref specialization));
+        Assert.Equal(ResourceTrackerTests.ImageDescriptor(), Assert.Single(snapshot.Images));
+        Assert.Equal([0u, 0u, 0u, 0u], Assert.Single(snapshot.Samplers));
+    }
+
+    [Fact]
+    public void ZeroCountNeedsNoDescriptorReads()
+    {
+        var plan = Extract(CountedProgram());
+        var reads = 0;
+        bool Reject(ulong address, out uint word) { reads++; word = 0; return false; }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(UserData(0), readCleanMemory: Reject),
+            ref snapshot, ref specialization));
+        Assert.Equal(0, reads);
+        Assert.All(Assert.Single(snapshot.Images), word => Assert.Equal(0u, word));
+    }
+
+    [Fact]
+    public void DifferentReachableSamplersFailWithoutPublishing()
+    {
+        var plan = Extract(CountedProgram());
+        var memory = Table(2, varyingSampler: true);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.False(ResourceMaterializer.Materialize(plan, Inputs(UserData(2), readCleanMemory: memory.Read),
+            ref snapshot, ref specialization));
+        Assert.Empty(snapshot.Images);
+    }
+
+    [Fact]
+    public void DistinctReachableImagesCompileWithTheIndexMapping()
+    {
+        var plan = Extract(CountedProgram());
+        var memory = Table(2);
+        memory.At(0x1000 + 0x1B8 + Stride) += 0x100;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(UserData(2), readCleanMemory: memory.Read),
+            ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(2, resources.Info.Images.Count);
+        Assert.True(resources.Info.Images[0].IndirectSearchIterations > 0);
+        var layout = BindingLayout.Allocate(
+            resources.Info,
+            BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 64),
+            false,
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
+            false);
+        var request = new ShaderCompileRequest(plan, resources, layout);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void MissingGuardOrExpandedExecRejectsTheDescriptorPlan(bool clearExec, bool expandExec)
+    {
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(CountedProgram(clearExec, expandExec)));
+        Assert.Contains("not a valid runtime value", error.Message);
     }
 }

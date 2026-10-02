@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using LibAtrac9;
+using SharpEmu.Libs.Audio;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Audio;
@@ -48,5 +49,16 @@ public sealed class Atrac9ConfigTests
     public void InvalidConfigIsRejected(byte[] configData)
     {
         Assert.Throws<InvalidDataException>(() => new Atrac9Config(configData));
+    }
+
+    [Theory]
+    [InlineData(0x0C)]
+    [InlineData(0x0E)]
+    public void ReservedChannelConfigurationIsRejected(byte secondByte)
+    {
+        byte[] config = [0xFE, secondByte, 0, 0];
+
+        Assert.Throws<InvalidDataException>(() => new Atrac9Config(config));
+        Assert.False(new Atrac9DecodeState().TryInitialize(config));
     }
 }

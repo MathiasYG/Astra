@@ -676,6 +676,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("begin_rendering 64x64x1 colors=1 samples=1", _host.Calls);
 
         banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
         _executor.DrawIndexed(1, banks, Indexed(3));
         Assert.Contains("begin_rendering 32x32x1 colors=2 samples=1", _host.Calls);
         Assert.Contains("create_graphics_pipeline colors=2 depth=False topology=TriangleList restart=False", _pipelines.Calls);

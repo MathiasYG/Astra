@@ -13,6 +13,7 @@ public static class ResourceMaterializer
 {
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
     private const ulong MaxIndirectImageProbes = 65536;
+    private const uint MaxCountedTableEntries = 4096;
 
     // Written to standard error like every specialization refusal; the host turns it
     // into its fatal.
@@ -138,6 +139,18 @@ public static class ResourceMaterializer
             return false;
         }
 
+        foreach (var source in plan.DescriptorSources)
+        {
+            if (source.ZeroExtentBufferSource is not { } bufferSource) continue;
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, [bufferSource], inputs.WithReader(inputs.ReadCleanMemory), [],
+                    evaluateTable: false, out var descriptors, out _) ||
+                descriptors.Count != 1 || descriptors[0].DwordCount != 4 || ScalarBufferSize(descriptors[0].Dwords) != 0)
+            {
+                SpecializationFailed("a dynamically loaded image or sampler descriptor has a nonempty source buffer");
+                return false;
+            }
+        }
+
         var cursor = 0;
         snapshot.Buffers = new uint[plan.Info.Buffers.Count][];
         for (var index = 0; index < snapshot.Buffers.Length; index++)
@@ -203,7 +216,7 @@ public static class ResourceMaterializer
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.HeapSource], cleanInputs, [], evaluateTable: false,
                         out var denseSources, out _))
                         return false;
-                    if (!MaterializeDenseIndirectImage(indirect, denseSources[0], image, image.R128, inputs, out var denseTable, out failure))
+                    if (!MaterializeDenseIndirectImage(plan, indirect, denseSources[0], image, image.R128, inputs, out var denseTable, out failure))
                         return false;
                     snapshot.Images[imageIndex] = denseTable.Descriptors[(int)denseTable.Candidates[0]].Dwords;
                     if (denseTable.Descriptors.Count > 1)
@@ -245,7 +258,27 @@ public static class ResourceMaterializer
 
         snapshot.Samplers = new uint[plan.Info.Samplers.Count][];
         for (var index = 0; index < snapshot.Samplers.Length; index++)
-            snapshot.Samplers[index] = values[cursor++].Dwords;
+        {
+            var source = plan.DescriptorSources[(int)plan.Info.Samplers[index].Source];
+            if (source.CountedSampler is not { } counted)
+            {
+                snapshot.Samplers[index] = values[cursor++].Dwords;
+                continue;
+            }
+
+            if (activeSources.Length != 0 && !activeSources[plan.Info.Samplers[index].Source])
+            {
+                snapshot.Samplers[index] = new uint[4];
+                continue;
+            }
+
+            if (!MaterializeCountedSampler(plan, counted, inputs, out var descriptor))
+            {
+                SpecializationFailed($"counted sampler resource {index} could not be represented by one sampler");
+                return false;
+            }
+            snapshot.Samplers[index] = descriptor;
+        }
 
         // Bounded runtime V# tables: the whole table is read and validated before it is
         // published, so a single unreadable candidate leaves the previous snapshot intact.
@@ -632,11 +665,14 @@ public static class ResourceMaterializer
         {
             var candidate = new uint[8];
             var heapOffset = key << 5;
-            for (uint dword = 0; dword < 8; dword++)
+            if (!ScalarBufferRangeRead.TryRead(heap.Dwords, heapOffset, 0, inputs, candidate))
             {
-                if (!ReadScalarBufferWord(heap.Dwords, heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                for (uint dword = 0; dword < 8; dword++)
                 {
-                    return false;
+                    if (!ReadScalarBufferWord(heap.Dwords, heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                    {
+                        return false;
+                    }
                 }
             }
 
@@ -667,6 +703,7 @@ public static class ResourceMaterializer
     }
 
     private static bool MaterializeDenseIndirectImage(
+        ShaderResourcePlan plan,
         IndirectImageSelector indirect,
         DescriptorWords heap,
         ImageResource image,
@@ -677,15 +714,30 @@ public static class ResourceMaterializer
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
-        if (heap.DwordCount != 2 || indirect.KeyBound == 0 || indirect.KeyBound > MaxIndirectImageProbes || inputs.ReadCleanMemory is null)
+        if (heap.DwordCount != 2 || inputs.ReadCleanMemory is null)
             return false;
 
+        uint count;
+        if (indirect.RuntimeKeyBound is { } runtimeBound)
+        {
+            if (!new RuntimeValueEvaluator(plan, inputs.WithReader(inputs.ReadCleanMemory))
+                    .Evaluate(runtimeBound, out count) || count > MaxCountedTableEntries ||
+                indirect.EntryStride < 32 ||
+                (count > 0 && (ulong)indirect.DynamicOffsetBase + (ulong)(count - 1) * indirect.EntryStride > uint.MaxValue))
+                return false;
+        }
+        else
+        {
+            count = indirect.KeyBound;
+            if (count == 0 || count > MaxIndirectImageProbes) return false;
+        }
+
         var baseAddress = (((ulong)heap.Dwords[1] << 32) | heap.Dwords[0]) & AddressMask;
-        var probed = new List<uint[]>((int)indirect.KeyBound);
-        for (uint key = 0; key < indirect.KeyBound; key++)
+        var probed = new List<uint[]>((int)Math.Max(count, 1));
+        for (uint key = 0; key < count; key++)
         {
             var candidate = new uint[8];
-            var entry = (ulong)indirect.TableOffset + ((ulong)key << 5);
+            var entry = (ulong)indirect.TableOffset + (ulong)key * indirect.EntryStride;
             for (uint dword = 0; dword < 8; dword++)
             {
                 var relative = entry + dword * sizeof(uint);
@@ -700,10 +752,12 @@ public static class ResourceMaterializer
             probed.Add(candidate);
         }
 
+        if (count == 0) probed.Add(new uint[8]);
+
         return FinishIndirectImage(
             probed,
-            Enumerable.Range(0, (int)indirect.KeyBound)
-                .Select(index => unchecked(indirect.DynamicOffsetBase + ((uint)index << 5))),
+            Enumerable.Range(0, (int)Math.Max(count, 1))
+                .Select(index => unchecked(indirect.DynamicOffsetBase + (uint)index * indirect.EntryStride)),
             out result,
             out failure);
     }
@@ -772,6 +826,41 @@ public static class ResourceMaterializer
         word = 0;
         return offset <= AddressMask && baseAddress <= AddressMask - offset &&
             inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(baseAddress + offset, out word);
+    }
+
+    private static bool MaterializeCountedSampler(
+        ShaderResourcePlan plan,
+        CountedSamplerSelector counted,
+        ResourceRuntimeInputs inputs,
+        out uint[] descriptor)
+    {
+        descriptor = new uint[4];
+        if (inputs.ReadCleanMemory is null || counted.EntryStride < 16) return false;
+        var cleanInputs = inputs.WithReader(inputs.ReadCleanMemory);
+        var evaluator = new RuntimeValueEvaluator(plan, cleanInputs);
+        if (!evaluator.Evaluate(counted.RuntimeKeyBound, out var count) || count > MaxCountedTableEntries ||
+            (count > 0 && (ulong)counted.DynamicOffsetBase + (ulong)(count - 1) * counted.EntryStride > uint.MaxValue))
+            return false;
+        if (count == 0) return true;
+        if (!RuntimeValueEvaluator.EvaluateSources(plan, [counted.HeapSource], cleanInputs, [],
+                evaluateTable: false, out var heapSources, out _) || heapSources.Count != 1 ||
+            heapSources[0].DwordCount != 2) return false;
+        var heap = heapSources[0].Dwords;
+        var baseAddress = (((ulong)heap[1] << 32) | heap[0]) & AddressMask;
+        for (uint entry = 0; entry < count; entry++)
+        {
+            var offset = (ulong)counted.TableOffset + (ulong)entry * counted.EntryStride;
+            var candidate = new uint[4];
+            for (uint dword = 0; dword < 4; dword++)
+            {
+                var relative = offset + dword * sizeof(uint);
+                if (relative > AddressMask || baseAddress > AddressMask - relative ||
+                    !inputs.ReadCleanMemory(baseAddress + relative, out candidate[dword])) return false;
+            }
+            if (entry == 0) descriptor = candidate;
+            else if (!descriptor.AsSpan().SequenceEqual(candidate)) return false;
+        }
+        return true;
     }
 
     private static bool FinishIndirectImage(
@@ -1036,7 +1125,9 @@ public static class ResourceMaterializer
             }
 
             var storage = baseImage.ResourceClass == ImageResourceClass.Storage;
-            var conversionFormat = ImageConversionFormat(format);
+            // Preserve narrow storage formats so widened backing channels can be kept at guest defaults.
+            var conversionFormat = storage && (format is GuestImageFormat.Format8Srgb or GuestImageFormat.Format8x2Srgb)
+                ? format : ImageConversionFormat(format);
             var shaderSwizzle = storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
             var rawSintStorage = storage && format == GuestImageFormat.Format32Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             var numericClass = GuestImageFormat.SampledNumericClass(format);
@@ -1536,5 +1627,35 @@ public static class ResourceMaterializer
         }
 
         return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory };
+    }
+}
+
+internal static class ScalarBufferRangeRead
+{
+    // Use one clean read only when every scalar load is in bounds and contiguous.
+    // A refusal leaves the caller's original word reads and OOB handling intact.
+    internal static bool TryRead(ReadOnlySpan<uint> descriptor, uint dynamicOffset,
+        uint immediateOffset, ResourceRuntimeInputs inputs, Span<uint> words)
+    {
+        if (inputs.ReadCleanWords is null || descriptor.Length != 4 || words.IsEmpty)
+            return false;
+
+        var lastImmediate = (ulong)immediateOffset + (ulong)(words.Length - 1) * sizeof(uint);
+        if (lastImmediate > uint.MaxValue)
+            return false;
+
+        const ulong addressMask = 0x0000_FFFF_FFFF_FFFFul;
+        var stride = (descriptor[1] >> 16) & 0x3FFF;
+        var size = stride == 0 ? descriptor[2] : (ulong)stride * descriptor[2];
+        var offset = ((ulong)dynamicOffset + immediateOffset) & ~3ul;
+        var length = (ulong)words.Length * sizeof(uint);
+        if (offset > size || length > size - offset)
+            return false;
+
+        var baseAddress = ((descriptor[0] | ((ulong)descriptor[1] << 32)) & addressMask) & ~3ul;
+        if (offset > addressMask - baseAddress || length - 1 > addressMask - baseAddress - offset)
+            return false;
+
+        return inputs.ReadCleanWords(baseAddress + offset, words);
     }
 }

@@ -75,6 +75,19 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         StaticParameters = parameters,
     };
 
+    private static GraphicsPipelineDescription With(GraphicsPipelineDescription description, PipelineRenderingState rendering) => new()
+    {
+        Rendering = rendering,
+        VertexInput = description.VertexInput,
+        VertexInfo = description.VertexInfo,
+        VertexProgram = description.VertexProgram,
+        VertexStage = description.VertexStage,
+        PixelInfo = description.PixelInfo,
+        PixelProgram = description.PixelProgram,
+        PixelStage = description.PixelStage,
+        StaticParameters = description.StaticParameters,
+    };
+
     [Fact]
     public void StaticParameters_FoldTheBlendCullAndTopologyRegisters()
     {
@@ -209,6 +222,18 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             PixelProgram = description.PixelProgram, PixelStage = description.PixelStage, StaticParameters = description.StaticParameters,
         };
         Assert.NotEqual(key, ShaderPipelineCache.KeyOf(renderingChanged));
+
+        var sampleCountChanged = new PipelineRenderingState
+        {
+            ColorCount = description.Rendering.ColorCount,
+            DepthFormat = description.Rendering.DepthFormat,
+            StencilFormat = description.Rendering.StencilFormat,
+            DepthSamples = description.Rendering.DepthSamples,
+        };
+        Array.Copy(description.Rendering.ColorFormats, sampleCountChanged.ColorFormats, sampleCountChanged.ColorFormats.Length);
+        Array.Copy(description.Rendering.ColorSamples, sampleCountChanged.ColorSamples, sampleCountChanged.ColorSamples.Length);
+        sampleCountChanged.ColorSamples[0] = 2;
+        Assert.NotEqual(key, ShaderPipelineCache.KeyOf(With(description, sampleCountChanged)));
         Assert.Equal(key, ShaderPipelineCache.KeyOf(With(description, description.StaticParameters)));
     }
 
@@ -301,6 +326,26 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit);
 
         Assert.Equal(expectedMask, description.StaticParameters.GetColorMask(0));
+    }
+
+    [Fact]
+    public void ColorTarget_WithoutAPixelStage_IsNotWritten()
+    {
+        var banks = Banks();
+        banks.Context.RenderTargetMask = 0xF;
+        var programs = Programs();
+        var resolution = new ColorTargetResolution(
+            default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
+        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
+        var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
+        rendering.ColorAttachments[0] = new RenderingAttachment(
+            default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
+
+        var description = ShaderPipelineCache.BuildGraphicsDescription(
+            colors, default, programs.VertexInput, null, banks.Context, in rendering, PrimitiveTopology.TriangleList, false, false,
+            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit);
+
+        Assert.Equal(0u, description.StaticParameters.GetColorMask(0));
     }
 
     [Fact]

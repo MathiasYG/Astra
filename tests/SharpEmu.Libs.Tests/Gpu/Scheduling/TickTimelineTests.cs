@@ -30,6 +30,7 @@ public sealed class TickTimelineTests
     public void RefreshNeverMovesTheKnownTickBackward()
     {
         var timeline = new TickTimeline(_device);
+        for (var tick = 0; tick < 6; tick++) timeline.ReserveTick();
         _device.Complete(5);
         timeline.RefreshCompletedTick();
         Assert.Equal(5UL, timeline.CompletedTick);
@@ -63,6 +64,7 @@ public sealed class TickTimelineTests
     public async Task WaitReturnsEarlyWhenKnownOrAfterRefreshAndOtherwiseWaitsOnTheDevice()
     {
         var timeline = new TickTimeline(_device);
+        for (var tick = 0; tick < 4; tick++) timeline.ReserveTick();
         _device.Complete(2);
         timeline.RefreshCompletedTick();
         var reads = _device.Log.Length;
@@ -81,6 +83,34 @@ public sealed class TickTimelineTests
         _device.Complete(4);
         Assert.True(await SchedulingTestSupport.CompletesWithin(waiter, 5000));
         Assert.Equal(4UL, timeline.CompletedTick);
+    }
+
+    [Fact]
+    public void UnissuedCounterDoesNotCompletePendingTicks()
+    {
+        using var fatal = new FatalScope();
+        var timeline = new TickTimeline(_device);
+        timeline.ReserveTick();
+        _device.Complete(2);
+
+        Assert.Throws<SchedulerFatalException>(() => timeline.RefreshCompletedTick());
+        Assert.Equal(0UL, timeline.CompletedTick);
+        Assert.False(timeline.IsTickComplete(1));
+        Assert.Equal("GPU timeline reported an unissued completion value: completed=2, next=2.", fatal.Messages.Single());
+    }
+
+    [Fact]
+    public void DeviceLostMaximumCounterDoesNotReleasePendingTicks()
+    {
+        using var fatal = new FatalScope();
+        var timeline = new TickTimeline(_device);
+        timeline.ReserveTick();
+        _device.Complete(ulong.MaxValue);
+
+        Assert.Throws<SchedulerFatalException>(() => timeline.RefreshCompletedTick());
+        Assert.Equal(0UL, timeline.CompletedTick);
+        Assert.False(timeline.IsTickComplete(1));
+        Assert.Contains("completed=18446744073709551615", fatal.Messages.Single());
     }
 
     [Fact]

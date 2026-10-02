@@ -17,7 +17,44 @@ public enum SurfaceMetadataKind : byte
 public sealed class SurfaceMetadata
 {
     public SurfaceMetadataKind Kind;
-    public uint ClearMask;
+    private uint _clearMask;
+    // The 32-bit mask covers the first slices. Higher slices share the same
+    // default clear state, with sparse exceptions after individual writes.
+    private bool _extraSlicesClearByDefault;
+    private readonly HashSet<uint> _extraSliceExceptions = [];
+
+    public uint ClearMask
+    {
+        get => _clearMask;
+        set
+        {
+            _clearMask = value;
+            _extraSlicesClearByDefault = value == uint.MaxValue;
+            _extraSliceExceptions.Clear();
+        }
+    }
+
+    public bool IsSliceClear(uint slice) => slice < 32
+        ? (_clearMask & (1u << (int)slice)) != 0
+        : _extraSlicesClearByDefault != _extraSliceExceptions.Contains(slice);
+
+    public void SetSliceClear(uint slice, bool isClear)
+    {
+        if (slice < 32)
+        {
+            if (isClear)
+                _clearMask |= 1u << (int)slice;
+            else
+                _clearMask &= ~(1u << (int)slice);
+            return;
+        }
+
+        if (isClear == _extraSlicesClearByDefault)
+            _extraSliceExceptions.Remove(slice);
+        else
+            _extraSliceExceptions.Add(slice);
+    }
+
     public uint FillValue = 0xffffffff;
     public ulong FillSize;
 }

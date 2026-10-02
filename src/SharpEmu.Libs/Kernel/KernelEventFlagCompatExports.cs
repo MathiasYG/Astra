@@ -277,12 +277,16 @@ public static class KernelEventFlagCompatExports
                     }
 
                     // Deadline expiry: report timeout with the current bits.
-                    if (timeoutAddress != 0)
+                    lock (state.Gate)
                     {
-                        _ = TryWriteUInt32(ctx, timeoutAddress, 0);
-                    }
+                        state.WaitingThreads = Math.Max(0, state.WaitingThreads - 1);
+                        if (timeoutAddress != 0)
+                        {
+                            _ = TryWriteUInt32(ctx, timeoutAddress, 0);
+                        }
 
-                    _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
+                        _ = TryWriteResultPattern(ctx, resultAddress, state.Bits);
+                    }
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
                 },
                 () =>

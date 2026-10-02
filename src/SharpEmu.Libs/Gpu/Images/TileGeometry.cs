@@ -308,8 +308,13 @@ public static partial class TileGeometry
             return false;
         }
 
-        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB &&
-            GuestPixelFormats.RenderTargetBytesPerElement(format) != element.Bytes)
+        // A texture may use the render-target swizzle even when its format cannot
+        // be bound as a render target. Geometry depends on element size, while
+        // renderability is checked at the image-binding boundary.
+        if ((kind == TileBlockKind.Depth64KB &&
+             GuestPixelFormats.RenderTargetBytesPerElement(format) != element.Bytes) ||
+            (kind == TileBlockKind.RenderTarget64KB &&
+             (element.TexelWidth != 1 || element.TexelHeight != 1)))
         {
             return false;
         }

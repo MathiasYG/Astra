@@ -184,7 +184,7 @@ public sealed class PresenterSubmissionTests
         finally
         {
             device.CompleteOnSubmit = true;
-            device.Complete(ulong.MaxValue);
+            device.Complete(scheduler.CurrentTick - 1);
         }
     }
 
@@ -244,7 +244,7 @@ public sealed class PresenterSubmissionTests
         finally
         {
             device.CompleteOnSubmit = true;
-            device.Complete(ulong.MaxValue);
+            device.Complete(scheduler.CurrentTick - 1);
             wake();
             if (waiter is not null)
             {
@@ -517,3 +517,4 @@ public sealed class PresenterSubmissionTests
     private static void Invoke(object target, string name, params object?[] args) =>
         target.GetType().GetMethod(name, InstanceMembers)!.Invoke(target, args);
 }
+

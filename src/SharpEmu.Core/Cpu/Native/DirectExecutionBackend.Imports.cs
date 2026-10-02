@@ -586,9 +586,12 @@ public sealed partial class DirectExecutionBackend
 				{
 					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
 				}
-				Console.Error.WriteLine(
-					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
-					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				if (ShouldLogUnresolvedImport(importStubEntry.Nid, out var unresolvedCount))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] Import#{num} unresolved occurrence={unresolvedCount}: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
+						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				}
 				if (importStubEntry.Nid == "L-Q3LEjIbgA")
 				{
 					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
@@ -1633,6 +1636,9 @@ public sealed partial class DirectExecutionBackend
 		var expectedUserServiceNoEvent =
 			string.Equals(nid, "yH17Q6NWtVg", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960007);
+		var expectedSystemServiceNoEvent =
+			string.Equals(nid, "656LMQSrg6U", StringComparison.Ordinal) &&
+			resultValue == unchecked((int)0x80A10004);
 		var expectedPrivacyInvalidParameter =
 			string.Equals(nid, "D-CzAxQL0XI", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960009);
@@ -1647,6 +1653,7 @@ public sealed partial class DirectExecutionBackend
 			!expectedPollSemaBusy &&
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
+			!expectedSystemServiceNoEvent &&
 			!expectedPrivacyInvalidParameter &&
 			!expectedPlayGoChunkEnumerationEnd)
 		{
@@ -1660,6 +1667,19 @@ public sealed partial class DirectExecutionBackend
 
 		var key = nid + "\0" + resultValue;
 		int count;
+		lock (_importResultLogSampleGate)
+		{
+			_importResultLogSamples.TryGetValue(key, out count);
+			count++;
+			_importResultLogSamples[key] = count;
+		}
+
+		return count <= 8 || count % 10000 == 0;
+	}
+
+	private bool ShouldLogUnresolvedImport(string nid, out int count)
+	{
+		var key = "unresolved\0" + nid;
 		lock (_importResultLogSampleGate)
 		{
 			_importResultLogSamples.TryGetValue(key, out count);
@@ -2364,6 +2384,12 @@ public sealed partial class DirectExecutionBackend
 		Console.Error.WriteLine(
 			$"[LOADER][WARN] bootstrap_bridge unresolved: handle=0x{bridgeHandle:X} symbol='{symbolName}' out=0x{outputAddress:X16}");
 		return OrbisGen2Result.ORBIS_GEN2_OK;
+	}
+
+	public bool TryResolveGuestSymbol(string symbolName, out ulong address)
+	{
+		return TryResolveRuntimeSymbolAddress(symbolName, out address) &&
+			IsDirectImportTargetUsable(address);
 	}
 
 	private bool TryResolveRuntimeSymbolAddress(string symbolName, out ulong address)

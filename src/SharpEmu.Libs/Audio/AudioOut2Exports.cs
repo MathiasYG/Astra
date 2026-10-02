@@ -137,9 +137,13 @@ public static class AudioOut2Exports
         public uint GrainSamples { get; }
         public ulong PcmAddress;
 
-        public int PcmPending;
+        public PendingPcm? PcmPending;
 
     }
+
+    // Attribute input can live on the caller's stack and be reused as soon as
+    // PortSetAttributes returns. The deferred host mixer owns the captured grain.
+    private sealed record PendingPcm(byte[] Samples);
 
     // Two host streams: primary FMOD context (menus) and everything else
     // (Bink/intro). Mixing those into one waveOut re-crunched audio; the OS
@@ -359,9 +363,10 @@ public static class AudioOut2Exports
             return SetReturn(ctx, 0);
         }
 
-        // Host Submit already blocks on the waveOut queue; only fall back to
-        // software pacing when nothing was queued (silence / non-primary ctx).
-        if (!TrySubmitContextAudio(ctx, context))
+        // A nonblocking push must not wait for a silent grain. The caller may
+        // hold its own mutex while pushing; sleeping here stalls other guest
+        // workers even though no audio was submitted to the host queue.
+        if (!TrySubmitContextAudio(ctx, context, out _) && blocking != 0)
         {
             context.PaceAdvance();
         }
@@ -378,7 +383,8 @@ public static class AudioOut2Exports
     {
         if (Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var state))
         {
-            if (!TrySubmitContextAudio(ctx, state))
+            var submitted = TrySubmitContextAudio(ctx, state, out var hasPcm);
+            if (!submitted && hasPcm)
             {
                 state.PaceAdvance();
             }
@@ -490,7 +496,19 @@ public static class AudioOut2Exports
             }
 
             port.PcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcm);
-            Volatile.Write(ref port.PcmPending, port.PcmAddress != 0 ? 1 : 0);
+            if (port.PcmAddress == 0)
+            {
+                Interlocked.Exchange(ref port.PcmPending, null);
+            }
+            else
+            {
+                if (!TryDecodeDataFormat(port.DataFormat, out var channels, out var bytesPerSample, out _))
+                    return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+                var samples = new byte[checked((int)port.GrainSamples * channels * bytesPerSample)];
+                if (!ctx.Memory.TryRead(port.PcmAddress, samples))
+                    return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                Interlocked.Exchange(ref port.PcmPending, new PendingPcm(samples));
+            }
             var n = Interlocked.Increment(ref _attributePcmTraceCount);
             if (n <= 8 || n % 500 == 0)
             {
@@ -896,8 +914,9 @@ public static class AudioOut2Exports
         }
     }
 
-    private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context)
+    private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context, out bool hasPcm)
     {
+        hasPcm = false;
         var frames = checked((int)context.GrainSamples);
         if (frames <= 0)
         {
@@ -907,7 +926,6 @@ public static class AudioOut2Exports
         lock (HostSubmitGate)
         {
             var mix = ArrayPool<float>.Shared.Rent(frames * 2);
-            var source = ArrayPool<byte>.Shared.Rent(frames * 16 * sizeof(float));
             var output = ArrayPool<byte>.Shared.Rent(frames * AudioPcmConversion.OutputFrameSize);
             try
             {
@@ -916,24 +934,24 @@ public static class AudioOut2Exports
                 foreach (var port in Ports.Values)
                 {
                     if (port.ContextHandle != context.Handle ||
-                        port.PcmAddress == 0 ||
-                        Interlocked.Exchange(ref port.PcmPending, 0) == 0 ||
                         !TryDecodeDataFormat(port.DataFormat, out var ch, out var bps, out var isFloat))
                     {
                         continue;
                     }
 
-                    var byteLength = checked(frames * ch * bps);
-                    if (byteLength <= 0 || byteLength > source.Length)
+                    var pending = Interlocked.Exchange(ref port.PcmPending, null);
+                    if (pending is null)
                     {
                         continue;
                     }
 
-                    var sourceSpan = source.AsSpan(0, byteLength);
-                    if (!ctx.Memory.TryRead(port.PcmAddress, sourceSpan))
+                    var byteLength = checked(frames * ch * bps);
+                    if (byteLength != pending.Samples.Length)
                     {
                         continue;
                     }
+
+                    var sourceSpan = pending.Samples.AsSpan();
 
                     MixPortIntoStereo(
                         sourceSpan,
@@ -951,6 +969,8 @@ public static class AudioOut2Exports
                     TraceSubmitSkipped(context, frames, "no-ports");
                     return false;
                 }
+
+                hasPcm = true;
 
                 var outputSpan = output.AsSpan(0, frames * AudioPcmConversion.OutputFrameSize);
                 var peak = 0f;
@@ -987,7 +1007,6 @@ public static class AudioOut2Exports
             finally
             {
                 ArrayPool<float>.Shared.Return(mix);
-                ArrayPool<byte>.Shared.Return(source);
                 ArrayPool<byte>.Shared.Return(output);
             }
         }

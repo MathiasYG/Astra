@@ -42,6 +42,13 @@ public interface IGuestThreadScheduler
 {
     bool SupportsGuestContextTransfer { get; }
 
+    // Resolve a callable symbol from a loaded guest module, not an HLE import stub.
+    bool TryResolveGuestSymbol(string symbolName, out ulong address)
+    {
+        address = 0;
+        return false;
+    }
+
     /// <summary>
     /// Associates a pthread identity created on the primary guest executor
     /// with its live CPU context. Primary execution does not pass through

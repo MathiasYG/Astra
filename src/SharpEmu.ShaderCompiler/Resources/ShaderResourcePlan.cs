@@ -79,7 +79,10 @@ public sealed class ShaderResourcePlan
                 access.SamplerHandle is null ? null : Rewrite(access.SamplerHandle),
                 access.Read is null ? null : (reads.Replacements.ContainsKey(access.Read) ? RewriteRead(access.Read) : Rewrite(access.Read)),
                 access.Offset is null ? null : Rewrite(access.Offset),
-                access.Active is null ? null : Rewrite(access.Active));
+                access.Active is null ? null : Rewrite(access.Active))
+            {
+                ExecutionMask = access.ExecutionMask is null ? null : Rewrite(access.ExecutionMask),
+            };
         }
 
         // Diagnostics observe rewritten values before descriptor validation.
@@ -111,7 +114,10 @@ public sealed class ShaderResourcePlan
 
         foreach (var sampler in plan.Info.Samplers)
         {
-            materialization.Add(sampler.Source);
+            if (plan.DescriptorSources[(int)sampler.Source].CountedSampler is not null)
+                plan.RequiresSpecializationMemory = true;
+            else
+                materialization.Add(sampler.Source);
         }
 
         plan.MaterializationSources = materialization;
@@ -140,6 +146,12 @@ public sealed class ShaderResourcePlan
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.MaterialSource], cleanSlots);
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
             }
+        }
+
+        foreach (var sampler in plan.Info.Samplers)
+        {
+            if (plan.DescriptorSources[(int)sampler.Source].CountedSampler is { } counted)
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)counted.HeapSource], cleanSlots);
         }
 
         plan.CleanFlatSlots = cleanSlots;
@@ -181,7 +193,8 @@ public sealed class ShaderResourcePlan
             var value = TableReads[slot].Value;
             if (value.Kind == ScalarValueKind.ScalarAddressWord && value.Operands.Length != 0 &&
                 value.Operands[0].Kind == ScalarValueKind.AddressHandle &&
-                value.Operands[0].Operands.SequenceEqual(heap.Dwords))
+                value.Operands[0].Operands.Length == heap.Dwords.Length &&
+                value.Operands[0].Operands.Zip(heap.Dwords).All(pair => ReferenceEquals(pair.First, pair.Second) || Graph.Equivalent(pair.First, pair.Second)))
             {
                 slots[slot] = 1;
             }

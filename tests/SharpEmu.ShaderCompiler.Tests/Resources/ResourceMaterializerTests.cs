@@ -6,6 +6,8 @@ using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
+using System.Buffers.Binary;
+
 namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class ResourceMaterializerTests
@@ -265,6 +267,30 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(ImageNumericClass.Float, image.NumericClass);
     }
 
+    [Theory]
+    [InlineData(GuestImageFormat.Format8Srgb)]
+    [InlineData(GuestImageFormat.Format8x2Srgb)]
+    public void NarrowSrgbStorage_RetainsFormatWithoutChangingSampledSpecialization(uint format)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, format));
+        instructions.AddRange(SamplerWords(ref pc, 24, 0));
+        instructions.Add(Image(pc, "ImageSample", 16, 24)); pc += 8;
+        instructions.Add(Image(pc, "ImageStore", 16)); pc += 8;
+        instructions.Add(EndProgram(pc));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        var applied = ResourceMaterializer.ApplyTo(plan, specialization);
+        var storage = Assert.Single(applied.Info.Images, image => image.ResourceClass == ImageResourceClass.Storage);
+        var sampled = Assert.Single(applied.Info.Images, image => image.ResourceClass == ImageResourceClass.Sampled);
+        Assert.Equal(format, storage.ConversionFormat);
+        Assert.Equal(GuestImageFormat.Invalid, sampled.ConversionFormat);
+        Assert.False(Assert.Single(applied.Info.Samplers).ForcePointFiltering);
+    }
+
     // Three images share one sampler; the packed and signed ones need point filtering,
     // so the sampler splits and their accesses sample through the duplicate.
     [Fact]
@@ -300,5 +326,154 @@ public sealed class ResourceMaterializerTests
         Assert.True(plan.Memory.TryGetIndex(floatPc, 0, out var floatIndex));
         Assert.False(applied.SamplerByMemoryIndex.ContainsKey(floatIndex));
         Assert.Equal(2, snapshot.Samplers.Length);
+    }
+}
+
+public sealed class ScalarBufferRangeReadTests
+{
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BatchedOrRefusedReadsPreserveDescriptorsAndCacheInvalidation(bool allowRange)
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
+        var memory = ResourceTrackerTests.LinearMemory();
+        var descriptor = ResourceTrackerTests.ImageDescriptor();
+        ResourceTrackerTests.WriteImage(memory, 0x2000, descriptor);
+        var ranges = 0;
+        bool Range(ulong address, Span<uint> words)
+        {
+            ranges++;
+            words.Fill(0xDEADBEEF);
+            if (!allowRange)
+                return false;
+            for (var index = 0; index < words.Length; index++)
+                if (!memory.Read(address + (ulong)index * 4, out words[index]))
+                    return false;
+            return true;
+        }
+        bool Resident(ulong address, Span<byte> bytes, bool clean)
+        {
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+            {
+                if (!memory.Read(address + (ulong)offset, out var word))
+                    return false;
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes[offset..], word);
+            }
+            return true;
+        }
+
+        var inputs = Inputs([0x1000, 224u << 16, 2, 0, 0x2000, 16u << 16, 4, 0, 7],
+            readCleanMemory: memory.Read) with { ReadCleanWords = Range };
+        var reference = new ResourceSnapshot();
+        var referenceSpecialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs with { ReadCleanWords = null },
+            ref reference, ref referenceSpecialization));
+
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.True(ranges > 0);
+        Assert.Equal(reference.FlattenedResourceTable, snapshot.FlattenedResourceTable);
+        Assert.Equal(reference.Images[0], snapshot.Images[0]);
+        Assert.Equal(referenceSpecialization, specialization);
+        var readsAfterFirst = ranges;
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(readsAfterFirst, ranges);
+        Assert.Equal(1, cache.Hits);
+
+        memory.At(0x2000) += 1;
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.True(ranges > readsAfterFirst);
+        Assert.Equal(descriptor[0] + 1, snapshot.Images[0][0]);
+    }
+
+    [Fact]
+    public void PartialBoundsAndAddressOverflowRetainIndividualWordReads()
+    {
+        var calls = 0;
+        bool Range(ulong address, Span<uint> words)
+        {
+            calls++;
+            Assert.Equal(0x1004ul, address);
+            words.Fill(7);
+            return true;
+        }
+        var inputs = Inputs([]) with { ReadCleanWords = Range };
+        Span<uint> words = stackalloc uint[8];
+        Assert.False(ScalarBufferRangeRead.TryRead([0x1000, 0, 31, 0], 0, 0, inputs, words));
+        Assert.False(ScalarBufferRangeRead.TryRead([0x1000, 0, uint.MaxValue, 0], 0,
+            uint.MaxValue - 4, inputs, words));
+        Assert.False(ScalarBufferRangeRead.TryRead([0xFFFFFFF0, 0xFFFF, 64, 0], 0, 0, inputs, words));
+        Assert.Equal(0, calls);
+        Assert.True(ScalarBufferRangeRead.TryRead([0x1003, 0, 36, 0], 5, 0, inputs, words));
+        Assert.Equal(1, calls);
+        Assert.All(words.ToArray(), word => Assert.Equal(7u, word));
+    }
+}
+
+public sealed class ShiftIndexedMaterialTests
+{
+    private static Gen5ShaderProgram MaterialProgram(uint shift, bool multiply = false) => Program(
+        MoveVectorFromScalar(0, 1, 8),
+        ReadFirstLane(4, 9, 1),
+        Sop2(8, multiply ? "SMulI32" : "SLshlB32", 10, Gen5Operand.Scalar(9),
+            Operand(multiply ? 1u << (int)(shift & 31) : shift)),
+        Sop2(12, "SAddU32", 11, Gen5Operand.Scalar(10), Operand(4)),
+        ScalarBufferLoad(16, 0, 12, dynamicOffsetRegister: 11),
+        Sop2(24, "SLshlB32", 13, Gen5Operand.Scalar(12), Operand(5)),
+        ScalarBufferLoad(28, 4, 16, count: 8, dynamicOffsetRegister: 13),
+        MoveScalar(36, 24, 0), MoveScalar(40, 25, 0),
+        MoveScalar(44, 26, 0), MoveScalar(48, 27, 0),
+        Image(52, "ImageSample", 16, 24), EndProgram(60));
+
+    [Theory]
+    [InlineData(0u, 1u)]
+    [InlineData(5u, 32u)]
+    [InlineData(37u, 32u)]
+    [InlineData(31u, 0x80000000u)]
+    public void ConstantShiftPreservesTheMaterialStrideAndImmediate(uint count, uint expectedStride)
+    {
+        var plan = Extract(MaterialProgram(count));
+        var selector = Assert.Single(plan.DescriptorSources, source => source.IndirectImage is not null).IndirectImage!;
+        Assert.Equal(expectedStride, selector.SelectorStride);
+        Assert.Equal(4u, selector.SelectorOffset);
+        Assert.Single(plan.IndirectImages);
+    }
+
+    [Theory]
+    [InlineData(5u)]
+    [InlineData(37u)]
+    public void ShiftAndMultiplyProduceTheSameNonemptyDescriptorTable(uint count)
+    {
+        var memory = new TestWordMemory { Words = new uint[0x1040 / 4], RequireAlignment = true };
+        memory.At(0x1004) = 0;
+        memory.At(0x1024) = 1;
+        // RGBA32 float, identity component mapping, 2D image.
+        uint[] first = [0x20, 77u << 20, 3 | (3 << 14), 0xFAC | (9u << 28), 0, 0, 0, 0];
+        var second = (uint[])first.Clone();
+        second[0] = 0x40;
+        for (var component = 0; component < first.Length; component++)
+        {
+            memory.At(0x2000 + (ulong)component * 4) = first[component];
+            memory.At(0x2020 + (ulong)component * 4) = second[component];
+        }
+        uint[] userData = [0x1000, 32u << 16, 2, 0, 0x2000, 16u << 16, 4, 0, 0];
+        var results = new List<ResourceSnapshot>();
+        foreach (var multiply in new[] { false, true })
+        {
+            var plan = Extract(MaterialProgram(count, multiply));
+            var snapshot = new ResourceSnapshot();
+            var specialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: memory.Read),
+                ref snapshot, ref specialization));
+            results.Add(snapshot);
+        }
+        Assert.Equal(2, results[0].Images.Length);
+        Assert.Equal(first, results[0].Images[0]);
+        Assert.Equal(second, results[0].Images[1]);
+        Assert.Equal(results[1].FlattenedResourceTable, results[0].FlattenedResourceTable);
+        Assert.Equal(results[1].Images.SelectMany(words => words), results[0].Images.SelectMany(words => words));
     }
 }

@@ -6,6 +6,8 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
+using System.Runtime.InteropServices;
+
 namespace SharpEmu.Libs.Tests.Pthread;
 
 [CollectionDefinition(Name, DisableParallelization = true)]
@@ -575,5 +577,19 @@ public sealed class PthreadMutexSemanticsTests
             offset = (int)relative;
             return true;
         }
+    }
+}
+
+public sealed class PthreadHandleIdentityTests
+{
+    [Fact]
+    public void CreatedPthreadObjectExposesItsNumericIdentity()
+    {
+        var handle = KernelPthreadState.CreateThreadHandle("identity-test");
+
+        Assert.True(KernelPthreadState.TryGetThreadIdentity(handle, out var identity));
+        Assert.NotEqual(0UL, identity.UniqueId);
+        Assert.Equal(unchecked((int)identity.UniqueId),
+            Marshal.ReadInt32(unchecked((nint)handle)));
     }
 }

@@ -101,6 +101,18 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            if (instruction.Opcode is "VCvtF64I32" or "VRcpF64" or "VCvtF32F64" or "VMulF64" or "VFmaF64")
+            {
+                return instruction.Opcode switch
+                {
+                    "VCvtF64I32" => TryEmitSignedI32ToF64(instruction, destination, out error),
+                    "VRcpF64" => TryEmitF64Reciprocal(instruction, destination, out error),
+                    "VCvtF32F64" => TryEmitF64ToF32(instruction, destination, out error),
+                    "VMulF64" => TryEmitF64Multiply(instruction, destination, out error),
+                    _ => TryEmitF64Fma(instruction, destination, out error),
+                };
+            }
+
             if (instruction.Opcode is "VMovrelsB32" or "VMovreldB32" or
                 "VMovrelsdB32" or "VMovrelsd2B32")
             {
@@ -476,9 +488,6 @@ public static partial class Gen5SpirvTranslator
                 case "VRcpF16":
                     result = EmitFloat16Result(instruction, destination, _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), GetFloat16Source(instruction, 0)));
                     break;
-                case "VSqrtF16":
-                    result = EmitFloat16Result(instruction, destination, Ext(31, _floatType, GetFloat16Source(instruction, 0)));
-                    break;
                 case "VLogF16":
                     result = EmitFloat16Result(instruction, destination, Ext(30, _floatType, GetFloat16Source(instruction, 0)));
                     break;
@@ -511,6 +520,12 @@ public static partial class Gen5SpirvTranslator
                         instruction,
                         destination,
                         Ext(32, _floatType, GetFloat16Source(instruction, 0)));
+                    break;
+                case "VSqrtF16":
+                    result = EmitFloat16Result(
+                        instruction,
+                        destination,
+                        Ext(31, _floatType, GetFloat16Source(instruction, 0)));
                     break;
                 case "VFractF32":
                     result = EmitFloatResult(
@@ -672,9 +687,7 @@ public static partial class Gen5SpirvTranslator
                         Bitcast(_floatType, EmitClampToUnitInterval(Bitcast(_uintType, dot))));
                     break;
                 }
-                case "VMin3F16":
                 case "VMax3F16":
-                case "VMed3F16":
                 {
                     // Every f16 value widens to f32 exactly, and min/max pick one
                     // input, so the f32 result narrows back without rounding.
@@ -692,6 +705,16 @@ public static partial class Gen5SpirvTranslator
                 }
                 case "VMin3F32":
                     result = EmitFloatTernaryExt(instruction, 37);
+                    break;
+                case "VMin3F16":
+                    result = EmitFloat16Result(
+                        instruction,
+                        destination,
+                        Ext(
+                            37,
+                            _floatType,
+                            Ext(37, _floatType, GetFloat16Source(instruction, 0), GetFloat16Source(instruction, 1)),
+                            GetFloat16Source(instruction, 2)));
                     break;
                 case "VMax3F32":
                     result = EmitFloatTernaryExt(instruction, 40);
@@ -794,6 +817,13 @@ public static partial class Gen5SpirvTranslator
                         destination,
                         SpirvOp.IAdd);
                     break;
+                case "VSubNcI16":
+                    result = EmitInteger16Binary(
+                        instruction,
+                        destination,
+                        SpirvOp.ISub,
+                        signed: true);
+                    break;
                 case "VAddcU32":
                 case "VAddCoCiU32":
                     result = EmitAddWithCarry(instruction);
@@ -840,52 +870,17 @@ public static partial class Gen5SpirvTranslator
                         right = BitwiseAnd(right, UInt(0x00FF_FFFF));
                     }
 
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        left);
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        right);
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _ulongType,
-                        wideLeft,
-                        wideRight);
-                    result = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _uintType,
-                        ShiftRightLogical64(
-                            product,
-                            _module.Constant64(_ulongType, 32)));
+                    result = MultiplyExtended(left, right, signed: false).High;
                     break;
                 }
                 case "VMulHiI32":
                 {
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.SConvert,
-                        _longType,
-                        Bitcast(_intType, GetRawSource(instruction, 0)));
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.SConvert,
-                        _longType,
-                        Bitcast(_intType, GetRawSource(instruction, 1)));
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _longType,
-                        wideLeft,
-                        wideRight);
                     result = Bitcast(
                         _uintType,
-                        _module.AddInstruction(
-                            SpirvOp.SConvert,
-                            _intType,
-                            _module.AddInstruction(
-                                SpirvOp.ShiftRightArithmetic,
-                                _longType,
-                                product,
-                                _module.Constant64(_longType, 32))));
+                        MultiplyExtended(
+                            Bitcast(_intType, GetRawSource(instruction, 0)),
+                            Bitcast(_intType, GetRawSource(instruction, 1)),
+                            signed: true).High);
                     break;
                 }
                 case "VBcntU32B32":
@@ -1067,6 +1062,18 @@ public static partial class Gen5SpirvTranslator
                                 _module.Constant64(_ulongType, 32))));
                     break;
                 }
+                case "VLshrrevB16":
+                    result = EmitInteger16ShiftReverse(
+                        instruction,
+                        destination,
+                        SpirvOp.ShiftRightLogical);
+                    break;
+                case "VLshlrevB16":
+                    result = EmitInteger16ShiftReverse(
+                        instruction,
+                        destination,
+                        SpirvOp.ShiftLeftLogical);
+                    break;
                 case "VLshlB32":
                     result = EmitIntegerBinary(instruction, SpirvOp.ShiftLeftLogical);
                     break;
@@ -1273,6 +1280,49 @@ public static partial class Gen5SpirvTranslator
                             Ext(37, _floatType, high, right)));
                     break;
                 }
+                case "VMed3F16":
+                {
+                    var left = GetFloat16Source(instruction, 0);
+                    var middle = GetFloat16Source(instruction, 1);
+                    var right = GetFloat16Source(instruction, 2);
+                    var minimum = Ext(37, _floatType, Ext(37, _floatType, left, middle), right);
+                    var maximum = Ext(40, _floatType, Ext(40, _floatType, left, middle), right);
+                    var firstIsMaximum = _module.AddInstruction(
+                        SpirvOp.FOrdEqual,
+                        _boolType,
+                        maximum,
+                        left);
+                    var secondIsMaximum = _module.AddInstruction(
+                        SpirvOp.FOrdEqual,
+                        _boolType,
+                        maximum,
+                        middle);
+                    var median = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _floatType,
+                        firstIsMaximum,
+                        Ext(40, _floatType, middle, right),
+                        _module.AddInstruction(
+                            SpirvOp.Select,
+                            _floatType,
+                            secondIsMaximum,
+                            Ext(40, _floatType, left, right),
+                            Ext(40, _floatType, left, middle)));
+                    var anyNan = _module.AddInstruction(
+                        SpirvOp.LogicalOr,
+                        _boolType,
+                        _module.AddInstruction(SpirvOp.IsNan, _boolType, left),
+                        _module.AddInstruction(
+                            SpirvOp.LogicalOr,
+                            _boolType,
+                            _module.AddInstruction(SpirvOp.IsNan, _boolType, middle),
+                            _module.AddInstruction(SpirvOp.IsNan, _boolType, right)));
+                    result = EmitFloat16Result(
+                        instruction,
+                        destination,
+                        _module.AddInstruction(SpirvOp.Select, _floatType, anyNan, minimum, median));
+                    break;
+                }
                 case "VCubeidF32":
                     result = EmitCubeCoordinate(instruction, CubeCoordinate.Id);
                     break;
@@ -1319,19 +1369,8 @@ public static partial class Gen5SpirvTranslator
                     // sources are 32-bit factors; the third is a 64-bit addend
                     // held in a VGPR or SGPR pair. Its SDST receives the carry
                     // mask for the unsigned 64-bit addition.
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        GetRawSource(instruction, 0));
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        GetRawSource(instruction, 1));
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _ulongType,
-                        wideLeft,
-                        wideRight);
+                    var (productLow, productHigh) = MultiplyExtended(GetRawSource(instruction, 0), GetRawSource(instruction, 1), signed: false);
+                    var product = Pair64(productLow, productHigh);
                     var addend = GetRawSource64(instruction, 2);
                     var wideResult = _module.AddInstruction(
                         SpirvOp.IAdd,
@@ -1494,9 +1533,6 @@ public static partial class Gen5SpirvTranslator
                     break;
                 case "VAddNcI16":
                 case "VSubNcU16":
-                case "VSubNcI16":
-                case "VLshrrevB16":
-                case "VLshlrevB16":
                 case "VAshrrevI16":
                 case "VMaxU16":
                 case "VMinU16":
@@ -1577,6 +1613,1716 @@ public static partial class Gen5SpirvTranslator
             }
 
             StoreV(destination, result);
+            return true;
+        }
+
+        // RDNA2 V_CVT_F64_I32 writes an IEEE-754 binary64 value to two VGPRs.
+        // Build that exact representation from integer fields, so this instruction
+        // works on Vulkan devices without the optional shaderFloat64 feature.
+        private bool TryEmitSignedI32ToF64(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Destinations.Count != 2 ||
+                instruction.Destinations[0] != Gen5Operand.Vector(destination) ||
+                instruction.Destinations[1] != Gen5Operand.Vector(destination + 1) ||
+                destination + 1 >= VectorRegisterCount)
+            {
+                error = "invalid V_CVT_F64_I32 destination pair";
+                return false;
+            }
+
+            var source = GetRawSource(instruction, 0);
+            var sign = ShiftRightLogical(source, UInt(31));
+            var magnitude = SelectU(
+                IsNotZero(sign),
+                ISubU(UInt(0), source),
+                source);
+            var nonzero = IsNotZero(magnitude);
+            var highestBit = Ext(75, _uintType, BitwiseOr(magnitude, UInt(1)));
+            var normalizationShift = ISubU(UInt(52), highestBit);
+            var shiftBelow32 = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                normalizationShift,
+                UInt(32));
+
+            // Split (magnitude << normalizationShift) into the low and high dwords.
+            // Select bounded shift counts before each shift; SPIR-V leaves shifts
+            // by the operand width undefined.
+            var lowShift = SelectU(shiftBelow32, normalizationShift, UInt(0));
+            var highLeftShift = SelectU(
+                shiftBelow32,
+                UInt(0),
+                ISubU(normalizationShift, UInt(32)));
+            var highRightShift = SelectU(
+                shiftBelow32,
+                ISubU(UInt(32), normalizationShift),
+                UInt(0));
+            var lowWord = SelectU(
+                shiftBelow32,
+                ShiftLeftLogical(magnitude, lowShift),
+                UInt(0));
+            var normalizedHigh = SelectU(
+                shiftBelow32,
+                ShiftRightLogical(magnitude, highRightShift),
+                ShiftLeftLogical(magnitude, highLeftShift));
+
+            var exponent = SelectU(
+                nonzero,
+                IAdd(highestBit, UInt(1023)),
+                UInt(0));
+            var highWord = BitwiseOr(
+                ShiftLeftLogical(sign, UInt(31)),
+                BitwiseOr(
+                    ShiftLeftLogical(exponent, UInt(20)),
+                    BitwiseAnd(normalizedHigh, UInt(0x000F_FFFF))));
+
+            StoreV(destination, lowWord);
+            StoreV(destination + 1, highWord);
+            return true;
+        }
+
+        // RDNA2 V_RCP_F64 permits 2^29 ULP error. A 32-bit significand reciprocal
+        // is comfortably within that bound, and the integer divide here keeps the
+        // result deterministic on Vulkan devices without shaderFloat64.
+        private bool TryEmitF64Reciprocal(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count == 0 ||
+                instruction.Destinations.Count != 2 ||
+                instruction.Destinations[0] != Gen5Operand.Vector(destination) ||
+                instruction.Destinations[1] != Gen5Operand.Vector(destination + 1) ||
+                destination + 1 >= VectorRegisterCount)
+            {
+                error = "invalid V_RCP_F64 register pair";
+                return false;
+            }
+
+            var input = GetRawSource64(instruction, 0);
+            var inputLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, input);
+            var inputHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(input, ULong(32)));
+            var sign = ShiftRightLogical(inputHigh, UInt(31));
+            var exponent = BitwiseAnd(ShiftRightLogical(inputHigh, UInt(20)), UInt(0x7FF));
+            var fractionHigh = BitwiseAnd(inputHigh, UInt(0x000F_FFFF));
+            var fractionHasHigh = IsNotZero(fractionHigh);
+            var fractionHasLow = IsNotZero(inputLow);
+            var fractionNonzero = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                fractionHasHigh,
+                fractionHasLow);
+            var exponentIsZero = Equal(exponent, 0);
+            var exponentIsAllOnes = Equal(exponent, 0x7FF);
+            var isNormalInput = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                _module.AddInstruction(
+                    SpirvOp.LogicalNot,
+                    _boolType,
+                    exponentIsZero),
+                _module.AddInstruction(
+                    SpirvOp.LogicalNot,
+                    _boolType,
+                    exponentIsAllOnes));
+            var isSubnormalInput = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsZero,
+                fractionNonzero);
+            var isFiniteInput = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                exponent,
+                UInt(0x7FF));
+            var isNonzeroInput = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                _module.AddInstruction(
+                    SpirvOp.LogicalNot,
+                    _boolType,
+                    exponentIsZero),
+                fractionNonzero);
+            var isFiniteNonzero = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                isFiniteInput,
+                isNonzeroInput);
+            var isZeroInput = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsZero,
+                _module.AddInstruction(
+                    SpirvOp.LogicalNot,
+                    _boolType,
+                    fractionNonzero));
+            var isInfinityInput = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsAllOnes,
+                _module.AddInstruction(
+                    SpirvOp.LogicalNot,
+                    _boolType,
+                    fractionNonzero));
+            var isNanInput = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsAllOnes,
+                fractionNonzero);
+
+            // Normalize subnormal significands into the same 1.xxx form as normal
+            // inputs, then retain 32 significant bits (31 fraction bits).
+            var highestLowBit = Ext(
+                75,
+                _uintType,
+                BitwiseOr(inputLow, UInt(1)));
+            var highestHighBit = Ext(
+                75,
+                _uintType,
+                BitwiseOr(fractionHigh, UInt(1)));
+            var highestFractionBit = SelectU(
+                fractionHasHigh,
+                IAdd(highestHighBit, UInt(32)),
+                highestLowBit);
+            var subnormalShift = ISubU(UInt(52), highestFractionBit);
+            var fraction64 = _module.AddInstruction(
+                SpirvOp.BitwiseOr,
+                _ulongType,
+                ShiftLeftLogical64(
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, fractionHigh),
+                    ULong(32)),
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, inputLow));
+            var normalizedSubnormal = ShiftLeftLogical64(
+                fraction64,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalShift));
+            var subnormalSignificand = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(normalizedSubnormal, ULong(21)));
+            var normalSignificand = BitwiseOr(
+                UInt(0x8000_0000),
+                BitwiseOr(
+                    ShiftLeftLogical(fractionHigh, UInt(11)),
+                    ShiftRightLogical(inputLow, UInt(21))));
+            var significand = SelectU(
+                isSubnormalInput,
+                subnormalSignificand,
+                normalSignificand);
+            var safeSignificand = SelectU(
+                isFiniteNonzero,
+                significand,
+                UInt(0x8000_0000));
+
+            // For m in [2^31, 2^32), floor(2^63 / m) gives 32 reciprocal
+            // significand bits. The exact m=1 case produces 2^32 and is
+            // renormalized explicitly into 1.0 with the corresponding exponent.
+            var reciprocalSignificand64 = _module.AddInstruction(
+                SpirvOp.UDiv,
+                _ulongType,
+                ULong(1UL << 63),
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _ulongType,
+                    safeSignificand));
+            var reciprocalSignificand = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                reciprocalSignificand64);
+            var significandIsOne = Equal(safeSignificand, 0x8000_0000);
+            reciprocalSignificand = SelectU(
+                significandIsOne,
+                UInt(0x8000_0000),
+                reciprocalSignificand);
+
+            var normalUnbiasedExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                Bitcast(_intType, exponent),
+                _module.Constant(_intType, 1023));
+            var subnormalUnbiasedExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                Bitcast(_intType, highestFractionBit),
+                _module.Constant(_intType, 1074));
+            var inputUnbiasedExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                isNormalInput,
+                normalUnbiasedExponent,
+                subnormalUnbiasedExponent);
+            var negatedExponent = _module.AddInstruction(
+                SpirvOp.SNegate,
+                _intType,
+                inputUnbiasedExponent);
+            var reciprocalUnbiasedExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                significandIsOne,
+                negatedExponent,
+                _module.AddInstruction(
+                    SpirvOp.ISub,
+                    _intType,
+                    negatedExponent,
+                    _module.Constant(_intType, 1)));
+            var overflows = _module.AddInstruction(
+                SpirvOp.SGreaterThan,
+                _boolType,
+                reciprocalUnbiasedExponent,
+                _module.Constant(_intType, 1023));
+            var underflows = _module.AddInstruction(
+                SpirvOp.SLessThan,
+                _boolType,
+                reciprocalUnbiasedExponent,
+                _module.Constant(_intType, unchecked((uint)-1022)));
+
+            var normalizedLow = ShiftLeftLogical(reciprocalSignificand, UInt(21));
+            var normalizedHigh = ShiftRightLogical(reciprocalSignificand, UInt(11));
+            var subnormalLowOneBit = BitwiseOr(
+                ShiftRightLogical(normalizedLow, UInt(1)),
+                ShiftLeftLogical(normalizedHigh, UInt(31)));
+            var subnormalHighOneBit = ShiftRightLogical(normalizedHigh, UInt(1));
+            var subnormalLowTwoBits = BitwiseOr(
+                ShiftRightLogical(normalizedLow, UInt(2)),
+                ShiftLeftLogical(normalizedHigh, UInt(30)));
+            var subnormalHighTwoBits = ShiftRightLogical(normalizedHigh, UInt(2));
+            var exponentIsMinus1023 = _module.AddInstruction(
+                SpirvOp.IEqual,
+                _boolType,
+                reciprocalUnbiasedExponent,
+                _module.Constant(_intType, unchecked((uint)-1023)));
+            var subnormalLow = SelectU(
+                exponentIsMinus1023,
+                subnormalLowOneBit,
+                subnormalLowTwoBits);
+            var subnormalHigh = SelectU(
+                exponentIsMinus1023,
+                subnormalHighOneBit,
+                subnormalHighTwoBits);
+            var normalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                reciprocalUnbiasedExponent,
+                _module.Constant(_intType, unchecked((uint)-1023)));
+            var normalHigh = BitwiseOr(
+                ShiftLeftLogical(sign, UInt(31)),
+                BitwiseOr(
+                    ShiftLeftLogical(Bitcast(_uintType, normalExponent), UInt(20)),
+                    BitwiseAnd(normalizedHigh, UInt(0x000F_FFFF))));
+            var subnormalResultHigh = BitwiseOr(
+                ShiftLeftLogical(sign, UInt(31)),
+                BitwiseAnd(subnormalHigh, UInt(0x000F_FFFF)));
+            var finiteResultLow = SelectU(underflows, subnormalLow, normalizedLow);
+            var finiteResultHigh = SelectU(underflows, subnormalResultHigh, normalHigh);
+
+            var resultIsInfinity = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                isZeroInput,
+                overflows);
+            var infinityHigh = BitwiseOr(
+                ShiftLeftLogical(sign, UInt(31)),
+                UInt(0x7FF0_0000));
+            var resultLow = SelectU(resultIsInfinity, UInt(0), finiteResultLow);
+            var resultHigh = SelectU(resultIsInfinity, infinityHigh, finiteResultHigh);
+            resultLow = SelectU(isInfinityInput, UInt(0), resultLow);
+            resultHigh = SelectU(isInfinityInput, ShiftLeftLogical(sign, UInt(31)), resultHigh);
+            resultLow = SelectU(isNanInput, inputLow, resultLow);
+            resultHigh = SelectU(
+                isNanInput,
+                BitwiseOr(inputHigh, UInt(0x0008_0000)),
+                resultHigh);
+
+            StoreV(destination, resultLow);
+            StoreV(destination + 1, resultHigh);
+            return true;
+        }
+
+        // RDNA2 V_MUL_F64 is a correctly rounded binary64 multiply with gradual
+        // underflow. Keep it in integer SPIR-V so it does not require the optional
+        // shaderFloat64 device feature. The 53x53-bit significand product is formed
+        // from 32-bit limbs, then rounded once using guard, round and sticky bits.
+        private bool TryEmitF64Multiply(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 2 ||
+                instruction.Destinations.Count != 2 ||
+                instruction.Destinations[0] != Gen5Operand.Vector(destination) ||
+                instruction.Destinations[1] != Gen5Operand.Vector(destination + 1) ||
+                destination + 1 >= VectorRegisterCount)
+            {
+                error = "invalid V_MUL_F64 register pair";
+                return false;
+            }
+
+            uint Or64(uint left, uint right) => _module.AddInstruction(SpirvOp.BitwiseOr, _ulongType, left, right);
+            uint AndBool(uint left, uint right) => _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, left, right);
+            uint OrBool(uint left, uint right) => _module.AddInstruction(SpirvOp.LogicalOr, _boolType, left, right);
+            uint NotBool(uint value) => _module.AddInstruction(SpirvOp.LogicalNot, _boolType, value);
+            uint Select64(uint condition, uint whenTrue, uint whenFalse) =>
+                _module.AddInstruction(SpirvOp.Select, _ulongType, condition, whenTrue, whenFalse);
+
+            var control = instruction.Control as Gen5Vop3Control;
+            var leftBits = GetRawSource64(instruction, 0);
+            var rightBits = GetRawSource64(instruction, 1);
+            var leftLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, leftBits);
+            var rightLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, rightBits);
+            var leftHigh = _module.AddInstruction(SpirvOp.UConvert, _uintType, ShiftRightLogical64(leftBits, ULong(32)));
+            var rightHigh = _module.AddInstruction(SpirvOp.UConvert, _uintType, ShiftRightLogical64(rightBits, ULong(32)));
+            var leftSign = ShiftRightLogical(leftHigh, UInt(31));
+            var rightSign = ShiftRightLogical(rightHigh, UInt(31));
+            if (((control?.AbsoluteMask ?? 0) & 0x1) != 0)
+            {
+                leftSign = UInt(0);
+            }
+
+            if (((control?.NegateMask ?? 0) & 0x1) != 0)
+            {
+                leftSign = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, leftSign, UInt(1));
+            }
+
+            if (((control?.AbsoluteMask ?? 0) & 0x2) != 0)
+            {
+                rightSign = UInt(0);
+            }
+
+            if (((control?.NegateMask ?? 0) & 0x2) != 0)
+            {
+                rightSign = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, rightSign, UInt(1));
+            }
+
+            var resultSign = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, leftSign, rightSign);
+            var resultSignWord = ShiftLeftLogical(resultSign, UInt(31));
+            var leftExponent = BitwiseAnd(ShiftRightLogical(leftHigh, UInt(20)), UInt(0x7FF));
+            var rightExponent = BitwiseAnd(ShiftRightLogical(rightHigh, UInt(20)), UInt(0x7FF));
+            var leftFractionHigh = BitwiseAnd(leftHigh, UInt(0x000F_FFFF));
+            var rightFractionHigh = BitwiseAnd(rightHigh, UInt(0x000F_FFFF));
+            var leftFraction = Or64(
+                ShiftLeftLogical64(_module.AddInstruction(SpirvOp.UConvert, _ulongType, leftFractionHigh), ULong(32)),
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, leftLow));
+            var rightFraction = Or64(
+                ShiftLeftLogical64(_module.AddInstruction(SpirvOp.UConvert, _ulongType, rightFractionHigh), ULong(32)),
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, rightLow));
+            var leftFractionNonzero = IsNotZero64(leftFraction);
+            var rightFractionNonzero = IsNotZero64(rightFraction);
+            var leftExponentZero = Equal(leftExponent, 0);
+            var rightExponentZero = Equal(rightExponent, 0);
+            var leftExponentAllOnes = Equal(leftExponent, 0x7FF);
+            var rightExponentAllOnes = Equal(rightExponent, 0x7FF);
+            var leftIsZero = AndBool(leftExponentZero, NotBool(leftFractionNonzero));
+            var rightIsZero = AndBool(rightExponentZero, NotBool(rightFractionNonzero));
+            var leftIsInfinity = AndBool(leftExponentAllOnes, NotBool(leftFractionNonzero));
+            var rightIsInfinity = AndBool(rightExponentAllOnes, NotBool(rightFractionNonzero));
+            var leftIsNan = AndBool(leftExponentAllOnes, leftFractionNonzero);
+            var rightIsNan = AndBool(rightExponentAllOnes, rightFractionNonzero);
+
+            var leftHasFractionHigh = IsNotZero(leftFractionHigh);
+            var rightHasFractionHigh = IsNotZero(rightFractionHigh);
+            var leftHighestLowBit = Ext(75, _uintType, BitwiseOr(leftLow, UInt(1)));
+            var rightHighestLowBit = Ext(75, _uintType, BitwiseOr(rightLow, UInt(1)));
+            var leftHighestHighBit = IAdd(
+                Ext(75, _uintType, BitwiseOr(leftFractionHigh, UInt(1))),
+                UInt(32));
+            var rightHighestHighBit = IAdd(
+                Ext(75, _uintType, BitwiseOr(rightFractionHigh, UInt(1))),
+                UInt(32));
+            var leftHighestBit = SelectU(leftHasFractionHigh, leftHighestHighBit, leftHighestLowBit);
+            var rightHighestBit = SelectU(rightHasFractionHigh, rightHighestHighBit, rightHighestLowBit);
+            var leftSubnormalShift = ISubU(UInt(52), leftHighestBit);
+            var rightSubnormalShift = ISubU(UInt(52), rightHighestBit);
+            var leftSubnormalSignificand = ShiftLeftLogical64(
+                leftFraction,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, leftSubnormalShift));
+            var rightSubnormalSignificand = ShiftLeftLogical64(
+                rightFraction,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, rightSubnormalShift));
+            var leftNormalSignificand = Or64(leftFraction, ULong(1UL << 52));
+            var rightNormalSignificand = Or64(rightFraction, ULong(1UL << 52));
+            var leftSignificand = Select64(leftExponentZero, leftSubnormalSignificand, leftNormalSignificand);
+            var rightSignificand = Select64(rightExponentZero, rightSubnormalSignificand, rightNormalSignificand);
+            var leftNormalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                Bitcast(_intType, leftExponent),
+                _module.Constant(_intType, 1023));
+            var rightNormalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                Bitcast(_intType, rightExponent),
+                _module.Constant(_intType, 1023));
+            var leftSubnormalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                _module.Constant(_intType, unchecked((uint)-1022)),
+                Bitcast(_intType, leftSubnormalShift));
+            var rightSubnormalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                _module.Constant(_intType, unchecked((uint)-1022)),
+                Bitcast(_intType, rightSubnormalShift));
+            var leftUnbiasedExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                leftExponentZero,
+                leftSubnormalExponent,
+                leftNormalExponent);
+            var rightUnbiasedExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                rightExponentZero,
+                rightSubnormalExponent,
+                rightNormalExponent);
+
+            var leftSignificandLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, leftSignificand);
+            var rightSignificandLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, rightSignificand);
+            var leftSignificandHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(leftSignificand, ULong(32)));
+            var rightSignificandHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(rightSignificand, ULong(32)));
+            var leftLow64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, leftSignificandLow);
+            var rightLow64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, rightSignificandLow);
+            var leftHigh64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, leftSignificandHigh);
+            var rightHigh64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, rightSignificandHigh);
+            var productLowLow = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftLow64, rightLow64);
+            var productLeftCross = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftHigh64, rightLow64);
+            var productRightCross = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftLow64, rightHigh64);
+            var productHighHigh = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftHigh64, rightHigh64);
+            var productLowWord = _module.AddInstruction(SpirvOp.UConvert, _uintType, productLowLow);
+            var productLowCarry = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(productLowLow, ULong(32)));
+            var productLeftCrossLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, productLeftCross);
+            var productLeftCrossHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(productLeftCross, ULong(32)));
+            var productRightCrossLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, productRightCross);
+            var productRightCrossHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(productRightCross, ULong(32)));
+            var productCrossSum = IAdd64(
+                IAdd64(
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, productLowCarry),
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, productLeftCrossLow)),
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, productRightCrossLow));
+            var productLow = Or64(
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, productLowWord),
+                ShiftLeftLogical64(BitwiseAnd64(productCrossSum, ULong(0xFFFF_FFFF)), ULong(32)));
+            var productHigh = IAdd64(
+                IAdd64(
+                    IAdd64(
+                        productHighHigh,
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, productLeftCrossHigh)),
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, productRightCrossHigh)),
+                ShiftRightLogical64(productCrossSum, ULong(32)));
+
+            var productHasBit105 = IsNotZero64(BitwiseAnd64(productHigh, ULong(1UL << 41)));
+            var significandShift = SelectU(productHasBit105, UInt(53), UInt(52));
+            var significandShift64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, significandShift);
+            var significandShiftComplement64 = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ULong(64),
+                significandShift64);
+            var retainedSignificand = Or64(
+                ShiftRightLogical64(productLow, significandShift64),
+                ShiftLeftLogical64(productHigh, significandShiftComplement64));
+            var guardIndex = ISubU(significandShift, UInt(1));
+            var guardIndex64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, guardIndex);
+            var guardBit = IsNotZero64(
+                BitwiseAnd64(
+                    ShiftRightLogical64(productLow, guardIndex64),
+                    ULong(1)));
+            var roundStickyMask = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ShiftLeftLogical64(ULong(1), guardIndex64),
+                ULong(1));
+            var stickyBit = IsNotZero64(BitwiseAnd64(productLow, roundStickyMask));
+            var retainedOdd = IsNotZero64(BitwiseAnd64(retainedSignificand, ULong(1)));
+            var roundUp = AndBool(guardBit, OrBool(stickyBit, retainedOdd));
+            var roundedSignificand = IAdd64(
+                retainedSignificand,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, SelectU(roundUp, UInt(1), UInt(0))));
+            var roundedOverflow = IsNotZero64(BitwiseAnd64(roundedSignificand, ULong(1UL << 53)));
+            var normalizedSignificand = Select64(
+                roundedOverflow,
+                ShiftRightLogical64(roundedSignificand, ULong(1)),
+                roundedSignificand);
+
+            var modifierExponent = control?.OutputModifier switch
+            {
+                1 => 1,
+                2 => 2,
+                3 => -1,
+                _ => 0,
+            };
+            var exponentSum = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                leftUnbiasedExponent,
+                rightUnbiasedExponent);
+            var exponentWithModifier = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                exponentSum,
+                _module.Constant(_intType, unchecked((uint)modifierExponent)));
+            var topBitAdjustment = Bitcast(_intType, SelectU(productHasBit105, UInt(1), UInt(0)));
+            var roundingAdjustment = Bitcast(_intType, SelectU(roundedOverflow, UInt(1), UInt(0)));
+            var resultExponent = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                _module.AddInstruction(
+                    SpirvOp.IAdd,
+                    _intType,
+                    _module.AddInstruction(SpirvOp.IAdd, _intType, exponentWithModifier, topBitAdjustment),
+                    roundingAdjustment),
+                _module.Constant(_intType, 0));
+            var resultIsSubnormal = _module.AddInstruction(
+                SpirvOp.SLessThan,
+                _boolType,
+                resultExponent,
+                _module.Constant(_intType, unchecked((uint)-1022)));
+            var resultOverflows = _module.AddInstruction(
+                SpirvOp.SGreaterThan,
+                _boolType,
+                resultExponent,
+                _module.Constant(_intType, 1023));
+            var normalExponentField = Bitcast(
+                _uintType,
+                _module.AddInstruction(
+                    SpirvOp.IAdd,
+                    _intType,
+                    resultExponent,
+                    _module.Constant(_intType, 1023)));
+            var normalFraction = BitwiseAnd64(normalizedSignificand, ULong(0x000F_FFFF_FFFF_FFFF));
+            var normalLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, normalFraction);
+            var normalHighFraction = BitwiseAnd(
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    ShiftRightLogical64(normalFraction, ULong(32))),
+                UInt(0x000F_FFFF));
+            var normalHigh = BitwiseOr(
+                resultSignWord,
+                BitwiseOr(ShiftLeftLogical(normalExponentField, UInt(20)), normalHighFraction));
+
+            var subnormalShiftSigned = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                _module.Constant(_intType, unchecked((uint)-970)),
+                exponentWithModifier);
+            var targetSubnormalShift = Bitcast(_uintType, subnormalShiftSigned);
+            var targetShiftInRange = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                targetSubnormalShift,
+                UInt(107));
+            var safeSubnormalShift = SelectU(targetShiftInRange, targetSubnormalShift, UInt(106));
+            safeSubnormalShift = SelectU(
+                _module.AddInstruction(SpirvOp.ULessThan, _boolType, safeSubnormalShift, UInt(1)),
+                UInt(1),
+                safeSubnormalShift);
+            var subnormalShiftBelow64 = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                safeSubnormalShift,
+                UInt(64));
+            var subnormalSmallShift = SelectU(subnormalShiftBelow64, safeSubnormalShift, UInt(1));
+            var subnormalSmallShift64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalSmallShift);
+            var subnormalSmallComplement64 = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ULong(64),
+                subnormalSmallShift64);
+            var subnormalLargeShift = SelectU(
+                subnormalShiftBelow64,
+                UInt(0),
+                ISubU(safeSubnormalShift, UInt(64)));
+            var subnormalLargeShift64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalLargeShift);
+            var subnormalQuotientLow = Or64(
+                ShiftRightLogical64(productLow, subnormalSmallShift64),
+                ShiftLeftLogical64(productHigh, subnormalSmallComplement64));
+            var subnormalQuotientHigh = ShiftRightLogical64(productHigh, subnormalLargeShift64);
+            var subnormalQuotient = Select64(
+                subnormalShiftBelow64,
+                subnormalQuotientLow,
+                subnormalQuotientHigh);
+            var subnormalGuardPosition = ISubU(safeSubnormalShift, UInt(1));
+            var subnormalGuardBelow64 = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                subnormalGuardPosition,
+                UInt(64));
+            var subnormalGuardSource = Select64(subnormalGuardBelow64, productLow, productHigh);
+            var subnormalGuardShift = SelectU(
+                subnormalGuardBelow64,
+                subnormalGuardPosition,
+                ISubU(subnormalGuardPosition, UInt(64)));
+            var subnormalGuardBit = IsNotZero64(
+                BitwiseAnd64(
+                    ShiftRightLogical64(
+                        subnormalGuardSource,
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalGuardShift)),
+                    ULong(1)));
+            var lowerMaskShift = SelectU(subnormalGuardBelow64, subnormalGuardPosition, UInt(1));
+            var upperMaskShift = SelectU(
+                subnormalGuardBelow64,
+                UInt(1),
+                ISubU(subnormalGuardPosition, UInt(64)));
+            var lowerMask = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ShiftLeftLogical64(ULong(1), _module.AddInstruction(SpirvOp.UConvert, _ulongType, lowerMaskShift)),
+                ULong(1));
+            var upperMask = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ShiftLeftLogical64(ULong(1), _module.AddInstruction(SpirvOp.UConvert, _ulongType, upperMaskShift)),
+                ULong(1));
+            lowerMask = Select64(subnormalGuardBelow64, lowerMask, ULong(ulong.MaxValue));
+            var subnormalStickyLow = IsNotZero64(BitwiseAnd64(productLow, lowerMask));
+            var subnormalStickyHigh = IsNotZero64(BitwiseAnd64(productHigh, upperMask));
+            var subnormalStickyBit = _module.AddInstruction(
+                SpirvOp.Select,
+                _boolType,
+                subnormalGuardBelow64,
+                subnormalStickyLow,
+                OrBool(subnormalStickyLow, subnormalStickyHigh));
+            var subnormalQuotientOdd = IsNotZero64(BitwiseAnd64(subnormalQuotient, ULong(1)));
+            var subnormalRoundUp = AndBool(
+                subnormalGuardBit,
+                OrBool(subnormalStickyBit, subnormalQuotientOdd));
+            var subnormalRounded = IAdd64(
+                subnormalQuotient,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, SelectU(subnormalRoundUp, UInt(1), UInt(0))));
+            subnormalRounded = Select64(targetShiftInRange, subnormalRounded, ULong(0));
+            var subnormalLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, subnormalRounded);
+            var subnormalHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(subnormalRounded, ULong(32)));
+            var finiteLow = SelectU(resultIsSubnormal, subnormalLow, normalLow);
+            var finiteHigh = SelectU(resultIsSubnormal, subnormalHigh, normalHigh);
+            finiteHigh = BitwiseOr(finiteHigh, resultSignWord);
+
+            var anyInputZero = OrBool(leftIsZero, rightIsZero);
+            var anyInputInfinity = OrBool(leftIsInfinity, rightIsInfinity);
+            var invalidInfinityZero = OrBool(
+                AndBool(leftIsInfinity, rightIsZero),
+                AndBool(rightIsInfinity, leftIsZero));
+            var anyInputNan = OrBool(leftIsNan, rightIsNan);
+            var resultIsNan = OrBool(anyInputNan, invalidInfinityZero);
+            var resultIsInfinity = OrBool(anyInputInfinity, resultOverflows);
+            var resultLow = SelectU(anyInputZero, UInt(0), finiteLow);
+            var resultHigh = SelectU(anyInputZero, resultSignWord, finiteHigh);
+            resultLow = SelectU(resultIsInfinity, UInt(0), resultLow);
+            resultHigh = SelectU(
+                resultIsInfinity,
+                BitwiseOr(resultSignWord, UInt(0x7FF0_0000)),
+                resultHigh);
+            var propagatedNan = Select64(
+                leftIsNan,
+                leftBits,
+                rightBits);
+            propagatedNan = Or64(propagatedNan, ULong(0x0008_0000_0000_0000));
+            var nanBits = Select64(
+                invalidInfinityZero,
+                ULong(0x7FF8_0000_0000_0000),
+                propagatedNan);
+            resultLow = SelectU(
+                resultIsNan,
+                _module.AddInstruction(SpirvOp.UConvert, _uintType, nanBits),
+                resultLow);
+            resultHigh = SelectU(
+                resultIsNan,
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    ShiftRightLogical64(nanBits, ULong(32))),
+                resultHigh);
+
+            if (control?.Clamp == true)
+            {
+                var resultBits = Or64(
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, resultLow),
+                    ShiftLeftLogical64(
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, resultHigh),
+                        ULong(32)));
+                var resultMagnitude = BitwiseAnd64(resultBits, ULong(0x7FFF_FFFF_FFFF_FFFF));
+                var resultIsNegative = IsNotZero(BitwiseAnd(resultHigh, UInt(0x8000_0000)));
+                var negativeNonzero = AndBool(
+                    resultIsNegative,
+                    AndBool(IsNotZero64(resultMagnitude), NotBool(resultIsNan)));
+                var positiveAboveOne = AndBool(
+                    NotBool(resultIsNegative),
+                    AndBool(
+                        _module.AddInstruction(
+                            SpirvOp.UGreaterThan,
+                            _boolType,
+                            resultMagnitude,
+                            ULong(0x3FF0_0000_0000_0000)),
+                        NotBool(resultIsNan)));
+                resultLow = SelectU(negativeNonzero, UInt(0), resultLow);
+                resultHigh = SelectU(negativeNonzero, UInt(0), resultHigh);
+                resultLow = SelectU(positiveAboveOne, UInt(0), resultLow);
+                resultHigh = SelectU(positiveAboveOne, UInt(0x3FF0_0000), resultHigh);
+            }
+
+            StoreV(destination, resultLow);
+            StoreV(destination + 1, resultHigh);
+            return true;
+        }
+
+        private (
+            uint Bits,
+            uint Sign,
+            uint Exponent,
+            uint Fraction,
+            uint IsZero,
+            uint IsInfinity,
+            uint IsNan,
+            uint Significand,
+            uint UnbiasedExponent) DecodeF64Operand(
+            Gen5ShaderInstruction instruction,
+            int sourceIndex,
+            Gen5Vop3Control? control)
+        {
+            uint Or64(uint left, uint right) => _module.AddInstruction(SpirvOp.BitwiseOr, _ulongType, left, right);
+            uint AndBool(uint left, uint right) => _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, left, right);
+            uint NotBool(uint value) => _module.AddInstruction(SpirvOp.LogicalNot, _boolType, value);
+            uint Select64(uint condition, uint whenTrue, uint whenFalse) =>
+                _module.AddInstruction(SpirvOp.Select, _ulongType, condition, whenTrue, whenFalse);
+
+            var bits = GetRawSource64(instruction, sourceIndex);
+            var low = _module.AddInstruction(SpirvOp.UConvert, _uintType, bits);
+            var high = _module.AddInstruction(SpirvOp.UConvert, _uintType, ShiftRightLogical64(bits, ULong(32)));
+            var sign = ShiftRightLogical(high, UInt(31));
+            var sourceBit = 1u << sourceIndex;
+            if (((control?.AbsoluteMask ?? 0) & sourceBit) != 0)
+            {
+                sign = UInt(0);
+                high = BitwiseAnd(high, UInt(0x7FFF_FFFF));
+            }
+
+            if (((control?.NegateMask ?? 0) & sourceBit) != 0)
+            {
+                sign = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, sign, UInt(1));
+                high = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, high, UInt(0x8000_0000));
+            }
+
+            bits = Or64(
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, low),
+                ShiftLeftLogical64(_module.AddInstruction(SpirvOp.UConvert, _ulongType, high), ULong(32)));
+            var exponent = BitwiseAnd(ShiftRightLogical(high, UInt(20)), UInt(0x7FF));
+            var fractionHigh = BitwiseAnd(high, UInt(0x000F_FFFF));
+            var fraction = Or64(
+                ShiftLeftLogical64(_module.AddInstruction(SpirvOp.UConvert, _ulongType, fractionHigh), ULong(32)),
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, low));
+            var fractionNonzero = IsNotZero64(fraction);
+            var exponentZero = Equal(exponent, 0);
+            var exponentAllOnes = Equal(exponent, 0x7FF);
+            var isZero = AndBool(exponentZero, NotBool(fractionNonzero));
+            var isInfinity = AndBool(exponentAllOnes, NotBool(fractionNonzero));
+            var isNan = AndBool(exponentAllOnes, fractionNonzero);
+
+            var highestLowBit = Ext(75, _uintType, BitwiseOr(low, UInt(1)));
+            var highestHighBit = IAdd(
+                Ext(75, _uintType, BitwiseOr(fractionHigh, UInt(1))),
+                UInt(32));
+            var highestBit = SelectU(IsNotZero(fractionHigh), highestHighBit, highestLowBit);
+            var subnormalShift = ISubU(UInt(52), highestBit);
+            var subnormalSignificand = ShiftLeftLogical64(
+                fraction,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalShift));
+            var normalSignificand = Or64(fraction, ULong(1UL << 52));
+            var significand = Select64(exponentZero, subnormalSignificand, normalSignificand);
+            var normalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                Bitcast(_intType, exponent),
+                _module.Constant(_intType, 1023));
+            var subnormalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                _module.Constant(_intType, unchecked((uint)-1022)),
+                Bitcast(_intType, subnormalShift));
+            var unbiasedExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                exponentZero,
+                subnormalExponent,
+                normalExponent);
+
+            return (bits, sign, exponent, fraction, isZero, isInfinity, isNan, significand, unbiasedExponent);
+        }
+
+        // RDNA2 V_FMA_F64 computes one fused result with a single rounding step.
+        // The 106-bit product and addend are aligned in a 128-bit integer pair;
+        // discarded low bits are jammed into a sticky bit before final rounding.
+        private bool TryEmitF64Fma(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count < 3 ||
+                instruction.Destinations.Count != 2 ||
+                instruction.Destinations[0] != Gen5Operand.Vector(destination) ||
+                instruction.Destinations[1] != Gen5Operand.Vector(destination + 1) ||
+                destination + 1 >= VectorRegisterCount)
+            {
+                error = "invalid V_FMA_F64 register operands";
+                return false;
+            }
+
+            uint Or64(uint left, uint right) => _module.AddInstruction(SpirvOp.BitwiseOr, _ulongType, left, right);
+            uint AndBool(uint left, uint right) => _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, left, right);
+            uint OrBool(uint left, uint right) => _module.AddInstruction(SpirvOp.LogicalOr, _boolType, left, right);
+            uint NotBool(uint value) => _module.AddInstruction(SpirvOp.LogicalNot, _boolType, value);
+            uint SelectBool(uint condition, uint whenTrue, uint whenFalse) =>
+                _module.AddInstruction(SpirvOp.Select, _boolType, condition, whenTrue, whenFalse);
+            uint Select64(uint condition, uint whenTrue, uint whenFalse) =>
+                _module.AddInstruction(SpirvOp.Select, _ulongType, condition, whenTrue, whenFalse);
+
+            (uint Low, uint High) ShiftRightJam128(uint low, uint high, uint shift)
+            {
+                var shiftIsZero = Equal(shift, 0);
+                var shiftBelow64 = _module.AddInstruction(SpirvOp.ULessThan, _boolType, shift, UInt(64));
+                var shiftBelow128 = _module.AddInstruction(SpirvOp.ULessThan, _boolType, shift, UInt(128));
+                var smallShift = SelectU(
+                    AndBool(shiftBelow64, NotBool(shiftIsZero)),
+                    shift,
+                    UInt(1));
+                var smallShift64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, smallShift);
+                var smallComplement64 = _module.AddInstruction(
+                    SpirvOp.ISub,
+                    _ulongType,
+                    ULong(64),
+                    smallShift64);
+                var smallLow = Or64(
+                    ShiftRightLogical64(low, smallShift64),
+                    ShiftLeftLogical64(high, smallComplement64));
+                var smallHigh = ShiftRightLogical64(high, smallShift64);
+                var largeShift = SelectU(
+                    AndBool(NotBool(shiftBelow64), shiftBelow128),
+                    ISubU(shift, UInt(64)),
+                    UInt(63));
+                var largeShift64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, largeShift);
+                var largeLow = ShiftRightLogical64(high, largeShift64);
+                var shiftedLow = Select64(shiftBelow64, smallLow, largeLow);
+                var shiftedHigh = Select64(shiftBelow64, smallHigh, ULong(0));
+                shiftedLow = Select64(shiftBelow128, shiftedLow, ULong(0));
+                shiftedHigh = Select64(shiftBelow128, shiftedHigh, ULong(0));
+
+                var smallMaskShift = SelectU(
+                    AndBool(shiftBelow64, NotBool(shiftIsZero)),
+                    shift,
+                    UInt(1));
+                var smallMask = _module.AddInstruction(
+                    SpirvOp.ISub,
+                    _ulongType,
+                    ShiftLeftLogical64(ULong(1), _module.AddInstruction(SpirvOp.UConvert, _ulongType, smallMaskShift)),
+                    ULong(1));
+                var largeMaskShift = SelectU(
+                    AndBool(NotBool(shiftBelow64), shiftBelow128),
+                    ISubU(shift, UInt(64)),
+                    UInt(0));
+                var largeMask = _module.AddInstruction(
+                    SpirvOp.ISub,
+                    _ulongType,
+                    ShiftLeftLogical64(ULong(1), _module.AddInstruction(SpirvOp.UConvert, _ulongType, largeMaskShift)),
+                    ULong(1));
+                var lostSmall = IsNotZero64(BitwiseAnd64(low, smallMask));
+                var lostLarge = OrBool(
+                    IsNotZero64(low),
+                    IsNotZero64(BitwiseAnd64(high, largeMask)));
+                var lostAll = OrBool(IsNotZero64(low), IsNotZero64(high));
+                var lost = SelectBool(shiftBelow64, lostSmall, SelectBool(shiftBelow128, lostLarge, lostAll));
+                shiftedLow = Or64(shiftedLow, Select64(lost, ULong(1), ULong(0)));
+                shiftedLow = Select64(shiftIsZero, low, shiftedLow);
+                shiftedHigh = Select64(shiftIsZero, high, shiftedHigh);
+                return (shiftedLow, shiftedHigh);
+            }
+
+            var control = instruction.Control as Gen5Vop3Control;
+            var left = DecodeF64Operand(instruction, 0, control);
+            var right = DecodeF64Operand(instruction, 1, control);
+            var addend = DecodeF64Operand(instruction, 2, control);
+            var leftLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, left.Significand);
+            var rightLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, right.Significand);
+            var leftHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(left.Significand, ULong(32)));
+            var rightHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(right.Significand, ULong(32)));
+            var leftLow64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, leftLow);
+            var rightLow64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, rightLow);
+            var leftHigh64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, leftHigh);
+            var rightHigh64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, rightHigh);
+            var productLowLow = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftLow64, rightLow64);
+            var productLeftCross = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftHigh64, rightLow64);
+            var productRightCross = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftLow64, rightHigh64);
+            var productHighHigh = _module.AddInstruction(SpirvOp.IMul, _ulongType, leftHigh64, rightHigh64);
+            var productLowWord = _module.AddInstruction(SpirvOp.UConvert, _uintType, productLowLow);
+            var productLowCarry = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(productLowLow, ULong(32)));
+            var productLeftCrossLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, productLeftCross);
+            var productLeftCrossHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(productLeftCross, ULong(32)));
+            var productRightCrossLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, productRightCross);
+            var productRightCrossHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(productRightCross, ULong(32)));
+            var productCrossSum = IAdd64(
+                IAdd64(
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, productLowCarry),
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, productLeftCrossLow)),
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, productRightCrossLow));
+            var productLow = Or64(
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _ulongType,
+                    productLowWord),
+                ShiftLeftLogical64(BitwiseAnd64(productCrossSum, ULong(0xFFFF_FFFF)), ULong(32)));
+            var productHigh = IAdd64(
+                IAdd64(
+                    IAdd64(
+                        productHighHigh,
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, productLeftCrossHigh)),
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, productRightCrossHigh)),
+                ShiftRightLogical64(productCrossSum, ULong(32)));
+            var productHasBit105 = IsNotZero64(BitwiseAnd64(productHigh, ULong(1UL << 41)));
+            var productNormalizationShift = SelectU(productHasBit105, UInt(22), UInt(23));
+            var productNormalizationShift64 = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _ulongType,
+                productNormalizationShift);
+            var productNormalizationComplement64 = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ULong(64),
+                productNormalizationShift64);
+            var normalizedProductLow = ShiftLeftLogical64(productLow, productNormalizationShift64);
+            var normalizedProductHigh = Or64(
+                ShiftLeftLogical64(productHigh, productNormalizationShift64),
+                ShiftRightLogical64(productLow, productNormalizationComplement64));
+            var productSign = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, left.Sign, right.Sign);
+            var productExponentSum = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                left.UnbiasedExponent,
+                right.UnbiasedExponent);
+            var productExponent = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                productExponentSum,
+                Bitcast(_intType, SelectU(productHasBit105, UInt(1), UInt(0))));
+            var normalizedAddendHigh = ShiftLeftLogical64(addend.Significand, ULong(11));
+            var productAtLeastAddendExponent = _module.AddInstruction(
+                SpirvOp.SGreaterThanEqual,
+                _boolType,
+                productExponent,
+                addend.UnbiasedExponent);
+            var addendExponentInt = addend.UnbiasedExponent;
+            var productExponentInt = productExponent;
+            var commonExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                productAtLeastAddendExponent,
+                productExponentInt,
+                addendExponentInt);
+            var productShiftSigned = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                addendExponentInt,
+                productExponentInt);
+            var addendShiftSigned = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                productExponentInt,
+                addendExponentInt);
+            var productShiftSignedPositive = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                productAtLeastAddendExponent,
+                _module.Constant(_intType, 0),
+                productShiftSigned);
+            var addendShiftSignedPositive = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                productAtLeastAddendExponent,
+                addendShiftSigned,
+                _module.Constant(_intType, 0));
+            var productShift = Bitcast(_uintType, productShiftSignedPositive);
+            var addendShift = Bitcast(_uintType, addendShiftSignedPositive);
+            var shiftedProduct = ShiftRightJam128(normalizedProductLow, normalizedProductHigh, productShift);
+            var shiftedAddend = ShiftRightJam128(ULong(0), normalizedAddendHigh, addendShift);
+
+            var alignedHighGreater = _module.AddInstruction(
+                SpirvOp.UGreaterThan,
+                _boolType,
+                shiftedProduct.High,
+                shiftedAddend.High);
+            var alignedHighEqual = _module.AddInstruction(
+                SpirvOp.IEqual,
+                _boolType,
+                shiftedProduct.High,
+                shiftedAddend.High);
+            var alignedLowGreater = _module.AddInstruction(
+                SpirvOp.UGreaterThan,
+                _boolType,
+                shiftedProduct.Low,
+                shiftedAddend.Low);
+            var productMagnitudeGreater = OrBool(
+                alignedHighGreater,
+                AndBool(alignedHighEqual, alignedLowGreater));
+            var productSignEqualsAddendSign = _module.AddInstruction(
+                SpirvOp.IEqual,
+                _boolType,
+                productSign,
+                addend.Sign);
+
+            var sumLow = IAdd64(shiftedProduct.Low, shiftedAddend.Low);
+            var sumCarry = _module.AddInstruction(
+                SpirvOp.UGreaterThan,
+                _boolType,
+                sumLow,
+                shiftedProduct.Low);
+            var sumCarry64 = Select64(sumCarry, ULong(1), ULong(0));
+            var sumHighPartial = IAdd64(shiftedProduct.High, shiftedAddend.High);
+            var sumOverflowFirst = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                sumHighPartial,
+                shiftedProduct.High);
+            var sumHigh = IAdd64(sumHighPartial, sumCarry64);
+            var sumOverflowSecond = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                sumHigh,
+                sumHighPartial);
+            var sumOverflow = OrBool(sumOverflowFirst, sumOverflowSecond);
+            var sumShiftedLow = Or64(
+                Or64(
+                    ShiftRightLogical64(sumLow, ULong(1)),
+                    ShiftLeftLogical64(sumHigh, ULong(63))),
+                BitwiseAnd64(sumLow, ULong(1)));
+            var sumShiftedHigh = Or64(
+                ShiftRightLogical64(sumHigh, ULong(1)),
+                Select64(sumOverflow, ULong(1UL << 63), ULong(0)));
+            var sumResultLow = Select64(sumOverflow, sumShiftedLow, sumLow);
+            var sumResultHigh = Select64(sumOverflow, sumShiftedHigh, sumHigh);
+            var sumResultExponent = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                commonExponent,
+                Bitcast(_intType, SelectU(sumOverflow, UInt(1), UInt(0))));
+
+            var largeLow = Select64(productMagnitudeGreater, shiftedProduct.Low, shiftedAddend.Low);
+            var smallLow = Select64(productMagnitudeGreater, shiftedAddend.Low, shiftedProduct.Low);
+            var largeHigh = Select64(productMagnitudeGreater, shiftedProduct.High, shiftedAddend.High);
+            var smallHigh = Select64(productMagnitudeGreater, shiftedAddend.High, shiftedProduct.High);
+            var differenceLow = _module.AddInstruction(SpirvOp.ISub, _ulongType, largeLow, smallLow);
+            var differenceBorrow = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                largeLow,
+                smallLow);
+            var differenceBorrow64 = Select64(differenceBorrow, ULong(1), ULong(0));
+            var differenceHigh = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                _module.AddInstruction(SpirvOp.ISub, _ulongType, largeHigh, smallHigh),
+                differenceBorrow64);
+            var differenceHighUpper = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(differenceHigh, ULong(32)));
+            var differenceHighLower = _module.AddInstruction(SpirvOp.UConvert, _uintType, differenceHigh);
+            var differenceLowUpper = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(differenceLow, ULong(32)));
+            var differenceLowLower = _module.AddInstruction(SpirvOp.UConvert, _uintType, differenceLow);
+            var highestBitHighUpper = IAdd(
+                Ext(75, _uintType, BitwiseOr(differenceHighUpper, UInt(1))),
+                UInt(96));
+            var highestBitHighLower = IAdd(
+                Ext(75, _uintType, BitwiseOr(differenceHighLower, UInt(1))),
+                UInt(64));
+            var highestBitLowUpper = IAdd(
+                Ext(75, _uintType, BitwiseOr(differenceLowUpper, UInt(1))),
+                UInt(32));
+            var highestBitLowLower = Ext(75, _uintType, BitwiseOr(differenceLowLower, UInt(1)));
+            var differenceHighestBit = SelectU(
+                IsNotZero(differenceHighUpper),
+                highestBitHighUpper,
+                SelectU(
+                    IsNotZero(differenceHighLower),
+                    highestBitHighLower,
+                    SelectU(IsNotZero(differenceLowUpper), highestBitLowUpper, highestBitLowLower)));
+            var differenceNormalizationShift = ISubU(UInt(127), differenceHighestBit);
+            var differenceShiftIsZero = Equal(differenceNormalizationShift, 0);
+            var differenceShiftBelow64 = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                differenceNormalizationShift,
+                UInt(64));
+            var differenceSmallShift = SelectU(
+                AndBool(differenceShiftBelow64, NotBool(differenceShiftIsZero)),
+                differenceNormalizationShift,
+                UInt(1));
+            var differenceSmallShift64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, differenceSmallShift);
+            var differenceSmallComplement64 = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ULong(64),
+                differenceSmallShift64);
+            var differenceLargeShift = SelectU(
+                differenceShiftBelow64,
+                UInt(0),
+                ISubU(differenceNormalizationShift, UInt(64)));
+            var differenceLargeShift64 = _module.AddInstruction(SpirvOp.UConvert, _ulongType, differenceLargeShift);
+            var normalizedDifferenceSmallLow = ShiftLeftLogical64(differenceLow, differenceSmallShift64);
+            var normalizedDifferenceSmallHigh = Or64(
+                ShiftLeftLogical64(differenceHigh, differenceSmallShift64),
+                ShiftRightLogical64(differenceLow, differenceSmallComplement64));
+            var normalizedDifferenceLow = Select64(
+                differenceShiftBelow64,
+                normalizedDifferenceSmallLow,
+                ULong(0));
+            var normalizedDifferenceHigh = Select64(
+                differenceShiftBelow64,
+                normalizedDifferenceSmallHigh,
+                ShiftLeftLogical64(differenceLow, differenceLargeShift64));
+            normalizedDifferenceLow = Select64(differenceShiftIsZero, differenceLow, normalizedDifferenceLow);
+            normalizedDifferenceHigh = Select64(differenceShiftIsZero, differenceHigh, normalizedDifferenceHigh);
+            var differenceResultExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                commonExponent,
+                Bitcast(_intType, differenceNormalizationShift));
+
+            var useSum = productSignEqualsAddendSign;
+            var normalizedResultLow = Select64(useSum, sumResultLow, normalizedDifferenceLow);
+            var normalizedResultHigh = Select64(useSum, sumResultHigh, normalizedDifferenceHigh);
+            var resultExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                useSum,
+                sumResultExponent,
+                differenceResultExponent);
+            var differenceSign = SelectU(productMagnitudeGreater, productSign, addend.Sign);
+            var differenceIsZero = AndBool(
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, differenceHigh, ULong(0)),
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, differenceLow, ULong(0)));
+            differenceSign = SelectU(differenceIsZero, UInt(0), differenceSign);
+            var resultSign = SelectU(useSum, productSign, differenceSign);
+            var resultMagnitudeIsZero = AndBool(
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, normalizedResultHigh, ULong(0)),
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, normalizedResultLow, ULong(0)));
+            var sameSignZero = SelectU(useSum, productSign, UInt(0));
+            resultSign = SelectU(resultMagnitudeIsZero, sameSignZero, resultSign);
+            var resultSignWord = ShiftLeftLogical(resultSign, UInt(31));
+
+            var retainedSignificand = ShiftRightLogical64(normalizedResultHigh, ULong(11));
+            var guardBit = IsNotZero64(
+                BitwiseAnd64(ShiftRightLogical64(normalizedResultHigh, ULong(10)), ULong(1)));
+            var stickyBit = OrBool(
+                IsNotZero64(normalizedResultLow),
+                IsNotZero64(BitwiseAnd64(normalizedResultHigh, ULong(0x3FF))));
+            var retainedOdd = IsNotZero64(BitwiseAnd64(retainedSignificand, ULong(1)));
+            var roundUp = AndBool(guardBit, OrBool(stickyBit, retainedOdd));
+            var roundedSignificand = IAdd64(
+                retainedSignificand,
+                Select64(roundUp, ULong(1), ULong(0)));
+            var roundedOverflow = IsNotZero64(BitwiseAnd64(roundedSignificand, ULong(1UL << 53)));
+            var normalizedSignificand = Select64(
+                roundedOverflow,
+                ShiftRightLogical64(roundedSignificand, ULong(1)),
+                roundedSignificand);
+
+            var modifierExponent = control?.OutputModifier switch
+            {
+                1 => 1,
+                2 => 2,
+                3 => -1,
+                _ => 0,
+            };
+            var exponentWithModifier = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                resultExponent,
+                _module.Constant(_intType, unchecked((uint)modifierExponent)));
+            var finalExponent = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                exponentWithModifier,
+                Bitcast(_intType, SelectU(roundedOverflow, UInt(1), UInt(0))));
+            var resultIsSubnormal = _module.AddInstruction(
+                SpirvOp.SLessThan,
+                _boolType,
+                finalExponent,
+                _module.Constant(_intType, unchecked((uint)-1022)));
+            var resultOverflows = _module.AddInstruction(
+                SpirvOp.SGreaterThan,
+                _boolType,
+                finalExponent,
+                _module.Constant(_intType, 1023));
+            var normalExponentField = Bitcast(
+                _uintType,
+                _module.AddInstruction(
+                    SpirvOp.IAdd,
+                    _intType,
+                    finalExponent,
+                    _module.Constant(_intType, 1023)));
+            var normalFraction = BitwiseAnd64(normalizedSignificand, ULong(0x000F_FFFF_FFFF_FFFF));
+            var normalLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, normalFraction);
+            var normalHighFraction = BitwiseAnd(
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    ShiftRightLogical64(normalFraction, ULong(32))),
+                UInt(0x000F_FFFF));
+            var normalHigh = BitwiseOr(
+                resultSignWord,
+                BitwiseOr(ShiftLeftLogical(normalExponentField, UInt(20)), normalHighFraction));
+
+            var subnormalShiftSigned = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                _module.Constant(_intType, unchecked((uint)-947)),
+                exponentWithModifier);
+            var targetSubnormalShift = Bitcast(_uintType, subnormalShiftSigned);
+            var targetShiftInRange = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                targetSubnormalShift,
+                UInt(129));
+            var safeSubnormalShift = SelectU(targetShiftInRange, targetSubnormalShift, UInt(128));
+            safeSubnormalShift = SelectU(
+                _module.AddInstruction(SpirvOp.ULessThan, _boolType, safeSubnormalShift, UInt(76)),
+                UInt(76),
+                safeSubnormalShift);
+            var subnormalGuardShift = ISubU(safeSubnormalShift, UInt(65));
+            var subnormalQuotient = ShiftRightLogical64(
+                normalizedResultHigh,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, ISubU(safeSubnormalShift, UInt(64))));
+            subnormalQuotient = Select64(
+                _module.AddInstruction(
+                    SpirvOp.ULessThan,
+                    _boolType,
+                    safeSubnormalShift,
+                    UInt(128)),
+                subnormalQuotient,
+                ULong(0));
+            var subnormalGuardBit = IsNotZero64(
+                BitwiseAnd64(
+                    ShiftRightLogical64(
+                        normalizedResultHigh,
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalGuardShift)),
+                    ULong(1)));
+            var subnormalStickyMask = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                ShiftLeftLogical64(ULong(1), _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalGuardShift)),
+                ULong(1));
+            var subnormalSticky = OrBool(
+                IsNotZero64(normalizedResultLow),
+                IsNotZero64(BitwiseAnd64(normalizedResultHigh, subnormalStickyMask)));
+            var subnormalOdd = IsNotZero64(BitwiseAnd64(subnormalQuotient, ULong(1)));
+            var subnormalRoundUp = AndBool(subnormalGuardBit, OrBool(subnormalSticky, subnormalOdd));
+            var subnormalRounded = IAdd64(
+                subnormalQuotient,
+                Select64(subnormalRoundUp, ULong(1), ULong(0)));
+            subnormalRounded = Select64(targetShiftInRange, subnormalRounded, ULong(0));
+            var subnormalLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, subnormalRounded);
+            var subnormalHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(subnormalRounded, ULong(32)));
+            var finiteLow = SelectU(resultIsSubnormal, subnormalLow, normalLow);
+            var finiteHigh = SelectU(resultIsSubnormal, subnormalHigh, normalHigh);
+            finiteLow = SelectU(resultMagnitudeIsZero, UInt(0), finiteLow);
+            finiteHigh = SelectU(resultMagnitudeIsZero, resultSignWord, finiteHigh);
+            finiteHigh = BitwiseOr(finiteHigh, resultSignWord);
+
+            var productIsInfinity = OrBool(left.IsInfinity, right.IsInfinity);
+            var productInvalid = OrBool(
+                AndBool(left.IsZero, right.IsInfinity),
+                AndBool(left.IsInfinity, right.IsZero));
+            var productAndAddendInfinitiesOppose = AndBool(
+                AndBool(productIsInfinity, addend.IsInfinity),
+                NotBool(_module.AddInstruction(SpirvOp.IEqual, _boolType, productSign, addend.Sign)));
+            var invalidInfinityCombination = OrBool(productInvalid, productAndAddendInfinitiesOppose);
+            var anyInputNan = OrBool(OrBool(left.IsNan, right.IsNan), addend.IsNan);
+            var resultIsNan = OrBool(anyInputNan, invalidInfinityCombination);
+            var resultIsInfinity = OrBool(OrBool(productIsInfinity, addend.IsInfinity), resultOverflows);
+            var resultLow = finiteLow;
+            var resultHigh = finiteHigh;
+            var inputInfinitySign = SelectU(productIsInfinity, productSign, addend.Sign);
+            var inputInfinitySignWord = ShiftLeftLogical(inputInfinitySign, UInt(31));
+            var overflowHigh = BitwiseOr(resultSignWord, UInt(0x7FF0_0000));
+            var inputInfinityHigh = BitwiseOr(inputInfinitySignWord, UInt(0x7FF0_0000));
+            var resultInfinityHigh = SelectU(
+                OrBool(productIsInfinity, addend.IsInfinity),
+                inputInfinityHigh,
+                overflowHigh);
+            resultLow = SelectU(resultIsInfinity, UInt(0), resultLow);
+            resultHigh = SelectU(resultIsInfinity, resultInfinityHigh, resultHigh);
+            var propagatedNan = Select64(left.IsNan, left.Bits, Select64(right.IsNan, right.Bits, addend.Bits));
+            propagatedNan = Or64(propagatedNan, ULong(0x0008_0000_0000_0000));
+            var nanBits = Select64(
+                invalidInfinityCombination,
+                ULong(0x7FF8_0000_0000_0000),
+                propagatedNan);
+            resultLow = SelectU(
+                resultIsNan,
+                _module.AddInstruction(SpirvOp.UConvert, _uintType, nanBits),
+                resultLow);
+            resultHigh = SelectU(
+                resultIsNan,
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    ShiftRightLogical64(nanBits, ULong(32))),
+                resultHigh);
+
+            if (control?.Clamp == true)
+            {
+                var resultBits = Or64(
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, resultLow),
+                    ShiftLeftLogical64(
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, resultHigh),
+                        ULong(32)));
+                var resultMagnitude = BitwiseAnd64(resultBits, ULong(0x7FFF_FFFF_FFFF_FFFF));
+                var resultIsNegative = IsNotZero(BitwiseAnd(resultHigh, UInt(0x8000_0000)));
+                var clampToZero = AndBool(
+                    resultIsNegative,
+                    AndBool(IsNotZero64(resultMagnitude), NotBool(resultIsNan)));
+                var clampToOne = AndBool(
+                    NotBool(resultIsNegative),
+                    AndBool(
+                        _module.AddInstruction(
+                            SpirvOp.UGreaterThan,
+                            _boolType,
+                            resultMagnitude,
+                            ULong(0x3FF0_0000_0000_0000)),
+                        NotBool(resultIsNan)));
+                resultLow = SelectU(clampToZero, UInt(0), resultLow);
+                resultHigh = SelectU(clampToZero, UInt(0), resultHigh);
+                resultLow = SelectU(clampToOne, UInt(0), resultLow);
+                resultHigh = SelectU(clampToOne, UInt(0x3FF0_0000), resultHigh);
+            }
+
+            return writeResult(resultLow, resultHigh);
+
+            bool writeResult(uint low, uint high)
+            {
+                StoreV(destination, low);
+                StoreV(destination + 1, high);
+                return true;
+            }
+        }
+
+        // RDNA2 V_CVT_F32_F64 is a correctly rounded narrowing conversion. The
+        // bit-field implementation preserves signed zero and infinities, quiets
+        // NaNs, and handles gradual underflow without requiring shaderFloat64.
+        private bool TryEmitF64ToF32(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            out string error)
+        {
+            error = string.Empty;
+            if (instruction.Sources.Count == 0 ||
+                instruction.Destinations.Count != 1 ||
+                instruction.Destinations[0] != Gen5Operand.Vector(destination))
+            {
+                error = "invalid V_CVT_F32_F64 register operands";
+                return false;
+            }
+
+            var input = GetRawSource64(instruction, 0);
+            var inputLow = _module.AddInstruction(SpirvOp.UConvert, _uintType, input);
+            var inputHigh = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(input, ULong(32)));
+            var sign = ShiftRightLogical(inputHigh, UInt(31));
+            var signBits = ShiftLeftLogical(sign, UInt(31));
+            var exponent = BitwiseAnd(ShiftRightLogical(inputHigh, UInt(20)), UInt(0x7FF));
+            var fractionHigh = BitwiseAnd(inputHigh, UInt(0x000F_FFFF));
+            var fractionHasHigh = IsNotZero(fractionHigh);
+            var fractionHasLow = IsNotZero(inputLow);
+            var fractionNonzero = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                fractionHasHigh,
+                fractionHasLow);
+            var exponentIsZero = Equal(exponent, 0);
+            var exponentIsAllOnes = Equal(exponent, 0x7FF);
+            var isNan = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsAllOnes,
+                fractionNonzero);
+            var isInfinity = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsAllOnes,
+                _module.AddInstruction(SpirvOp.LogicalNot, _boolType, fractionNonzero));
+            var isZero = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsZero,
+                _module.AddInstruction(SpirvOp.LogicalNot, _boolType, fractionNonzero));
+            var isNormal = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                _module.AddInstruction(SpirvOp.LogicalNot, _boolType, exponentIsZero),
+                _module.AddInstruction(SpirvOp.LogicalNot, _boolType, exponentIsAllOnes));
+            var isSubnormal = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                exponentIsZero,
+                fractionNonzero);
+
+            var highestLowBit = Ext(75, _uintType, BitwiseOr(inputLow, UInt(1)));
+            var highestHighBit = Ext(75, _uintType, BitwiseOr(fractionHigh, UInt(1)));
+            var highestFractionBit = SelectU(
+                fractionHasHigh,
+                IAdd(highestHighBit, UInt(32)),
+                highestLowBit);
+            var subnormalShift = ISubU(UInt(52), highestFractionBit);
+            var fraction64 = _module.AddInstruction(
+                SpirvOp.BitwiseOr,
+                _ulongType,
+                ShiftLeftLogical64(
+                    _module.AddInstruction(SpirvOp.UConvert, _ulongType, fractionHigh),
+                    ULong(32)),
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, inputLow));
+            var normalizedSubnormal = ShiftLeftLogical64(
+                fraction64,
+                _module.AddInstruction(SpirvOp.UConvert, _ulongType, subnormalShift));
+            var normalSignificand = _module.AddInstruction(
+                SpirvOp.BitwiseOr,
+                _ulongType,
+                ShiftLeftLogical64(ULong(0x0010_0000), ULong(32)),
+                fraction64);
+            var significand = _module.AddInstruction(
+                SpirvOp.Select,
+                _ulongType,
+                isSubnormal,
+                normalizedSubnormal,
+                normalSignificand);
+
+            var normalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                Bitcast(_intType, exponent),
+                _module.Constant(_intType, 1023));
+            var subnormalExponent = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                Bitcast(_intType, highestFractionBit),
+                _module.Constant(_intType, 1074));
+            var unbiasedExponent = _module.AddInstruction(
+                SpirvOp.Select,
+                _intType,
+                isNormal,
+                normalExponent,
+                subnormalExponent);
+
+            // Round a 53-bit significand to 24 bits, ties to even.
+            var top24 = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(significand, ULong(29)));
+            var normalGuard = IsNotZero(
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    BitwiseAnd64(
+                        ShiftRightLogical64(significand, ULong(28)),
+                        ULong(1))));
+            var normalSticky = IsNotZero64(
+                BitwiseAnd64(significand, ULong(0x0FFF_FFFF)));
+            var normalRoundUp = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                normalGuard,
+                _module.AddInstruction(
+                    SpirvOp.LogicalOr,
+                    _boolType,
+                    normalSticky,
+                    IsNotZero(BitwiseAnd(top24, UInt(1)))));
+            var rounded24 = IAdd(
+                top24,
+                SelectU(normalRoundUp, UInt(1), UInt(0)));
+            var normalCarry = _module.AddInstruction(
+                SpirvOp.UGreaterThan,
+                _boolType,
+                rounded24,
+                UInt(0x00FF_FFFF));
+            var packed24 = SelectU(
+                normalCarry,
+                ShiftRightLogical(rounded24, UInt(1)),
+                rounded24);
+            var roundedExponent = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                unbiasedExponent,
+                _module.AddInstruction(
+                    SpirvOp.Select,
+                    _intType,
+                    normalCarry,
+                    _module.Constant(_intType, 1),
+                    _module.Constant(_intType, 0)));
+            var normalExponentField = _module.AddInstruction(
+                SpirvOp.IAdd,
+                _intType,
+                roundedExponent,
+                _module.Constant(_intType, 127));
+            var normalResult = BitwiseOr(
+                ShiftLeftLogical(Bitcast(_uintType, normalExponentField), UInt(23)),
+                BitwiseAnd(packed24, UInt(0x007F_FFFF)));
+
+            // Binary32 subnormals need a shift of 30..53 bits. Clamp the shift
+            // outside that range so the unused paths never issue an undefined
+            // 64-bit SPIR-V shift.
+            var subnormalRange = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                _module.AddInstruction(
+                    SpirvOp.SLessThan,
+                    _boolType,
+                    unbiasedExponent,
+                    _module.Constant(_intType, unchecked((uint)-126))),
+                _module.AddInstruction(
+                    SpirvOp.SGreaterThanEqual,
+                    _boolType,
+                    unbiasedExponent,
+                    _module.Constant(_intType, unchecked((uint)-150))));
+            var tooSmall = _module.AddInstruction(
+                SpirvOp.SLessThan,
+                _boolType,
+                unbiasedExponent,
+                _module.Constant(_intType, unchecked((uint)-150)));
+            var subnormalShiftSigned = _module.AddInstruction(
+                SpirvOp.ISub,
+                _intType,
+                _module.Constant(_intType, unchecked((uint)-97)),
+                unbiasedExponent);
+            var subnormalShiftUnsigned = SelectU(
+                subnormalRange,
+                Bitcast(_uintType, subnormalShiftSigned),
+                UInt(0));
+            var subnormalShiftMinusOne = SelectU(
+                subnormalRange,
+                ISubU(subnormalShiftUnsigned, UInt(1)),
+                UInt(0));
+            var subnormalShift64 = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _ulongType,
+                subnormalShiftUnsigned);
+            var subnormalShiftMinusOne64 = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _ulongType,
+                subnormalShiftMinusOne);
+            var subnormalFloor = _module.AddInstruction(
+                SpirvOp.UConvert,
+                _uintType,
+                ShiftRightLogical64(significand, subnormalShift64));
+            var subnormalGuard = IsNotZero(
+                _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _uintType,
+                    BitwiseAnd64(
+                        ShiftRightLogical64(significand, subnormalShiftMinusOne64),
+                        ULong(1))));
+            var stickyPower = ShiftLeftLogical64(ULong(1), subnormalShiftMinusOne64);
+            var subnormalStickyMask = _module.AddInstruction(
+                SpirvOp.ISub,
+                _ulongType,
+                stickyPower,
+                ULong(1));
+            var subnormalSticky = IsNotZero64(
+                BitwiseAnd64(significand, subnormalStickyMask));
+            var subnormalRoundUp = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                subnormalGuard,
+                _module.AddInstruction(
+                    SpirvOp.LogicalOr,
+                    _boolType,
+                    subnormalSticky,
+                    IsNotZero(BitwiseAnd(subnormalFloor, UInt(1)))));
+            var roundedSubnormal = IAdd(
+                subnormalFloor,
+                SelectU(subnormalRoundUp, UInt(1), UInt(0)));
+            var subnormalResult = SelectU(tooSmall, UInt(0), roundedSubnormal);
+            var finiteResult = SelectU(isSubnormal, subnormalResult, normalResult);
+
+            var overflow = _module.AddInstruction(
+                SpirvOp.SGreaterThan,
+                _boolType,
+                roundedExponent,
+                _module.Constant(_intType, 127));
+            var finiteInput = _module.AddInstruction(
+                SpirvOp.ULessThan,
+                _boolType,
+                exponent,
+                UInt(0x7FF));
+            var finiteOverflow = _module.AddInstruction(
+                SpirvOp.LogicalAnd,
+                _boolType,
+                finiteInput,
+                overflow);
+            var infinityResult = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                isInfinity,
+                finiteOverflow);
+            var outputMagnitude = SelectU(
+                infinityResult,
+                UInt(0x7F80_0000),
+                finiteResult);
+            outputMagnitude = SelectU(isZero, UInt(0), outputMagnitude);
+            var nanPayload = BitwiseOr(
+                ShiftLeftLogical(fractionHigh, UInt(3)),
+                ShiftRightLogical(inputLow, UInt(29)));
+            nanPayload = BitwiseOr(nanPayload, UInt(0x0040_0000));
+            var nanBits = BitwiseOr(
+                UInt(0x7F80_0000),
+                BitwiseAnd(nanPayload, UInt(0x007F_FFFF)));
+            outputMagnitude = SelectU(isNan, nanBits, outputMagnitude);
+
+            StoreV(destination, BitwiseOr(signBits, outputMagnitude));
             return true;
         }
 
@@ -2301,6 +4047,7 @@ public static partial class Gen5SpirvTranslator
             else if (opcode is
                      "VCmpFF32" or "VCmpxFF32" or
                      "VCmpFF16" or "VCmpxFF16" or
+                     "VCmpFU16" or "VCmpxFU16" or
                      "VCmpFI32" or "VCmpFU32" or
                      "VCmpFI64" or "VCmpxFI64" or "VCmpFU64" or "VCmpxFU64")
             {
@@ -2309,6 +4056,7 @@ public static partial class Gen5SpirvTranslator
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
+                     "VCmpTU16" or "VCmpxTU16" or
                      "VCmpTI32" or "VCmpTU32" or
                      "VCmpTI64" or "VCmpxTI64" or "VCmpTU64" or "VCmpxTU64")
             {
@@ -2470,6 +4218,7 @@ public static partial class Gen5SpirvTranslator
                     ? GetRawSource64(instruction, 1)
                     : GetRawSource(instruction, 1);
                 var signed16 = opcode.EndsWith("I16", StringComparison.Ordinal);
+                var unsigned16 = opcode.EndsWith("U16", StringComparison.Ordinal);
                 var signed = signed16 ||
                     opcode.EndsWith("I32", StringComparison.Ordinal) ||
                     opcode.EndsWith("I64", StringComparison.Ordinal);
@@ -2487,6 +4236,11 @@ public static partial class Gen5SpirvTranslator
                         Bitcast(_intType, right),
                         UInt(0),
                         UInt(16));
+                }
+                else if (unsigned16)
+                {
+                    left = BitwiseAnd(left, UInt(0xFFFF));
+                    right = BitwiseAnd(right, UInt(0xFFFF));
                 }
                 if (signed)
                 {
@@ -2511,6 +4265,13 @@ public static partial class Gen5SpirvTranslator
                     "VCmpNeU32" or "VCmpxNeU32" => SpirvOp.INotEqual,
                     "VCmpEqI16" or "VCmpxEqI16" => SpirvOp.IEqual,
                     "VCmpNeI16" or "VCmpxNeI16" => SpirvOp.INotEqual,
+                    "VCmpNeU16" => SpirvOp.INotEqual,
+                    "VCmpxNeU16" => SpirvOp.INotEqual,
+                    "VCmpEqU16" or "VCmpxEqU16" => SpirvOp.IEqual,
+                    "VCmpLtU16" or "VCmpxLtU16" => SpirvOp.ULessThan,
+                    "VCmpLeU16" or "VCmpxLeU16" => SpirvOp.ULessThanEqual,
+                    "VCmpGtU16" or "VCmpxGtU16" => SpirvOp.UGreaterThan,
+                    "VCmpGeU16" or "VCmpxGeU16" => SpirvOp.UGreaterThanEqual,
                     "VCmpNeU64" or "VCmpxNeU64" or
                     "VCmpNeI64" or "VCmpxNeI64" => SpirvOp.INotEqual,
                     "VCmpLtI16" or "VCmpxLtI16" => SpirvOp.SLessThan,
@@ -2663,15 +4424,7 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SBcnt1I32B64")
             {
-                // Vulkan only allows OpBitCount on 32-bit operands without
-                // maintenance9, so count each half separately.
-                var wide = GetRawSource64(instruction, 0);
-                var bitCountResult = IAdd(
-                    _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(wide)),
-                    _module.AddInstruction(
-                        SpirvOp.BitCount,
-                        _uintType,
-                        Narrow(ShiftRightLogical64(wide, _module.Constant64(_ulongType, 32)))));
+                var bitCountResult = BitCount64(GetRawSource64(instruction, 0));
                 StoreS(destination, bitCountResult);
                 Store(_scc, IsNotZero(bitCountResult));
                 return true;
@@ -2724,12 +4477,12 @@ public static partial class Gen5SpirvTranslator
                     SpirvOp.ISub,
                     _uintType,
                     UInt(31),
-                    Ext(74, _uintType, high));
+                    Ext(75, _uintType, high));
                 var lowClz = _module.AddInstruction(
                     SpirvOp.ISub,
                     _uintType,
                     UInt(31),
-                    Ext(74, _uintType, low));
+                    Ext(75, _uintType, low));
                 var lowResult = IAdd(lowClz, UInt(32));
                 var leadingZeroResult = _module.AddInstruction(
                     SpirvOp.Select,
@@ -2746,6 +4499,40 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (instruction.Opcode == "SBitreplicateB64B32")
+            {
+                var value = _module.AddInstruction(
+                    SpirvOp.UConvert,
+                    _ulongType,
+                    GetRawSource(instruction, 0));
+                foreach (var (shift, mask) in new (ulong Shift, ulong Mask)[]
+                {
+                    (16, 0x0000_FFFF_0000_FFFF),
+                    (8, 0x00FF_00FF_00FF_00FF),
+                    (4, 0x0F0F_0F0F_0F0F_0F0F),
+                    (2, 0x3333_3333_3333_3333),
+                    (1, 0x5555_5555_5555_5555),
+                })
+                {
+                    value = _module.AddInstruction(
+                        SpirvOp.BitwiseAnd,
+                        _ulongType,
+                        _module.AddInstruction(
+                            SpirvOp.BitwiseOr,
+                            _ulongType,
+                            value,
+                            _module.AddInstruction(SpirvOp.ShiftLeftLogical, _ulongType, value, ULong(shift))),
+                        ULong(mask));
+                }
+
+                StoreS64(destination, _module.AddInstruction(
+                    SpirvOp.BitwiseOr,
+                    _ulongType,
+                    value,
+                    _module.AddInstruction(SpirvOp.ShiftLeftLogical, _ulongType, value, ULong(1))));
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("B64", StringComparison.Ordinal) ||
                 instruction.Opcode == "SAshrI64" ||
                 instruction.Opcode is "SWqmB64" or "SBfeU64" or "SBfeI64")
@@ -2754,15 +4541,6 @@ public static partial class Gen5SpirvTranslator
             }
 
             var left = GetRawSource(instruction, 0);
-            if (instruction.Opcode == "SBitreplicateB64B32")
-            {
-                // S_BITREPLICATE_B64_B32 broadcasts the source dword into both
-                // halves of its 64-bit SGPR destination and does not update SCC.
-                StoreS(destination, left);
-                StoreS(destination + 1, left);
-                return true;
-            }
-
             if (instruction.Opcode.EndsWith("SaveexecB32", StringComparison.Ordinal))
             {
                 var oldExec64 = BooleanToWaveMask(Load(_boolType, _exec));
@@ -2869,11 +4647,11 @@ public static partial class Gen5SpirvTranslator
                     return true;
                 case "SFlbitI32B32":
                 {
-                    // Count leading zero bits, 0xFFFFFFFF when the source is zero.
-                    var msb = Ext(74, _uintType, left);
-                    var clz = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(31), msb);
-                    result = _module.AddInstruction(
-                        SpirvOp.Select, _uintType, IsNotZero(left), clz, UInt(0xFFFFFFFFu));
+                    var highest = Ext(75, _uintType, left);
+                    var leading = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(31), highest);
+                    result = _module.AddInstruction(SpirvOp.Select, _uintType,
+                        _module.AddInstruction(SpirvOp.IEqual, _boolType, left, UInt(0)),
+                        UInt(uint.MaxValue), leading);
                     StoreS(destination, result);
                     return true;
                 }
@@ -3034,47 +4812,13 @@ public static partial class Gen5SpirvTranslator
                                 right);
                             break;
                         case "SMulHiI32":
-                        {
-                            var wideLeft = _module.AddInstruction(
-                                SpirvOp.SConvert,
-                                _longType,
-                                Bitcast(_intType, left));
-                            var wideRight = _module.AddInstruction(
-                                SpirvOp.SConvert,
-                                _longType,
-                                Bitcast(_intType, right));
-                            var product = _module.AddInstruction(
-                                SpirvOp.IMul,
-                                _longType,
-                                wideLeft,
-                                wideRight);
                             result = Bitcast(
                                 _uintType,
-                                _module.AddInstruction(
-                                    SpirvOp.SConvert,
-                                    _intType,
-                                    _module.AddInstruction(
-                                        SpirvOp.ShiftRightArithmetic,
-                                        _longType,
-                                        product,
-                                        _module.Constant64(_longType, 32))));
+                                MultiplyExtended(Bitcast(_intType, left), Bitcast(_intType, right), signed: true).High);
                             break;
-                        }
                         case "SMulHiU32":
-                        {
-                            var product = _module.AddInstruction(
-                                SpirvOp.IMul,
-                                _ulongType,
-                                _module.AddInstruction(SpirvOp.UConvert, _ulongType, left),
-                                _module.AddInstruction(SpirvOp.UConvert, _ulongType, right));
-                            result = _module.AddInstruction(
-                                SpirvOp.UConvert,
-                                _uintType,
-                                ShiftRightLogical64(
-                                    product,
-                                    _module.Constant64(_ulongType, 32)));
+                            result = MultiplyExtended(left, right, signed: false).High;
                             break;
-                        }
                         case "SAndB32":
                             result = BitwiseAnd(left, right);
                             Store(_scc, IsNotZero(result));
@@ -3425,6 +5169,12 @@ public static partial class Gen5SpirvTranslator
             // scalar 64-bit source operand.
             if (instruction.Opcode is "SBitset0B64" or "SBitset1B64")
             {
+                if (instruction.Sources.Count == 0)
+                {
+                    error = $"missing scalar bit index for {instruction.Opcode}";
+                    return false;
+                }
+
                 var bitIndex = Widen(BitwiseAnd(GetRawSource(instruction, 0), UInt(63)));
                 var selected = ShiftLeftLogical64(
                     _module.Constant64(_ulongType, 1),
@@ -3448,7 +5198,9 @@ public static partial class Gen5SpirvTranslator
             var left = GetRawSource64(instruction, 0);
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
-                var oldExec = BooleanToWaveMask(Load(_boolType, _exec));
+                var oldExec = _emulateWave64 && _subgroupInvocationIdInput != 0
+                    ? LoadS64(126)
+                    : BooleanToWaveMask(Load(_boolType, _exec));
                 var notLeft = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
                 var newExec = instruction.Opcode switch
                 {
@@ -3821,14 +5573,14 @@ public static partial class Gen5SpirvTranslator
                     _module.AddInstruction(
                         SpirvOp.Select,
                         _uintType,
-                        LogicalNot(SubgroupAny(Load(_boolType, _vcc))),
+                        LogicalNot(WaveMaskAny(106, _vcc)),
                         UInt(1),
                         UInt(0)),
                 Gen5OperandKind.EncodedConstant when operand.Value == 252 =>
                     _module.AddInstruction(
                         SpirvOp.Select,
                         _uintType,
-                        LogicalNot(SubgroupAny(Load(_boolType, _exec))),
+                        LogicalNot(WaveMaskAny(126, _exec)),
                         UInt(1),
                         UInt(0)),
                 Gen5OperandKind.EncodedConstant when operand.Value == 253 =>
@@ -4607,7 +6359,8 @@ public static partial class Gen5SpirvTranslator
         private uint EmitInteger16Binary(
             Gen5ShaderInstruction instruction,
             uint destination,
-            SpirvOp operation)
+            SpirvOp operation,
+            bool signed = false)
         {
             var control = instruction.Control as Gen5Vop3Control;
             var left = GetRawSource(instruction, 0, applySdwaIntegerModifiers: false);
@@ -4625,11 +6378,122 @@ public static partial class Gen5SpirvTranslator
 
             left = BitwiseAnd(left, UInt(0xFFFF));
             right = BitwiseAnd(right, UInt(0xFFFF));
-            var low16 = BitwiseAnd(
-                _module.AddInstruction(operation, _uintType, left, right),
-                UInt(0xFFFF));
+            uint operationResult;
+            if (control?.Clamp == true && signed)
+            {
+                var signedLeft = _module.AddInstruction(
+                    SpirvOp.BitFieldSExtract,
+                    _intType,
+                    Bitcast(_intType, left),
+                    UInt(0),
+                    UInt(16));
+                var signedRight = _module.AddInstruction(
+                    SpirvOp.BitFieldSExtract,
+                    _intType,
+                    Bitcast(_intType, right),
+                    UInt(0),
+                    UInt(16));
+                var signedResult = _module.AddInstruction(operation, _intType, signedLeft, signedRight);
+                var minimum = Bitcast(_intType, UInt(0xFFFF_8000));
+                var maximum = Bitcast(_intType, UInt(0x0000_7FFF));
+                var belowMinimum = _module.AddInstruction(
+                    SpirvOp.SLessThan,
+                    _boolType,
+                    signedResult,
+                    minimum);
+                var lowerClamped = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _intType,
+                    belowMinimum,
+                    minimum,
+                    signedResult);
+                var aboveMaximum = _module.AddInstruction(
+                    SpirvOp.SGreaterThan,
+                    _boolType,
+                    lowerClamped,
+                    maximum);
+                var signedClamped = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _intType,
+                    aboveMaximum,
+                    maximum,
+                    lowerClamped);
+                operationResult = Bitcast(_uintType, signedClamped);
+            }
+            else
+            {
+                operationResult = _module.AddInstruction(operation, _uintType, left, right);
+                if (control?.Clamp == true && operation == SpirvOp.IAdd)
+                {
+                    var aboveMaximum = _module.AddInstruction(
+                        SpirvOp.UGreaterThan,
+                        _boolType,
+                        operationResult,
+                        UInt(0xFFFF));
+                    operationResult = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        aboveMaximum,
+                        UInt(0xFFFF),
+                        operationResult);
+                }
+                else if (control?.Clamp == true && operation == SpirvOp.ISub)
+                {
+                    var belowMinimum = _module.AddInstruction(
+                        SpirvOp.ULessThan,
+                        _boolType,
+                        left,
+                        right);
+                    operationResult = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        belowMinimum,
+                        UInt(0),
+                        operationResult);
+                }
+            }
+
+            var low16 = BitwiseAnd(operationResult, UInt(0xFFFF));
             var current = LoadV(destination);
 
+            return (control?.OperandSelect & 0x8) != 0
+                ? BitwiseOr(
+                    BitwiseAnd(current, UInt(0x0000_FFFF)),
+                    ShiftLeftLogical(low16, UInt(16)))
+                : BitwiseOr(
+                    BitwiseAnd(current, UInt(0xFFFF_0000)),
+                    low16);
+        }
+
+        private uint EmitInteger16ShiftReverse(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            SpirvOp shiftOperation)
+        {
+            // RDNA2 *_REV_B16 uses S0's low four bits as the count and S1's
+            // selected low half as the value. VOP3 OPSEL selects both source
+            // halves and the destination half independently.
+            var control = instruction.Control as Gen5Vop3Control;
+            var shift = GetRawSource(instruction, 0, applySdwaIntegerModifiers: false);
+            var value = GetRawSource(instruction, 1, applySdwaIntegerModifiers: false);
+            if ((control?.OperandSelect & 0x1) != 0)
+            {
+                shift = ShiftRightLogical(shift, UInt(16));
+            }
+
+            if ((control?.OperandSelect & 0x2) != 0)
+            {
+                value = ShiftRightLogical(value, UInt(16));
+            }
+
+            var low16 = BitwiseAnd(
+                _module.AddInstruction(
+                    shiftOperation,
+                    _uintType,
+                    BitwiseAnd(value, UInt(0xFFFF)),
+                    BitwiseAnd(shift, UInt(0xF))),
+                UInt(0xFFFF));
+            var current = LoadV(destination);
             return (control?.OperandSelect & 0x8) != 0
                 ? BitwiseOr(
                     BitwiseAnd(current, UInt(0x0000_FFFF)),
@@ -4905,76 +6769,48 @@ public static partial class Gen5SpirvTranslator
 
         // An emulated wave64 spans two host subgroups, so a subgroup broadcast cannot reach
         // the other half. The selected guest lane publishes through workgroup scratch, like
-        // BroadcastFirstWave64Active; the trailing barrier keeps the next use from racing.
-        private uint BroadcastWave64Lane(uint value, uint lane)
-        {
-            EmitConditional(
-                _module.AddInstruction(SpirvOp.IEqual, _boolType, GuestWaveLane(), lane),
-                () => Store(WaveBroadcastScratchPointer(), value));
-            EmitWave64Barrier();
-            var result = Load(_uintType, WaveBroadcastScratchPointer());
-            EmitWave64Barrier();
-            return result;
-        }
+        // BroadcastFirstWave64Active.
+        private uint BroadcastWave64Lane(uint value, uint lane) =>
+            ExchangeWave64Value(_module.AddInstruction(SpirvOp.IEqual, _boolType, GuestWaveLane(), lane), value);
 
         private uint BroadcastFirstWave64Active(uint value)
         {
             var lane = GuestWaveLane();
-            EmitConditional(
-                _module.AddInstruction(
-                    SpirvOp.IEqual,
-                    _boolType,
-                    lane,
-                    UInt(0)),
-                () => Store(WaveBroadcastScratchPointer(), UInt(0)));
-            EmitWave64Barrier();
-
-            var activeMask = BooleanToWaveMask(Load(_boolType, _exec));
-            var lowMask = _module.AddInstruction(
-                SpirvOp.UConvert,
-                _uintType,
-                activeMask);
-            var highMask = _module.AddInstruction(
-                SpirvOp.UConvert,
-                _uintType,
-                ShiftRightLogical64(
-                    activeMask,
-                    _module.Constant64(_ulongType, 32)));
-            var hasLow = IsNotZero(lowMask);
-            var hasHigh = IsNotZero(highMask);
-            var firstLow = Ext(73, _uintType, lowMask);
-            var firstHigh = IAdd(UInt(32), Ext(73, _uintType, highMask));
-            var firstLane = _module.AddInstruction(
+            var upperHalf = ShiftRightLogical(lane, UInt(5));
+            var activeInHalf = OwnHalfBallot(Load(_boolType, _exec));
+            var halfHasActive = IsNotZero(activeInHalf);
+            var firstInHalf = _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
-                hasLow,
-                firstLow,
-                _module.AddInstruction(
-                    SpirvOp.Select,
-                    _uintType,
-                    hasHigh,
-                    firstHigh,
-                    UInt(0)));
-            var isFirst = _module.AddInstruction(
-                SpirvOp.IEqual,
-                _boolType,
-                lane,
-                firstLane);
-            EmitConditional(
-                _module.AddInstruction(
-                    SpirvOp.LogicalAnd,
-                    _boolType,
-                    isFirst,
-                    _module.AddInstruction(
-                        SpirvOp.LogicalOr,
-                        _boolType,
-                        hasLow,
-                        hasHigh)),
-                () => Store(WaveBroadcastScratchPointer(), value));
+                halfHasActive,
+                Ext(73, _uintType, activeInHalf),
+                UInt(0));
+            var halfBase = BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(~31u));
+            var halfValue = _module.AddInstruction(
+                SpirvOp.GroupNonUniformBroadcast,
+                _uintType,
+                UInt(3),
+                value,
+                IAdd(halfBase, firstInHalf));
+            var exchange = BeginWave64Exchange();
+            EmitConditional(IsHalfWaveLeader(lane), () =>
+            {
+                Store(Wave64ExchangePointer(exchange, upperHalf), halfValue);
+                Store(
+                    Wave64ExchangePointer(exchange, IAdd(UInt(2), upperHalf)),
+                    _module.AddInstruction(SpirvOp.Select, _uintType, halfHasActive, UInt(1), UInt(0)));
+            });
             EmitWave64Barrier();
-            var result = Load(_uintType, WaveBroadcastScratchPointer());
-            EmitWave64Barrier();
-            return result;
+            var lowerValue = Load(_uintType, Wave64ExchangePointer(exchange, UInt(0)));
+            var upperValue = Load(_uintType, Wave64ExchangePointer(exchange, UInt(1)));
+            var lowerActive = IsNotZero(Load(_uintType, Wave64ExchangePointer(exchange, UInt(2))));
+            var upperActive = IsNotZero(Load(_uintType, Wave64ExchangePointer(exchange, UInt(3))));
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, LogicalNot(lowerActive), upperActive),
+                upperValue,
+                lowerValue);
         }
 
         private void StoreCarryOut(
@@ -5015,13 +6851,7 @@ public static partial class Gen5SpirvTranslator
             {
                 // The selected guest lane can belong to another host subgroup.
                 // Read it even when the guest execution mask disables that lane.
-                var isSelectedLane = _module.AddInstruction(
-                    SpirvOp.IEqual, _boolType, GuestWaveLane(), selectedLane);
-                EmitConditional(isSelectedLane, () => Store(WaveBroadcastScratchPointer(), sourceValue));
-                EmitWave64Barrier();
-                var broadcast = Load(_uintType, WaveBroadcastScratchPointer());
-                EmitWave64Barrier();
-                StoreS(destination, broadcast);
+                StoreS(destination, BroadcastWave64Lane(sourceValue, selectedLane));
             }
             else if (_subgroupInvocationIdInput != 0)
             {

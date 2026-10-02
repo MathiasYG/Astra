@@ -12,12 +12,14 @@ public sealed partial class RenderExecutor
 {
     // Every draw resolves its targets against layer zero of the view range.
     private const uint DrawLayerOffset = 0;
+    private const byte ColorModeNormal = 1;
 
     // Finds the color and depth targets; false when the draw has nothing to render into.
     private bool TryResolveDrawTargets(RegisterBanks banks, in DrawCall draw, ref DrawState state)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawTargetResolution);
         var context = banks.Context;
+        state.PixelActive = HasActivePixelShader(banks);
         if (TryResolveMultisampleColor(context))
         {
             TraceDrawDisposition(banks, in draw, "multisample-color-resolve");
@@ -26,6 +28,13 @@ public sealed partial class RenderExecutor
 
         for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
         {
+            // In normal color mode, a zero CB_SHADER_MASK field disables the MRT.
+            // Leaving that image out of the Vulkan scope avoids imposing its sample count on this draw.
+            if (state.PixelActive && context.ColorControl.Mode == ColorModeNormal && context.ShaderInterface.ColorShaderMaskForSlot(slot) == 0)
+            {
+                continue;
+            }
+
             if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
             {
                 continue;
@@ -50,7 +59,6 @@ public sealed partial class RenderExecutor
             state.Depth = new DepthAttachmentState(in depthTarget, image);
         }
 
-        state.PixelActive = HasActivePixelShader(banks);
         if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive)
         {
             TraceDrawDisposition(banks, in draw, "no-framebuffer");
@@ -184,7 +192,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        var exportMasks = pixelProgram?.PixelColorExportMasks ?? uint.MaxValue;
+        var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
         var kept = 0u;
         for (var i = 0; i < state.ColorCount; i++)
         {
@@ -205,7 +213,7 @@ public sealed partial class RenderExecutor
         ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
 
     // Acquires every attachment through the host and assembles the rendering scope.
-    private RenderingState AcquireAttachments(ref DrawState state)
+    private RenderingState AcquireAttachments(ref DrawState state, in ContextRegisters context)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawAttachmentPreparation);
         var rendering = new RenderingState
@@ -231,6 +239,11 @@ public sealed partial class RenderExecutor
             if (acquired.Samples != samples || acquired.View.Handle == 0)
             {
                 throw _host.Fatal($"The color attachment does not match its target: slot={target.Slot} imageSamples={acquired.Samples} targetSamples={samples} view=0x{acquired.View.Handle:X}.");
+            }
+
+            if (!IsSupportedSampleCount(samples))
+            {
+                throw _host.Fatal($"The color target requests an unsupported sample count: slot={target.Slot} samples={samples}.");
             }
 
             if (attachmentSamples == 0)
@@ -259,7 +272,8 @@ public sealed partial class RenderExecutor
                 HasDepth: false,
                 DepthClear: false,
                 HasStencil: false,
-                StencilClear: false);
+                StencilClear: false,
+                Samples: samples);
         }
 
         if (state.Depth.HasTarget)
@@ -274,13 +288,14 @@ public sealed partial class RenderExecutor
                 throw _host.Fatal($"The depth attachment does not match its target: imageSamples={acquired.Samples} targetSamples={target.Samples} view=0x{acquired.View.Handle:X}.");
             }
 
+            if (!IsSupportedSampleCount(target.Samples))
+            {
+                throw _host.Fatal($"The depth target requests an unsupported sample count: samples={target.Samples}.");
+            }
+
             if (attachmentSamples == 0)
             {
                 attachmentSamples = target.Samples;
-            }
-            else if (attachmentSamples != target.Samples)
-            {
-                throw _host.Fatal($"Mixed color and depth sample counts are not supported: color={attachmentSamples} depth={target.Samples}.");
             }
 
             var loadState = depth.LoadState;
@@ -303,7 +318,8 @@ public sealed partial class RenderExecutor
                 HasDepth: (aspects & ImageAspectFlags.DepthBit) != 0,
                 DepthClear: depth.LoadClear,
                 HasStencil: (aspects & ImageAspectFlags.StencilBit) != 0,
-                StencilClear: depth.Target.State.StencilClearEnabled);
+                StencilClear: depth.Target.State.StencilClearEnabled,
+                Samples: target.Samples);
         }
 
         if (state.ColorCount == 0 && !state.Depth.HasTarget)
@@ -316,6 +332,14 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The render state has no valid attachments: samples={attachmentSamples} colors={state.ColorCount} depth={state.Depth.HasTarget}.");
         }
 
+        var rasterizationSamples = 1u << context.AntialiasingConfig.SampleCountLog2;
+        if (!IsSupportedSampleCount(rasterizationSamples))
+        {
+            throw _host.Fatal(
+                $"The draw requests an unsupported rasterization sample count: samples={rasterizationSamples} " +
+                $"sampleCountLog2={context.AntialiasingConfig.SampleCountLog2}.");
+        }
+
         if (rendering.Layers == uint.MaxValue)
         {
             rendering.Layers = 1;
@@ -326,7 +350,7 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The rendering area is invalid: width={rendering.Width} height={rendering.Height} layers={rendering.Layers}.");
         }
 
-        rendering.Samples = attachmentSamples == 0 ? 1 : attachmentSamples;
+        rendering.Samples = rasterizationSamples;
         return rendering;
     }
 }

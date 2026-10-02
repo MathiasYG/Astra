@@ -168,6 +168,9 @@ public sealed class TileGeometryTests
         Assert.True(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Bc1UNorm, GuestTileMode.Standard64KB, volume: false, out var compressed));
         Assert.Equal((4u, 4u, 8u), (compressed.TexelWidth, compressed.TexelHeight, compressed.Block.BytesPerElement));
         Assert.False(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Bc1UNorm, GuestTileMode.RenderTarget, volume: false, out _));
+        Assert.True(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Bits8_8Srgb, GuestTileMode.RenderTarget, volume: false, out var srgb));
+        Assert.Equal((TileBlockKind.RenderTarget64KB, 2u, 1u, 1u),
+            (srgb.Block.Kind, srgb.Block.BytesPerElement, srgb.TexelWidth, srgb.TexelHeight));
         Assert.False(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Invalid, GuestTileMode.Standard64KB, volume: false, out _));
     }
 
@@ -207,6 +210,16 @@ public sealed class TileGeometryTests
         Assert.True(TileGeometry.TryGetTextureSize(GuestPixelFormat.Bits8_8_8_8UNorm, 256, 256, 1, GuestTileMode.Standard256B, out var small, null, null));
         Assert.Equal(new TileSizeAndAlignment(256 * 256 * 4, 256), small);
         Assert.False(TileGeometry.TryGetTextureSize(GuestPixelFormat.Invalid, 256, 256, 1, GuestTileMode.Standard64KB, out _, null, null));
+    }
+
+    [Fact]
+    public void UnrenderableUncompressedTextureCanUseRenderTargetSwizzle()
+    {
+        Assert.Equal(2u, GuestPixelFormats.RenderTargetBytesPerElement(GuestPixelFormat.Bits8_8Srgb));
+        Assert.True(TileGeometry.TryGetTextureSize(GuestPixelFormat.Bits8_8Srgb,
+            1920, 2160, 1, GuestTileMode.RenderTarget, out var size, null, null));
+        Assert.Equal(new TileSizeAndAlignment(8_912_896u, 65_536u), size);
+        Assert.Equal(2048u, TileGeometry.TexturePitch(GuestPixelFormat.Bits8_8Srgb, 1920, GuestTileMode.RenderTarget));
     }
 
     [Fact]

@@ -88,13 +88,82 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(state.FrontMasks, state.BackMasks);
 
         context.StencilMask.OperationValue = 0x20;
+        context.DepthTarget = context.DepthTarget with { DepthControl = DepthControl(CompareOp.Less, CompareOp.Equal) };
         Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+
+        // A zero compare mask makes the changed reference irrelevant to comparison, so Vulkan
+        // can use the operation value for REPLACE without changing which fragments pass.
+        context.StencilMask.Mask = 0;
+        state = DepthTargetResolver.ResolveState(context, true, Fatal);
+        Assert.Equal(new StencilMasks(0, 0xFF, 0x20), state.FrontMasks);
 
         // Without a write mask the operations have no effect, so the mismatch does not matter.
         context.StencilMask.WriteMask = 0;
         state = DepthTargetResolver.ResolveState(context, true, Fatal);
-        Assert.Equal(StencilOperations.Default with { Compare = CompareOp.Always }, state.FrontOperations);
+        Assert.Equal(StencilOperations.Default with { Compare = CompareOp.Equal }, state.FrontOperations);
         Assert.Equal(0u, state.FrontMasks.WriteMask);
+    }
+
+    [Fact]
+    public void DepthState_StencilReplacementCanUseEquivalentMaskedReference()
+    {
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(CompareOp.Less, CompareOp.Equal));
+        context.StencilMask.TestValue = 0x10;
+        context.StencilMask.Mask = 0x0F;
+
+        var state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
+
+        Assert.Equal(new StencilMasks(0x0F, 0xFF, 0x20), state.FrontMasks);
+
+        // Always and Never do not use the reference for comparison, even with a full mask.
+        context.StencilMask.Mask = 0xFF;
+        context.DepthTarget = context.DepthTarget with { DepthControl = DepthControl(CompareOp.Less, CompareOp.Always) };
+        state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
+        Assert.Equal(0x20u, state.FrontMasks.Reference);
+    }
+
+    [Fact]
+    public void DepthState_EqualTestCanTranslateOperationValueReplacementToMaskedInvert()
+    {
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x40, DepthControl(CompareOp.Less, CompareOp.Equal));
+        context.StencilControl.DepthFail = 0;
+        context.StencilMask.TestValue = 0xFF;
+
+        var state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
+
+        Assert.Equal(new StencilOperations(StencilOp.Keep, StencilOp.Invert, StencilOp.Keep, CompareOp.Equal), state.FrontOperations);
+        Assert.Equal(new StencilMasks(0xFF, 0xBF, 0xFF), state.FrontMasks);
+
+        // The Equal test only passes for 0xFF. Invert toggles the differing bits and
+        // leaves the shared bit intact, exactly matching the guest replacement.
+        for (var stencil = 0; stencil <= byte.MaxValue; stencil++)
+        {
+            var before = (byte)stencil;
+            var guestAfter = before == 0xFF ? (byte)0x40 : before;
+            var vulkanAfter = before == state.FrontMasks.Reference
+                ? (byte)((before & ~(byte)state.FrontMasks.WriteMask) | ((byte)~before & (byte)state.FrontMasks.WriteMask))
+                : before;
+            Assert.Equal(guestAfter, vulkanAfter);
+        }
+
+        // A replacement in the stencil-fail path has no known input value, and an
+        // incomplete compare mask does not establish all written bits.
+        context.StencilControl.Fail = 4;
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+        context.StencilControl.Fail = 0;
+        context.StencilMask.Mask = 0x7F;
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+    }
+
+    [Fact]
+    public void DepthState_RejectsMixedReplacementValuesWhenBothCanAffectWrites()
+    {
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(CompareOp.Less, CompareOp.Always));
+        context.StencilMask.TestValue = 0x10;
+        context.StencilMask.Mask = 0;
+        context.StencilControl.Fail = 3;
+
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
     }
 
     [Fact]

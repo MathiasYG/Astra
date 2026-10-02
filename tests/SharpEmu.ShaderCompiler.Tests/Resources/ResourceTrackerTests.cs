@@ -401,10 +401,101 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void MalformedIndirectImage_IsRejected()
+    public void MalformedIndirectImage_RejectsNonemptyDynamicBuffer()
     {
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(IndirectImageProgram(true)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        var plan = Extract(IndirectImageProgram(true));
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Null(source.IndirectImage);
+        Assert.NotNull(source.ZeroExtentBufferSource);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.False(ResourceMaterializer.Materialize(
+            plan,
+            Inputs([0x1000, 224u << 16, 2, 0, 0x2000, 16u << 16, 4, 0, 7],
+                readCleanMemory: LinearMemory().Read),
+            ref snapshot,
+            ref specialization));
+    }
+
+    [Fact]
+    public void UniformScalarBufferSamplerUsesTheSelectedNonemptyRecord()
+    {
+        var program = Program(
+            Sop2(0, "SLshlB32", 20, Gen5Operand.Scalar(4), Operand(4)),
+            ScalarBufferLoad(4, 0, destination: 16, count: 4, dynamicOffsetRegister: 20),
+            Image(12, "ImageSample", 8, 16),
+            EndProgram(20));
+        var plan = Extract(program, userDataCount: 16);
+        var userData = new uint[16];
+        userData[0] = 0x1000;
+        userData[1] = 16u << 16;
+        userData[2] = 16;
+        userData[4] = 4;
+        ImageDescriptor().CopyTo(userData, 8);
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[64], RequireAlignment = true };
+        uint[] sampler = [0x123, 0, 0, 0];
+        for (var index = 0; index < sampler.Length; index++) memory.At(0x1040 + (ulong)index * 4) = sampler[index];
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref snapshot, ref specialization));
+        Assert.Equal(sampler, snapshot.Samplers[0]);
+    }
+
+    [Fact]
+    public void DynamicDescriptorsFromZeroExtentBufferAreNullOnlyWhileTheBufferIsEmpty()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 28, count: 4),
+            ReadFirstLane(8, 10, 0),
+            ScalarBufferLoad(12, 28, destination: 16, count: 8, dynamicOffsetRegister: 10),
+            ScalarBufferLoad(20, 28, destination: 24, count: 4, dynamicOffsetRegister: 10),
+            Image(28, "ImageSample", 16, 24),
+            EndProgram(36));
+        var plan = Extract(program, userDataCount: 2);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].ZeroExtentBufferSource);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Samplers[0].Source].ZeroExtentBufferSource);
+
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[8], RequireAlignment = true };
+        memory.At(0x1000) = 0x2000;
+        memory.At(0x1004) = 8u << 16;
+        var inputs = Inputs([0x1000, 0], memory.Read, memory.Read);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.All(snapshot.Images[0], word => Assert.Equal(0u, word));
+        Assert.All(snapshot.Samplers[0], word => Assert.Equal(0u, word));
+
+        var priorSnapshot = snapshot;
+        memory.At(0x1008) = 1;
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Same(priorSnapshot, snapshot);
+    }
+
+    [Fact]
+    public void ZeroExtentDescriptorLoadsRemainNullAcrossInvariantLoopPhis()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 28, count: 4),
+            ReadFirstLane(8, 10, 0),
+            ScalarBufferLoad(12, 28, destination: 16, count: 8, dynamicOffsetRegister: 10),
+            ScalarBufferLoad(20, 28, destination: 24, count: 4, dynamicOffsetRegister: 10),
+            Nop(28),
+            Branch(32, "SCbranchScc1", -2),
+            Image(36, "ImageSample", 16, 24),
+            EndProgram(44));
+        var plan = Extract(program, userDataCount: 2);
+        Assert.True(plan.Memory.TryGetIndex(36, 0, out var imageMemoryIndex));
+        Assert.Equal(ScalarValueKind.Phi, plan.Accesses[imageMemoryIndex]!.Handle!.Operands[0].Kind);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].ZeroExtentBufferSource);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Samplers[0].Source].ZeroExtentBufferSource);
+
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[8], RequireAlignment = true };
+        memory.At(0x1000) = 0x2000;
+        memory.At(0x1004) = 8u << 16;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], memory.Read, memory.Read),
+            ref snapshot, ref specialization));
     }
 
     [Fact]
@@ -675,5 +766,56 @@ public sealed class ResourceTrackerTests
 
         Assert.NotNull(layout.Find(DescriptorBindingKind.GlobalDataShare));
         Assert.Null(BindingLayout.Allocate(plan.Info, [], BindingLayout.UsesGlobalDataShare(Program(DataShareWrite(0, gds: false), EndProgram(8))), false, false).Find(DescriptorBindingKind.GlobalDataShare));
+    }
+}
+
+public sealed class ScalarImageConsumerTests
+{
+    private static ShaderResourcePlan Plan(Gen5ShaderInstruction consumer)
+    {
+        var program = DirectImageTableTests.CreateProgram();
+        program = program with
+        {
+            Instructions = program.Instructions.Select(instruction =>
+                instruction.Pc == 40 ? consumer : instruction).ToArray(),
+        };
+        return ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+    }
+
+    private static void AssertSuppressed(ShaderResourcePlan plan, bool suppressed)
+    {
+        Assert.Single(plan.IndirectImages);
+        Assert.True(plan.Memory.TryGetIndex(24, 0, out var index));
+        Assert.Equal(suppressed, plan.Memory[index].PlanningOnly);
+    }
+
+    [Theory]
+    [InlineData("VMovrelsB32")]
+    [InlineData("VMovreldB32")]
+    [InlineData("VMovrelsdB32")]
+    [InlineData("VMovrelsd2B32")]
+    public void VectorRelativeMoveDoesNotReadScalarImageDescriptor(string opcode)
+    {
+        var consumer = new Gen5ShaderInstruction(40, Gen5ShaderEncoding.Vop1,
+            opcode, [0u], [Gen5Operand.Vector(1), Gen5Operand.Scalar(124)],
+            [Gen5Operand.Vector(12)], null);
+        var plan = Plan(consumer);
+        AssertSuppressed(plan, true);
+    }
+
+    [Theory]
+    [InlineData("SMovrelsB32")]
+    [InlineData("SMovreldB32")]
+    public void ScalarRelativeMoveStillPreventsDescriptorLoadSuppression(string opcode)
+    {
+        var plan = Plan(Sop1(40, opcode, 20, Gen5Operand.Scalar(1)));
+        AssertSuppressed(plan, false);
+    }
+
+    [Fact]
+    public void VectorRelativeDestinationStillReadsItsExplicitScalarSource()
+    {
+        var plan = Plan(Vop1(40, "VMovreldB32", 12, Gen5Operand.Scalar(4)));
+        AssertSuppressed(plan, false);
     }
 }

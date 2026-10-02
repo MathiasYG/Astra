@@ -57,6 +57,13 @@ internal interface IShaderPipelineHost
     // Reads one guest dword only when no GPU work may still own the range.
     bool TryReadCleanGuestWord(ulong address, out uint word);
 
+    bool TryReadCleanGuestWords(ulong address, Span<uint> words)
+    {
+        using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
+        return BitConverter.IsLittleEndian && TryReadResidentGuestBytes(address,
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(words), clean: true);
+    }
+
     // Copies guest bytes the CPU already holds, without synchronizing. False when the GPU
     // may own the range (or, for a clean read, when a clean word read would be refused);
     // the resource cache then re-materializes instead of trusting a stale copy.

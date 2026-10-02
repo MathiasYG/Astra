@@ -11,7 +11,10 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // Active is the EXEC mask the access runs under: a lane outside it performs no access,
 // so a lane-masked register write under the same mask contributes only its new value.
 public sealed record MemoryAccessBinding(ScalarValue? Handle, ScalarValue? SamplerHandle, ScalarValue? Read, ScalarValue? Offset = null,
-    ScalarValue? Active = null);
+    ScalarValue? Active = null)
+{
+    public ScalarValue? ExecutionMask { get; init; }
+}
 
 // The uniform value graph of one program: every value a descriptor can be assembled
 // from, symbolic in user data and in the shader base.
@@ -45,6 +48,7 @@ public sealed partial class ScalarValueGraph
     public IReadOnlyList<ScalarValue> Values => _values;
 
     internal Dictionary<uint, ScalarValue> BranchConditions { get; } = [];
+    internal Dictionary<uint, ScalarValue> ScalarCompareConditions { get; } = [];
 
     public bool Equivalent(ScalarValue left, ScalarValue right) => ScalarValueEquivalence.Equivalent(Memory, left, right);
 

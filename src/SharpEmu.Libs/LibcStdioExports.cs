@@ -371,6 +371,29 @@ public static class LibcStdioExports
 
         if (!_fileHandles.TryGetValue(handle, out var file))
         {
+            // A loaded libc owns its own FILE objects (including the standard
+            // streams). Let that libc apply its buffering rules to those objects;
+            // an HLE FileStream cannot interpret their guest-side layout.
+            var scheduler = GuestThreadExecution.Scheduler;
+            if (scheduler is not null &&
+                scheduler.TryResolveGuestSymbol("QMFyLoqNxIg", out var nativeSetvbuf) &&
+                scheduler.TryCallGuestFunction(
+                    ctx,
+                    nativeSetvbuf,
+                    handle,
+                    bufferAddress,
+                    unchecked((ulong)(uint)mode),
+                    size,
+                    0,
+                    0,
+                    "libc_setvbuf",
+                    out var nativeResult,
+                    out _))
+            {
+                ctx[CpuRegister.Rax] = nativeResult;
+                return unchecked((int)nativeResult);
+            }
+
             return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ebadf);
         }
 

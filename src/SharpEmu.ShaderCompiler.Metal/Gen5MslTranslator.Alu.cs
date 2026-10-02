@@ -216,8 +216,6 @@ public static partial class Gen5MslTranslator
                 "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
                 "VSqrtF32" => FloatResult(instruction, $"sqrt({F(instruction, 0)})"),
                 "VRsqF32" => FloatResult(instruction, $"rsqrt({F(instruction, 0)})"),
-                "VRcpF16" => Float16Result(instruction, destination, $"(1.0f / {F16(instruction, 0)})"),
-                "VSqrtF16" => Float16Result(instruction, destination, $"sqrt({F16(instruction, 0)})"),
                 "VLogF16" => Float16Result(instruction, destination, $"log2({F16(instruction, 0)})"),
                 "VExpF16" => Float16Result(instruction, destination, $"exp2({F16(instruction, 0)})"),
                 "VFloorF16" => Float16Result(instruction, destination, $"floor({F16(instruction, 0)})"),
@@ -231,7 +229,15 @@ public static partial class Gen5MslTranslator
                     instruction,
                     destination,
                     $"rsqrt({F16(instruction, 0)})"),
+                "VSqrtF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"sqrt({F16(instruction, 0)})"),
                 "VRcpF32" or "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
+                "VRcpF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"(1.0f / {F16(instruction, 0)})"),
                 "VLogF32" => FloatResult(instruction, $"log2({F(instruction, 0)})"),
                 "VExpF32" => FloatResult(instruction, $"exp2({F(instruction, 0)})"),
                 // GCN sin/cos take revolutions; mirror the SPIR-V Tau prescale.
@@ -239,18 +245,19 @@ public static partial class Gen5MslTranslator
                 "VCosF32" => FloatResult(instruction, $"cos({F(instruction, 0)} * {TauLiteral})"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
-                "VMin3F16" => Float16Result(instruction, destination,
-                    $"fmin(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMax3F16" => Float16Result(instruction, destination,
                     $"fmax(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
-                "VMed3F16" => Float16Result(instruction, destination,
-                    $"fmax(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), fmin(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)}))"),
                 "VMin3F32" =>
                     FloatResult(instruction, $"fmin(fmin({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)})"),
+                "VMin3F16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"fmin(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMax3F32" =>
                     FloatResult(instruction, $"fmax(fmax({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)})"),
                 "VMed3F32" =>
                     FloatResult(instruction, $"fmax(fmin({F(instruction, 0)}, {F(instruction, 1)}), fmin(fmax({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)}))"),
+                "VMed3F16" => EmitFloat16Median3(instruction, destination),
 
                 // ---- conversions ----
                 "VCvtF32I32" => FloatResult(instruction, $"(float)as_type<int>({RawSource(instruction, 0)})"),
@@ -289,6 +296,8 @@ public static partial class Gen5MslTranslator
                 // ---- integer arithmetic ----
                 "VAddU32" or "VAddI32" =>
                     $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}))",
+                "VAddNcU16" => EmitInteger16Binary(instruction, destination, signed: false, subtract: false),
+                "VSubNcI16" => EmitInteger16Binary(instruction, destination, signed: true, subtract: true),
                 "VSubU32" or "VSubI32" =>
                     $"(({RawSource(instruction, 0)}) - ({RawSource(instruction, 1)}))",
                 "VSubrevU32" or "VSubrevI32" =>
@@ -353,8 +362,10 @@ public static partial class Gen5MslTranslator
                     $"((({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u)) | ({RawSource(instruction, 2)}))",
                 "VLshlB32" => $"(({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u))",
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
+                "VLshlrevB16" => EmitInteger16ShiftReverse(instruction, destination, left: true),
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
+                "VLshrrevB16" => EmitInteger16ShiftReverse(instruction, destination, left: false),
                 "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
                 "VAshrI32" =>
                     AsUInt($"(as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))"),
@@ -693,6 +704,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpTruF32" or "VCmpxTruF32" or
                      "VCmpTruF16" or "VCmpxTruF16" or
+                     "VCmpTU16" or "VCmpxTU16" or
                      "VCmpTI32" or "VCmpTU32")
             {
                 condition = "true";
@@ -700,6 +712,7 @@ public static partial class Gen5MslTranslator
             else if (opcode is
                      "VCmpFF32" or "VCmpxFF32" or
                      "VCmpFF16" or "VCmpxFF16" or
+                     "VCmpFU16" or "VCmpxFU16" or
                      "VCmpFI32" or "VCmpFU32")
             {
                 condition = "false";
@@ -790,6 +803,11 @@ public static partial class Gen5MslTranslator
 
                 var left = wide ? RawSource64(instruction, 0) : RawSource(instruction, 0);
                 var right = wide ? RawSource64(instruction, 1) : RawSource(instruction, 1);
+                if (opcode.EndsWith("U16", StringComparison.Ordinal))
+                {
+                    left = $"(({left}) & 0xFFFFu)";
+                    right = $"(({right}) & 0xFFFFu)";
+                }
                 condition = signed
                     ? signed16
                         ? $"(int(short(({left}) & 0xFFFFu)) {op} int(short(({right}) & 0xFFFFu)))"
@@ -1136,6 +1154,27 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (instruction.Opcode == "SBitreplicateB64B32")
+            {
+                var value = Temp("ulong", $"(ulong){RawSource(instruction, 0)}");
+                foreach (var (shift, mask) in new (uint Shift, ulong Mask)[]
+                {
+                    (16, 0x0000_FFFF_0000_FFFF),
+                    (8, 0x00FF_00FF_00FF_00FF),
+                    (4, 0x0F0F_0F0F_0F0F_0F0F),
+                    (2, 0x3333_3333_3333_3333),
+                    (1, 0x5555_5555_5555_5555),
+                })
+                {
+                    value = Temp("ulong", $"({value} | ({value} << {shift}u)) & 0x{mask:X16}ul");
+                }
+
+                var result = Temp("ulong", $"{value} | ({value} << 1u)");
+                StoreScalar(destination, $"(uint){result}");
+                StoreScalar(destination + 1, $"(uint)({result} >> 32u)");
+                return true;
+            }
+
             if (instruction.Opcode.EndsWith("B64", StringComparison.Ordinal) ||
                 instruction.Opcode == "SAshrI64" ||
                 instruction.Opcode is "SBfeU64" or "SBfeI64")
@@ -1231,6 +1270,10 @@ public static partial class Gen5MslTranslator
                     StoreScalar(destination, result);
                     return true;
                 }
+                case "SFlbitI32B32":
+                    StoreScalar(destination,
+                        Temp("uint", $"{left} == 0u ? 0xFFFFFFFFu : (uint)clz({left})"));
+                    return true;
                 case "SBitset0B32":
                     StoreScalar(
                         destination,
@@ -1524,6 +1567,21 @@ public static partial class Gen5MslTranslator
             // single pair operand must not be treated as a binary 64-bit op.
             if (instruction.Opcode == "SSwappcB64")
             {
+                return true;
+            }
+
+            if (instruction.Opcode == "SBitset0B64")
+            {
+                if (instruction.Sources.Count == 0)
+                {
+                    error = "missing scalar bit index for SBitset0B64";
+                    return false;
+                }
+
+                var bitIndex = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
+                var current = Temp("ulong", Scalar64Expression(destination));
+                var cleared = Temp("ulong", $"{current} & ~(1ul << {bitIndex})");
+                StoreScalar64(destination, cleared);
                 return true;
             }
 
@@ -1879,6 +1937,93 @@ public static partial class Gen5MslTranslator
             return ((control?.OperandSelect ?? 0) & 8) != 0
                 ? $"((v[{destination}] & 0x0000FFFFu) | (({packed}) << 16))"
                 : $"((v[{destination}] & 0xFFFF0000u) | ({packed}))";
+        }
+
+        private string EmitInteger16Binary(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            bool signed,
+            bool subtract)
+        {
+            var control = instruction.Control as Gen5Vop3Control;
+            var left = RawSource(instruction, 0, applySdwaIntegerModifiers: false);
+            var right = RawSource(instruction, 1, applySdwaIntegerModifiers: false);
+            if ((control?.OperandSelect & 0x1) != 0)
+            {
+                left = $"(({left}) >> 16u)";
+            }
+
+            if ((control?.OperandSelect & 0x2) != 0)
+            {
+                right = $"(({right}) >> 16u)";
+            }
+
+            left = $"(({left}) & 0xFFFFu)";
+            right = $"(({right}) & 0xFFFFu)";
+            var operation = subtract ? "-" : "+";
+            string low16;
+            if (control?.Clamp == true && signed)
+            {
+                var signedResult =
+                    $"(int(short({left})) {operation} int(short({right})))";
+                low16 = $"((uint)clamp({signedResult}, -32768, 32767) & 0xFFFFu)";
+            }
+            else if (control?.Clamp == true && subtract)
+            {
+                low16 = $"(({left}) >= ({right}) ? (({left}) - ({right})) : 0u)";
+            }
+            else if (control?.Clamp == true)
+            {
+                low16 = $"min((({left}) + ({right})), 65535u)";
+            }
+            else
+            {
+                low16 = $"((({left}) {operation} ({right})) & 0xFFFFu)";
+            }
+
+            return (control?.OperandSelect & 0x8) != 0
+                ? $"((v[{destination}] & 0x0000FFFFu) | (({low16}) << 16u))"
+                : $"((v[{destination}] & 0xFFFF0000u) | ({low16}))";
+        }
+
+        private string EmitInteger16ShiftReverse(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            bool left)
+        {
+            var control = instruction.Control as Gen5Vop3Control;
+            var shift = RawSource(instruction, 0, applySdwaIntegerModifiers: false);
+            var value = RawSource(instruction, 1, applySdwaIntegerModifiers: false);
+            if ((control?.OperandSelect & 0x1) != 0)
+            {
+                shift = $"(({shift}) >> 16u)";
+            }
+
+            if ((control?.OperandSelect & 0x2) != 0)
+            {
+                value = $"(({value}) >> 16u)";
+            }
+
+            var operation = left ? "<<" : ">>";
+            var low16 = $"(((({value}) & 0xFFFFu) {operation} (({shift}) & 0xFu)) & 0xFFFFu)";
+            return (control?.OperandSelect & 0x8) != 0
+                ? $"((v[{destination}] & 0x0000FFFFu) | (({low16}) << 16u))"
+                : $"((v[{destination}] & 0xFFFF0000u) | ({low16}))";
+        }
+
+        private string EmitFloat16Median3(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var left = F16(instruction, 0);
+            var middle = F16(instruction, 1);
+            var right = F16(instruction, 2);
+            var minimum = $"fmin(fmin({left}, {middle}), {right})";
+            var maximum = $"fmax(fmax({left}, {middle}), {right})";
+            var median =
+                $"(({maximum}) == ({left}) ? fmax({middle}, {right}) : " +
+                $"(({maximum}) == ({middle}) ? fmax({left}, {right}) : fmax({left}, {middle})))";
+            var result =
+                $"((isnan({left}) || isnan({middle}) || isnan({right})) ? ({minimum}) : ({median}))";
+            return Float16Result(instruction, destination, result);
         }
 
         /// <summary>

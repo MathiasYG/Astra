@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Network;
+using System.Diagnostics;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Network;
@@ -141,5 +142,35 @@ public sealed class NetExportsTests
         _ctx[CpuRegister.Rdi] = 0x0102;
         NetExports.NetHtons(_ctx);
         Assert.NotEqual(0UL, _ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void EpollWait_EmptySetHonorsMillisecondTimeout()
+    {
+        Assert.Equal(0, NetExports.NetInit(_ctx));
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = 0;
+        Assert.True(NetExports.NetEpollCreate(_ctx) > 0);
+        var epollId = _ctx[CpuRegister.Rax];
+
+        try
+        {
+            _ctx[CpuRegister.Rdi] = epollId;
+            _ctx[CpuRegister.Rsi] = 0x1_0000_0000;
+            _ctx[CpuRegister.Rdx] = 1;
+            _ctx[CpuRegister.Rcx] = 40;
+            var elapsed = Stopwatch.StartNew();
+            Assert.Equal(0, NetExports.NetEpollWait(_ctx));
+            elapsed.Stop();
+
+            Assert.Equal(0UL, _ctx[CpuRegister.Rax]);
+            Assert.True(elapsed.ElapsedMilliseconds >= 20,
+                $"An empty epoll set returned after {elapsed.ElapsedMilliseconds} ms for a 40 ms timeout");
+        }
+        finally
+        {
+            _ctx[CpuRegister.Rdi] = epollId;
+            NetExports.NetEpollDestroy(_ctx);
+        }
     }
 }

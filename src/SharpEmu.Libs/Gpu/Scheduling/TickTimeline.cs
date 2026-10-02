@@ -24,6 +24,15 @@ public sealed class TickTimeline
     public void RefreshCompletedTick()
     {
         var counter = _device.ReadTimeline();
+        var nextTick = CurrentTick;
+        if (counter >= nextTick)
+        {
+            // Only reserved ticks can have been signaled. In particular, a driver
+            // returning UINT64_MAX after device loss must not release every
+            // pending resource as though all GPU work had completed.
+            throw SubmissionScheduler.Fatal(
+                $"GPU timeline reported an unissued completion value: completed={counter}, next={nextTick}.");
+        }
         var known = Volatile.Read(ref _gpuTick);
         while (known < counter)
         {

@@ -68,6 +68,9 @@ internal sealed class FailingHostViews : IHostViewMemory
         return _inner.TryCreateBacking(size, out backing, out failure);
     }
 
+    public HostViewFailure CommitBacking(HostBackingObject backing, ulong offset, ulong size) =>
+        _inner.CommitBacking(backing, offset, size);
+
     public ulong ReserveHole(ulong address, ulong size)
     {
         BeforeReserveHole?.Invoke(address, size);

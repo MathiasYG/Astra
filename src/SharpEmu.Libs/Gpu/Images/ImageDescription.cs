@@ -245,6 +245,24 @@ public struct ImageDescription
 
     public readonly bool IsTiledRenderTarget => TileMode == GuestTileMode.RenderTarget || IsSupportedStandard64RenderTarget;
 
+    public readonly ulong DccSliceSize
+    {
+        get
+        {
+            const ulong DccBlockBytes = 4096;
+            if (Metadata.Kind != MetadataKind.Dcc || TileMode != GuestTileMode.RenderTarget || Resources.Levels != 1 || Samples != 1 ||
+                Extent.Width == 0 || Extent.Height == 0 || BytesPerBlock is 0 or > 16 || !System.Numerics.BitOperations.IsPow2(BytesPerBlock))
+            {
+                return 0;
+            }
+
+            var coverageBits = 20 - System.Numerics.BitOperations.TrailingZeroCount(BytesPerBlock);
+            var blockWidth = 1UL << ((coverageBits + 1) / 2);
+            var blockHeight = 1UL << (coverageBits / 2);
+            return (Extent.Width + blockWidth - 1) / blockWidth * ((Extent.Height + blockHeight - 1) / blockHeight) * DccBlockBytes;
+        }
+    }
+
     public static bool IsSupportedDisplayRenderTargetTileMode(GuestTileMode tileMode) => tileMode == GuestTileMode.RenderTarget;
 
     public static bool CanUseDisplayNativeWithoutUpload(DisplayCompression compression, bool renderTarget, bool gpuModified, bool guestModified) =>

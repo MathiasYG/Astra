@@ -19,7 +19,8 @@ public readonly record struct RenderingAttachment(
     bool HasDepth,
     bool DepthClear,
     bool HasStencil,
-    bool StencilClear);
+    bool StencilClear,
+    uint Samples = 1);
 
 [InlineArray(RenderingState.ColorAttachmentCapacity)]
 public struct RenderingColorAttachments
@@ -27,7 +28,7 @@ public struct RenderingColorAttachments
     private RenderingAttachment _element0;
 }
 
-// The dynamic rendering scope of a draw: its attachments, area, layers and sample count.
+// The dynamic rendering scope of a draw: its attachments, area, layers and guest rasterization sample count.
 public struct RenderingState : IEquatable<RenderingState>
 {
     public const int ColorAttachmentCapacity = 8;

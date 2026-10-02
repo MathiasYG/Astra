@@ -208,6 +208,8 @@ public sealed record IndirectImageSelector(
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
 
+    public ScalarValue? RuntimeKeyBound { get; init; }
+    public uint EntryStride { get; init; } = 32;
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
 }
@@ -219,6 +221,14 @@ public sealed record DirectImageCandidate(uint Offset, uint Source);
 // shape explicit lets the host materialize only those keys, rather than treating a
 // lane value as an unknowable descriptor address.
 public sealed record WaveIndexedImageSelector(uint MaskOffset, uint IndexTableOffset, uint IndexStride);
+// A strided sampler table is representable by one Vulkan sampler only when all
+// entries reachable by the shader contain the same descriptor at this dispatch.
+public sealed record CountedSamplerSelector(
+    uint HeapSource,
+    uint TableOffset,
+    uint DynamicOffsetBase,
+    uint EntryStride,
+    ScalarValue RuntimeKeyBound);
 
 // The graph values one descriptor is assembled from, up to eight dwords.
 public sealed class DescriptorSource
@@ -226,6 +236,10 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    public CountedSamplerSelector? CountedSampler { get; init; }
+    // A descriptor assembled from scalar loads can be all zero when its source
+    // buffer has no addressable bytes, regardless of the shader's dynamic offset.
+    public uint? ZeroExtentBufferSource { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.

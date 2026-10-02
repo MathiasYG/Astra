@@ -45,6 +45,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
         private bool _supportsDepthBiasClamp;
+        private bool _supportsNvFramebufferMixedSamples;
+        private bool _supportsNvCoverageReductionMode;
+        private readonly HashSet<(CoverageReductionModeNV Mode, SampleCountFlags RasterizationSamples, SampleCountFlags DepthStencilSamples, SampleCountFlags ColorSamples)> _supportedNvMixedSamples = [];
         private uint _maxColorAttachments;
         private Device _device;
         private PipelineCache _pipelineCache;
@@ -698,12 +701,82 @@ internal static unsafe partial class VulkanVideoPresenter
             return compute;
         }
 
+        private void QuerySupportedNvMixedSamples()
+        {
+            var function = _vk.GetInstanceProcAddr(
+                _instance,
+                "vkGetPhysicalDeviceSupportedFramebufferMixedSamplesCombinationsNV");
+            if (function.Handle == null)
+            {
+                throw SubmissionScheduler.Fatal(
+                    "VK_NV_coverage_reduction_mode is enabled but its supported-combinations query is unavailable.");
+            }
+
+            var query = (delegate* unmanaged<PhysicalDevice, uint*, FramebufferMixedSamplesCombinationNV*, Result>)function.Handle;
+            uint combinationCount = 0;
+            var result = query(_physicalDevice, &combinationCount, null);
+            if (result != Result.Success || combinationCount > 4096)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The Vulkan mixed-sample combinations could not be queried: result={result} count={combinationCount}.");
+            }
+
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                var combinations = new FramebufferMixedSamplesCombinationNV[checked((int)combinationCount)];
+                for (var index = 0; index < combinations.Length; index++)
+                {
+                    combinations[index].SType = StructureType.FramebufferMixedSamplesCombinationNV;
+                }
+
+                fixed (FramebufferMixedSamplesCombinationNV* combinationPointer = combinations)
+                {
+                    var returnedCount = combinationCount;
+                    result = query(_physicalDevice, &returnedCount, combinationPointer);
+                    if (result == Result.Incomplete)
+                    {
+                        combinationCount = returnedCount;
+                        if (combinationCount > 4096)
+                        {
+                            break;
+                        }
+
+                        continue;
+                    }
+
+                    if (result != Result.Success || returnedCount > (uint)combinations.Length)
+                    {
+                        throw SubmissionScheduler.Fatal(
+                            $"The Vulkan mixed-sample combinations could not be read: result={result} " +
+                            $"capacity={combinations.Length} returned={returnedCount}.");
+                    }
+
+                    for (var index = 0; index < checked((int)returnedCount); index++)
+                    {
+                        var combination = combinations[index];
+                        _supportedNvMixedSamples.Add((
+                            combination.CoverageReductionMode,
+                            combination.RasterizationSamples,
+                            combination.DepthStencilSamples,
+                            combination.ColorSamples));
+                    }
+
+                    return;
+                }
+            }
+
+            throw SubmissionScheduler.Fatal(
+                $"The Vulkan mixed-sample combinations changed repeatedly during query: count={combinationCount}.");
+        }
+
         private bool _supportsFragmentShaderBarycentric;
         private bool _supportsPerVertexPixelInputs;
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
         private bool _supportsImageViewMinLod;
+        private const string NvFramebufferMixedSamplesExtensionName = "VK_NV_framebuffer_mixed_samples";
+        private const string NvCoverageReductionModeExtensionName = "VK_NV_coverage_reduction_mode";
 
         private void CreateDevice()
         {
@@ -906,15 +979,49 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
                 PNext = &addressFeatures,
             };
+            var workgroupLayoutFeatures = new PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKhr,
+                PNext = &atomicInt64Features,
+            };
+            var hasWorkgroupLayoutExtension =
+                IsDeviceExtensionAvailable("VK_KHR_workgroup_memory_explicit_layout");
+            var hasNvFramebufferMixedSamplesExtension =
+                IsDeviceExtensionAvailable(NvFramebufferMixedSamplesExtensionName);
+            var hasNvCoverageReductionModeExtension = hasNvFramebufferMixedSamplesExtension &&
+                IsDeviceExtensionAvailable(NvCoverageReductionModeExtensionName);
+            var coverageReductionModeFeatures = new PhysicalDeviceCoverageReductionModeFeaturesNV
+            {
+                SType = StructureType.PhysicalDeviceCoverageReductionModeFeaturesNV,
+            };
+            void* featureQueryChain = hasWorkgroupLayoutExtension ? &workgroupLayoutFeatures : &atomicInt64Features;
+            if (hasNvCoverageReductionModeExtension)
+            {
+                coverageReductionModeFeatures.PNext = featureQueryChain;
+                featureQueryChain = &coverageReductionModeFeatures;
+            }
+
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = &atomicInt64Features,
+                PNext = featureQueryChain,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
+            _supportsNvFramebufferMixedSamples = hasNvFramebufferMixedSamplesExtension;
+            _supportsNvCoverageReductionMode = hasNvCoverageReductionModeExtension &&
+                coverageReductionModeFeatures.CoverageReductionMode;
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan mixed attachment sample support " +
+                $"framebuffer_mixed={_supportsNvFramebufferMixedSamples} " +
+                $"coverage_reduction_truncate={_supportsNvCoverageReductionMode}");
+            var supportsSharedInt64Atomics = atomicInt64Features.ShaderSharedInt64Atomics;
+            var supportsWorkgroupExplicitLayout =
+                hasWorkgroupLayoutExtension && workgroupLayoutFeatures.WorkgroupMemoryExplicitLayout;
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan 64-bit LDS atomic support shared_atomic={(supportsSharedInt64Atomics ? "true" : "false")} " +
+                $"explicit_layout={supportsWorkgroupExplicitLayout}");
             var supportsTimelineSemaphore = timelineSemaphoreFeatures.TimelineSemaphore;
             var supportsBufferDeviceAddress = addressFeatures.BufferDeviceAddress;
-            var supportsSharedInt64Atomics = atomicInt64Features.ShaderSharedInt64Atomics;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -967,9 +1074,12 @@ internal static unsafe partial class VulkanVideoPresenter
             var viewportIndexLayerExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_shader_viewport_index_layer");
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
+            var workgroupLayoutExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_workgroup_memory_explicit_layout");
+            var nvFramebufferMixedSamplesExtension = (byte*)SilkMarshal.StringToPtr(NvFramebufferMixedSamplesExtensionName);
+            var nvCoverageReductionModeExtension = (byte*)SilkMarshal.StringToPtr(NvCoverageReductionModeExtensionName);
             try
             {
-                var extensions = stackalloc byte*[14];
+                var extensions = stackalloc byte*[17];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -1016,6 +1126,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     extensions[extensionCount++] = robustness2Extension;
                 }
 
+                if (supportsWorkgroupExplicitLayout)
+                {
+                    extensions[extensionCount++] = workgroupLayoutExtension;
+                }
+
+                if (_supportsNvFramebufferMixedSamples)
+                {
+                    extensions[extensionCount++] = nvFramebufferMixedSamplesExtension;
+                }
+
+                if (_supportsNvCoverageReductionMode)
+                {
+                    extensions[extensionCount++] = nvCoverageReductionModeExtension;
+                }
+
                 if (IsDeviceExtensionAvailable(PortabilitySubsetExtensionName))
                 {
                     // The spec requires enabling this when the (MoltenVK)
@@ -1052,16 +1177,26 @@ internal static unsafe partial class VulkanVideoPresenter
                     BufferDeviceAddress = true,
                     PNext = &timelineSemaphoreFeatures,
                 };
-                void* renderingChain = &addressFeatures;
-                if (supportsSharedInt64Atomics)
+                atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
                 {
-                    atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
-                    {
-                        SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
-                        ShaderSharedInt64Atomics = true,
-                        PNext = renderingChain,
-                    };
-                    renderingChain = &atomicInt64Features;
+                    SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
+                    ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
+                    PNext = &addressFeatures,
+                };
+                workgroupLayoutFeatures = new PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
+                {
+                    SType = StructureType.PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKhr,
+                    WorkgroupMemoryExplicitLayout = supportsWorkgroupExplicitLayout,
+                    PNext = &atomicInt64Features,
+                };
+                void* renderingChain = supportsWorkgroupExplicitLayout
+                    ? &workgroupLayoutFeatures
+                    : &atomicInt64Features;
+                if (_supportsNvCoverageReductionMode)
+                {
+                    coverageReductionModeFeatures.CoverageReductionMode = true;
+                    coverageReductionModeFeatures.PNext = renderingChain;
+                    renderingChain = &coverageReductionModeFeatures;
                 }
 
                 if (_supportsFragmentShaderBarycentric)
@@ -1162,6 +1297,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)pushDescriptorExtension);
                 SilkMarshal.Free((nint)barycentricExtension);
                 SilkMarshal.Free((nint)viewportIndexLayerExtension);
+                SilkMarshal.Free((nint)workgroupLayoutExtension);
+                SilkMarshal.Free((nint)nvFramebufferMixedSamplesExtension);
+                SilkMarshal.Free((nint)nvCoverageReductionModeExtension);
+            }
+
+            if (_supportsNvCoverageReductionMode)
+            {
+                QuerySupportedNvMixedSamples();
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);

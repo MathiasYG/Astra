@@ -985,7 +985,7 @@ public static partial class Gen5ShaderTranslator
         sizeDwords = src0 is 0xE9 or 0xEA or 0xF9 or 0xFA or 0xFF ? 2u : 1u;
         error = string.Empty;
         name = VopcOpcodeName(opcode);
-        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2}", out error);
+        return FinishDecode(name, $"unknown-vopc op=0x{opcode:X2} word=0x{word:X8}", out error);
     }
 
     // VOPC names, shared by the VOP3 encoding of the same compares (VOP3 opcodes 0x000-0x0FF).
@@ -1074,6 +1074,8 @@ public static partial class Gen5ShaderTranslator
             0xA5 => "VCmpNeI64",
             0xA6 => "VCmpGeI64",
             0xA7 => "VCmpTI64",
+            0xA8 => "VCmpFU16",
+            0xAF => "VCmpTU16",
             0xB0 => "VCmpxFI64",
             0xB1 => "VCmpxLtI64",
             0xB2 => "VCmpxEqI64",
@@ -1082,6 +1084,8 @@ public static partial class Gen5ShaderTranslator
             0xB5 => "VCmpxNeI64",
             0xB6 => "VCmpxGeI64",
             0xB7 => "VCmpxTI64",
+            0xB8 => "VCmpxFU16",
+            0xBF => "VCmpxTU16",
             0xC0 => "VCmpFU32",
             0xC1 => "VCmpLtU32",
             0xC2 => "VCmpEqU32",
@@ -1276,21 +1280,22 @@ public static partial class Gen5ShaderTranslator
             0x178 => "VXor3B32",
             // VOP1 opcode 0x52 is available through VOP3 as opcode 0x1D2.
             0x1D2 => "VCvtU16F16",
+            0x307 => "VLshrrevB16",
+            0x30E => "VSubNcI16",
+            // RDNA2 ISA VOP3 opcode 788 (0x314): V_LSHLREV_B16.
+            0x314 => "VLshlrevB16",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
             0x378 => "VPermlanex16B32",
             // GFX10 16-bit integer ALU, VOP3-only.
             0x304 => "VSubNcU16",
-            0x307 => "VLshrrevB16",
             0x308 => "VAshrrevI16",
             0x309 => "VMaxU16",
             0x30A => "VMaxI16",
             0x30B => "VMinU16",
             0x30C => "VMinI16",
             0x30D => "VAddNcI16",
-            0x30E => "VSubNcI16",
-            0x314 => "VLshlrevB16",
             // VOP3-encoded 64-bit VOPC (opcode < 0x100): V_CMP_*_U64 / V_CMPX_*_U64.
             0x0E0 => "VCmpFU64",
             0x0E1 => "VCmpLtU64",
@@ -1931,7 +1936,7 @@ public static partial class Gen5ShaderTranslator
 
     public static bool IsDataShareAtomic(string name) => name switch
     {
-        "DsAddU32" or "DsSubU32" or "DsIncU32" or "DsDecU32" or
+        "DsAddU32" or "DsAddU64" or "DsSubU32" or "DsIncU32" or "DsDecU32" or
         "DsMinI32" or "DsMaxI32" or "DsMinU32" or "DsMaxU32" or
         "DsMinF32" or "DsMaxF32" or
         "DsAndB32" or "DsOrB32" or "DsXorB32" or "DsCmpstB32" or
@@ -2235,9 +2240,17 @@ public static partial class Gen5ShaderTranslator
                 // ordinary vector destination leaves every invocation with a
                 // different value and corrupts scalar addresses derived from
                 // lane data.
-                destinations = opcode == "VReadfirstlaneB32"
-                    ? [Gen5Operand.Scalar((word >> 17) & 0x7F)]
-                    : [Gen5Operand.Vector((word >> 17) & 0xFF)];
+                var vop1Destination = (word >> 17) & 0xFF;
+                destinations = opcode switch
+                {
+                    "VReadfirstlaneB32" => [Gen5Operand.Scalar((word >> 17) & 0x7F)],
+                    "VCvtF64I32" or "VRcpF64" =>
+                    [
+                        Gen5Operand.Vector(vop1Destination),
+                        Gen5Operand.Vector(vop1Destination + 1),
+                    ],
+                    _ => [Gen5Operand.Vector(vop1Destination)],
+                };
                 break;
             case Gen5ShaderEncoding.Vop2:
                 if (isDpp8)
@@ -2366,7 +2379,10 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
-                destinations = [Gen5Operand.Vector(word & 0xFF)];
+                var vop3Destination = word & 0xFF;
+                destinations = opcode is "VMulF64" or "VFmaF64"
+                    ? [Gen5Operand.Vector(vop3Destination), Gen5Operand.Vector(vop3Destination + 1)]
+                    : [Gen5Operand.Vector(vop3Destination)];
                 if (opcode == "VReadlaneB32")
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the
@@ -2444,6 +2460,11 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorData0),
                     ],
                     "DsWriteB64" => [
+                        Gen5Operand.Vector(vectorAddress),
+                        Gen5Operand.Vector(vectorData0),
+                        Gen5Operand.Vector(vectorData0 + 1),
+                    ],
+                    "DsAddU64" => [
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorData0),
                         Gen5Operand.Vector(vectorData0 + 1),
