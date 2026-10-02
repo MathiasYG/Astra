@@ -36,7 +36,7 @@ public sealed class RuntimeValueValidator
     public static bool IsUniformOperation(ScalarOperation operation) => operation switch
     {
         ScalarOperation.ConvertU32F32 or ScalarOperation.ConvertF32U32 or
-        ScalarOperation.Construct64 or ScalarOperation.Extract64 or
+        ScalarOperation.Construct64 or ScalarOperation.Extract64 or ScalarOperation.QuadMask32 or
         ScalarOperation.BitFieldInsert or ScalarOperation.BitFieldUExtract or ScalarOperation.BitFieldSExtract or
         ScalarOperation.IAdd32 or ScalarOperation.IAdd64 or ScalarOperation.AddCarry32 or
         ScalarOperation.ISub32 or ScalarOperation.ISub64 or ScalarOperation.IMul32 or ScalarOperation.IMul64 or
