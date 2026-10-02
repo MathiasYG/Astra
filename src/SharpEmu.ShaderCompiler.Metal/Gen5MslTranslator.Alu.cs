@@ -1107,6 +1107,19 @@ public static partial class Gen5MslTranslator
                 }
             }
 
+            if (instruction.Opcode is "SQuadmaskB32" or "SQuadmaskB64")
+            {
+                var wide = instruction.Opcode == "SQuadmaskB64";
+                var source = Temp(wide ? "ulong" : "uint", wide ? RawSource64(instruction, 0) : RawSource(instruction, 0));
+                var result = Temp("uint", "0u");
+                for (var quad = 0; quad < (wide ? 16 : 8); quad++)
+                    Line($"{result} |= (({source} >> {quad * 4}) & 15{(wide ? "ul" : "u")}) != 0 ? {1u << quad}u : 0u;");
+                StoreScalar(destination, result);
+                if (wide) StoreScalar(destination + 1, "0u");
+                Line($"scc = {result} != 0u;");
+                return true;
+            }
+
             if (instruction.Opcode == "SBcnt1I32B64")
             {
                 var wide = Temp("ulong", RawSource64(instruction, 0));

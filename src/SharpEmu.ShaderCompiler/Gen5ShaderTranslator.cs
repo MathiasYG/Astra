@@ -630,6 +630,8 @@ public static partial class Gen5ShaderTranslator
             0x29 => "SNandSaveexecB64",
             0x2A => "SNorSaveexecB64",
             0x2B => "SXnorSaveexecB64",
+            0x2C => "SQuadmaskB32",
+            0x2D => "SQuadmaskB64",
             0x34 => "SAbsI32",
             0x37 => "SAndn1SaveexecB64",
             0x38 => "SOrn1SaveexecB64",

@@ -545,12 +545,37 @@ public sealed partial class ScalarValueGraph
                 return;
             }
 
+            if (opcode is "SQuadmaskB32" or "SQuadmaskB64")
+            {
+                var wide = opcode == "SQuadmaskB64";
+                var (low, high) = ReadPair(instruction.Sources[0], state);
+                var result = _graph.Constant(0u);
+                for (uint quad = 0; quad < (wide ? 16u : 8u); quad++)
+                {
+                    var nibble = Binary(ScalarOperation.And32,
+                        Binary(ScalarOperation.ShiftRightLogical32, quad < 8 ? low : high, _graph.Constant((quad % 8) * 4)), _graph.Constant(15u));
+                    result = Binary(ScalarOperation.Or32, result,
+                        _graph.Select(NotZero(nibble), _graph.Constant(1u << (int)quad), _graph.Constant(0u)));
+                }
+                if (wide) state.WritePair(destinationRegister, result, _graph.Constant(0u));
+                else state.WriteScalar(destinationRegister, result);
+                state.Scc = NotZero(result);
+                return;
+            }
+
             if (opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SWqmB64" or "SBfeI64")
             {
-                // Bit counting, lane scans and quad masks are not uniform descriptor values.
                 var (low, high) = ReadPair(instruction.Sources[0], state);
                 switch (opcode)
                 {
+                    case "SWqmB64":
+                    {
+                        var quadLow = Unary(ScalarOperation.QuadMask32, low);
+                        var quadHigh = Unary(ScalarOperation.QuadMask32, high);
+                        state.WritePair(destinationRegister, quadLow, quadHigh);
+                        state.Scc = NotZero(Binary(ScalarOperation.Or32, quadLow, quadHigh));
+                        break;
+                    }
                     case "SBcnt1I32B64":
                         state.WriteScalar(destinationRegister, Binary(ScalarOperation.IAdd32, Unary(ScalarOperation.BitCount32, low), Unary(ScalarOperation.BitCount32, high)));
                         state.Scc = Bool(ScalarOperation.INotEqual32, state.Scalars[destinationRegister], _graph.Constant(0u));

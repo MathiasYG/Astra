@@ -46,6 +46,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public GraphicsPipelineDescription? Description;
             public Pipeline StripVariant;
             public Pipeline ListVariant;
+            public Pipeline RectangleVariant;
             public ulong ProfileVertexHash;
             public ulong ProfilePixelHash;
             public ulong ProfileComputeHash;
@@ -433,7 +434,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ProfileVertexHash = description.VertexStage.Hash,
                 ProfilePixelHash = description.PixelStage?.Hash ?? 0,
             };
-            // A rectangle list draws through a strip or list variant chosen by its vertex count.
+            // Rectangle draws bind a native fill or compatibility variant at draw time.
             if (!entry.RectangleList)
             {
                 entry.Pipeline = CreateRenderPipeline(description, description.StaticParameters.Topology, entry.Layout);
@@ -567,7 +568,8 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // One graphics pipeline for dynamic rendering: the attachment formats travel in the create info.
-        private Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout)
+        private Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
+            PolygonMode polygonMode = PolygonMode.Fill)
         {
             var parameters = description.StaticParameters;
             var rendering = description.Rendering;
@@ -681,7 +683,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         SType = StructureType.PipelineRasterizationStateCreateInfo,
                         PNext = _supportsDepthClipEnable ? &depthClip : null,
-                        PolygonMode = PolygonMode.Fill,
+                        PolygonMode = polygonMode,
                         CullMode = cullMode,
                         FrontFace = parameters.FrontFaceClockwise ? FrontFace.Clockwise : FrontFace.CounterClockwise,
                         LineWidth = 1,
@@ -839,7 +841,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             foreach (var entry in _pipelineEntries.Values)
             {
-                foreach (var pipeline in new[] { entry.Pipeline, entry.StripVariant, entry.ListVariant })
+                foreach (var pipeline in new[] { entry.Pipeline, entry.StripVariant, entry.ListVariant, entry.RectangleVariant })
                 {
                     if (pipeline.Handle != 0)
                     {

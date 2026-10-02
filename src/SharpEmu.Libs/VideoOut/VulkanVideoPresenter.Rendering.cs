@@ -117,6 +117,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsDepthClipControl;
         private bool _supportsDepthClipEnable;
         private bool _supportsDepthBounds;
+        private bool _supportsFillRectangle;
         private RenderHostLimits _renderHostLimits;
         private IGuestBackedSpace _guestBacking = null!;
 
@@ -156,7 +157,7 @@ internal static unsafe partial class VulkanVideoPresenter
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan rendering extensions color_write_enable={(supportsColorWriteEnable ? 1 : 0)} " +
                 $"depth_clip_control={(_supportsDepthClipControl ? 1 : 0)} depth_clip_enable={(_supportsDepthClipEnable ? 1 : 0)} " +
-                $"depth_bounds={(_supportsDepthBounds ? 1 : 0)}");
+                $"depth_bounds={(_supportsDepthBounds ? 1 : 0)} fill_rectangle={(_supportsFillRectangle ? 1 : 0)}");
         }
 
         RenderHostLimits IRenderHost.Limits => _renderHostLimits;
@@ -868,7 +869,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _batchDrawCount++;
         }
 
-        // A single rectangle draws as a strip of four vertices; anything else draws as a triangle list.
+        // Existing strip compatibility path when native rectangle fill cannot be used.
         private static bool IsSingleRectangle(uint vertexCount) => vertexCount is 1 or 3 or 4;
 
         private void BindRectangleListVariant(RenderPipelineEntry entry, bool strip, CommandBuffer command)
@@ -882,6 +883,22 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, variant);
         }
 
+        private void BindNativeRectangleList(RenderPipelineEntry entry, CommandBuffer command)
+        {
+            if (entry.RectangleVariant.Handle == 0)
+            {
+                entry.RectangleVariant = CreateRenderPipeline(entry.Description!, PrimitiveTopology.TriangleList,
+                    entry.Layout, PolygonMode.FillRectangleNV);
+            }
+
+            _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, entry.RectangleVariant);
+        }
+
+        // Rectangle2D consumes three vertices and fills their projected bounding box.
+        // Native fill preserves their interpolants and does not fetch a made-up fourth vertex.
+        private bool CanDrawNativeRectangles(uint vertexCount) =>
+            _supportsFillRectangle && vertexCount >= 3 && vertexCount % 3 == 0;
+
         public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
@@ -889,11 +906,18 @@ internal static unsafe partial class VulkanVideoPresenter
             var count = vertexCount;
             if (_boundGraphicsPipeline is { RectangleList: true } entry)
             {
-                var strip = IsSingleRectangle(vertexCount);
-                BindRectangleListVariant(entry, strip, command);
-                if (strip)
+                if (CanDrawNativeRectangles(vertexCount))
                 {
-                    count = SingleRectangleVertexCount;
+                    BindNativeRectangleList(entry, command);
+                }
+                else
+                {
+                    var strip = IsSingleRectangle(vertexCount);
+                    BindRectangleListVariant(entry, strip, command);
+                    if (strip)
+                    {
+                        count = SingleRectangleVertexCount;
+                    }
                 }
             }
 
@@ -910,7 +934,14 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             if (_boundGraphicsPipeline is { RectangleList: true } entry)
             {
-                BindRectangleListVariant(entry, strip: false, command);
+                if (CanDrawNativeRectangles(indexCount))
+                {
+                    BindNativeRectangleList(entry, command);
+                }
+                else
+                {
+                    BindRectangleListVariant(entry, strip: false, command);
+                }
             }
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
@@ -926,7 +957,14 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             if (_boundGraphicsPipeline is { RectangleList: true } entry)
             {
-                BindRectangleListVariant(entry, strip: false, command);
+                if (_supportsFillRectangle)
+                {
+                    BindNativeRectangleList(entry, command);
+                }
+                else
+                {
+                    BindRectangleListVariant(entry, strip: false, command);
+                }
             }
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);

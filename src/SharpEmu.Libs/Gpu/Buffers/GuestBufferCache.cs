@@ -307,14 +307,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         TouchBuffer(owner);
-        var uploads = new List<(ulong Address, ulong Size)>();
-        _tracker.ForEachUploadRange(guestAddress, size, false, (address, uploadSize) => uploads.Add((address, uploadSize)), () =>
-        {
-            foreach (var (address, uploadSize) in uploads)
-            {
-                owner.CopyFrom(_scheduler.Current, _staging, stageOffset + address - guestAddress, owner.Offset(address), uploadSize, AccessFlags.HostWriteBit);
-            }
-        });
+        // Tracking reports whole dirty pages, which can extend beyond the image's
+        // staging slice. Upload those pages through the normal buffer uploader so
+        // every byte marked clean is copied from its actual guest backing.
+        _ = SynchronizeBuffer(owner, guestAddress, size, false, false);
         return (owner, owner.Offset(guestAddress));
     }
 

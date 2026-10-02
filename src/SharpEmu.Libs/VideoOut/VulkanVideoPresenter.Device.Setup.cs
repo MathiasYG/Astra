@@ -703,6 +703,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
+        private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
         private bool _supportsImageViewMinLod;
 
         private void CreateDevice()
@@ -733,6 +734,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             _supportsDepthBounds = supportedFeatures.DepthBounds;
+            _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
             var enabledFeatures = new PhysicalDeviceFeatures
             {
                 DepthBounds = supportedFeatures.DepthBounds,
@@ -967,9 +969,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var viewportIndexLayerExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_shader_viewport_index_layer");
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
+            var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
             try
             {
-                var extensions = stackalloc byte*[14];
+                var extensions = stackalloc byte*[15];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -1009,6 +1012,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (_supportsImageViewMinLod)
                 {
                     extensions[extensionCount++] = imageViewMinLodExtension;
+                }
+
+                if (_supportsFillRectangle)
+                {
+                    extensions[extensionCount++] = fillRectangleExtension;
                 }
 
                 if (supportsRobustness2)
@@ -1154,6 +1162,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
+                SilkMarshal.Free((nint)fillRectangleExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);

@@ -2615,6 +2615,25 @@ public static partial class Gen5SpirvTranslator
                 }
             }
 
+            if (instruction.Opcode is "SQuadmaskB32" or "SQuadmaskB64")
+            {
+                var wide = instruction.Opcode == "SQuadmaskB64";
+                var source = wide ? GetRawSource64(instruction, 0) : 0u;
+                var low = wide ? Narrow(source) : GetRawSource(instruction, 0);
+                var high = wide ? Narrow(ShiftRightLogical64(source, ULong(32))) : UInt(0);
+                var quadResult = UInt(0);
+                for (uint quad = 0; quad < (wide ? 16u : 8u); quad++)
+                {
+                    var nibble = BitwiseAnd(ShiftRightLogical(quad < 8 ? low : high, UInt((quad % 8) * 4)), UInt(15));
+                    var bit = _module.AddInstruction(SpirvOp.Select, _uintType, IsNotZero(nibble), UInt(1u << (int)quad), UInt(0));
+                    quadResult = BitwiseOr(quadResult, bit);
+                }
+                StoreS(destination, quadResult);
+                if (wide) StoreS(destination + 1, UInt(0));
+                Store(_scc, IsNotZero(quadResult));
+                return true;
+            }
+
             if (instruction.Opcode == "SBcnt1I32B64")
             {
                 // Vulkan only allows OpBitCount on 32-bit operands without
