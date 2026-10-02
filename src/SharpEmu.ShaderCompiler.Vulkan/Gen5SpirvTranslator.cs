@@ -1593,16 +1593,34 @@ public static partial class Gen5SpirvTranslator
         // header), so the guards after the loop pick up where the invocation continues.
         private bool TryEmitStructuredLoop(IReadOnlyList<ShaderBlock> blocks, int header, int latch, out string error)
         {
+            // Once a single-block loop is entered, its back edge already proves that
+            // this block is active and next. Keep its entry guard outside the loop;
+            // a conditional around every iteration obstructs driver optimization.
+            var singleBlock = header == latch;
+            var entryMerge = singleBlock ? _module.AllocateId() : 0u;
+            var skippedEntry = singleBlock ? _module.AllocateId() : 0u;
             var loopHeader = _module.AllocateId();
             var loopBody = _module.AllocateId();
             var loopContinue = _module.AllocateId();
             var loopMerge = _module.AllocateId();
-            _module.AddStatement(SpirvOp.Branch, loopHeader);
+            if (singleBlock)
+            {
+                var enters = LogicalAnd(Load(_boolType, _programActive),
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, Load(_uintType, _programCounter), UInt((uint)header)));
+                _module.AddStatement(SpirvOp.SelectionMerge, entryMerge, 0);
+                _module.AddStatement(SpirvOp.BranchConditional, enters, loopHeader, skippedEntry);
+            }
+            else
+            {
+                _module.AddStatement(SpirvOp.Branch, loopHeader);
+            }
             _module.AddLabel(loopHeader);
             _module.AddStatement(SpirvOp.LoopMerge, loopMerge, loopContinue, 0);
             _module.AddStatement(SpirvOp.Branch, loopBody);
             _module.AddLabel(loopBody);
-            if (!TryEmitStructuredRange(blocks, header, latch, header, out error))
+            if (!(singleBlock
+                    ? TryEmitBlock(blocks, header, out error)
+                    : TryEmitStructuredRange(blocks, header, latch, header, out error)))
             {
                 return false;
             }
@@ -1626,6 +1644,19 @@ public static partial class Gen5SpirvTranslator
 
             _module.AddStatement(SpirvOp.BranchConditional, again, loopHeader, loopMerge);
             _module.AddLabel(loopMerge);
+            if (singleBlock)
+            {
+                _module.AddStatement(SpirvOp.Branch, entryMerge);
+                _module.AddLabel(skippedEntry);
+                // The previous guarded do-while still counted one iteration when
+                // the block was skipped. Preserve that diagnostic safety budget.
+                if (_maxDispatcherSteps > 0)
+                {
+                    Store(_iterationGuard, IAdd(Load(_uintType, _iterationGuard), UInt(1)));
+                }
+                _module.AddStatement(SpirvOp.Branch, entryMerge);
+                _module.AddLabel(entryMerge);
+            }
             return true;
         }
 
