@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.ShaderCompiler.Ir;
+
 namespace SharpEmu.ShaderCompiler.Resources;
 
 // A finite overestimate of a selector. Unsupported paths retain the full-domain scan.
@@ -37,8 +39,15 @@ public sealed class IndirectSelectorValues
         values = [];
         if (selector.Kind != ScalarValueKind.FirstLane) return false;
         var instruction = plan.Graph.Program.Instructions.FirstOrDefault(candidate => candidate.Pc == selector.Payload);
-        if (instruction is not { Opcode: "VReadfirstlaneB32", Sources.Count: 1 }) return false;
-        var root = new Builder(plan).Read(instruction.Sources[0], instruction.Pc);
+        if (instruction is null) return false;
+        var before = instruction.Pc;
+        if (instruction.Opcode == "VReadlaneB32")
+        {
+            var index = plan.Graph.Program.Instructions.ToList().IndexOf(instruction);
+            if (!ResourceTracker.TryGetStableLaneReadStart(plan.Graph.Program.Instructions, index, out before)) return false;
+        }
+        else if (instruction is not { Opcode: "VReadfirstlaneB32", Sources.Count: 1 }) return false;
+        var root = new Builder(plan).Read(instruction.Sources[0], before);
         if (root is null) return false;
         var pending = new Stack<Expression>();
         pending.Push(root);
@@ -151,7 +160,14 @@ public sealed class IndirectSelectorValues
                             break;
                         }
                         // A later active lane must also have been active at the defining write.
-                        if (operand.Kind == Gen5OperandKind.VectorRegister && MayExpandExecution(instruction)) return null;
+                        if (operand.Kind == Gen5OperandKind.VectorRegister && MayExpandExecution(instruction))
+                        {
+                            var restored = ReadBeforeSavedExecRestore(operand, instruction);
+                            if (restored is null) return null;
+                            definitions.Add(restored);
+                            found = true;
+                            break;
+                        }
                     }
                     if (found) continue;
                     if (position.Block == 0)
@@ -223,6 +239,74 @@ public sealed class IndirectSelectorValues
             if (instruction.Opcode != "VAdd3U32") return result;
             var third = Read(instruction.Sources[2], instruction.Pc);
             return third is null ? null : new(Operation: ScalarOperation.IAdd32, Inputs: [result, third]);
+        }
+
+        // A vector written under a saved full mask and left untouched while EXEC
+        // is restricted still has those values when exactly that mask is restored.
+        private Expression? ReadBeforeSavedExecRestore(Gen5Operand vector, Gen5ShaderInstruction restore)
+        {
+            if (restore is not { Opcode: "SMovB64", Sources.Count: 1 } ||
+                !restore.Destinations.Contains(Gen5Operand.Scalar(126)) ||
+                restore.Sources[0] is not { Kind: Gen5OperandKind.ScalarRegister } saved ||
+                saved.Value >= 126 || (saved.Value & 1) != 0) return null;
+            var instructions = plan.Graph.Program.Instructions;
+            var restoreIndex = instructions.ToList().IndexOf(restore);
+            var saveIndex = -1;
+            for (var index = restoreIndex - 1; index >= 0; index--)
+            {
+                var instruction = instructions[index];
+                if (!WritesSavedMask(instruction, saved)) continue;
+                if (instruction is not { Opcode: "SMovB64", Sources.Count: 1 } ||
+                    instruction.Sources[0] != Gen5Operand.Scalar(126) || !instruction.Destinations.Contains(saved)) return null;
+                saveIndex = index;
+                break;
+            }
+            if (saveIndex < 0) return null;
+            // An incoming edge must not bypass the saved mask or the defining write.
+            foreach (var instruction in instructions)
+                if ((instruction.Pc < instructions[saveIndex].Pc || instruction.Pc >= restore.Pc) &&
+                    Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
+                    target > instructions[saveIndex].Pc && target <= restore.Pc) return null;
+            var firstMaskWrite = -1;
+            var defined = false;
+            for (var index = saveIndex + 1; index < restoreIndex; index++)
+            {
+                var instruction = instructions[index];
+                if (instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+                    instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal) || WritesSavedMask(instruction, saved)) return null;
+                if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target))
+                {
+                    if (firstMaskWrite < 0 || target <= instruction.Pc || target > restore.Pc) return null;
+                }
+                var writesVector = WritesRegister(instruction, vector);
+                if (firstMaskWrite < 0 && (instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
+                    instruction.Opcode.Contains("Wrexec", StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
+                    WritesRegister(instruction, Gen5Operand.Scalar(126)) || WritesRegister(instruction, Gen5Operand.Scalar(127))))
+                    firstMaskWrite = index;
+                if (writesVector)
+                {
+                    if (firstMaskWrite >= 0) return null;
+                    defined = true;
+                }
+            }
+            return defined && firstMaskWrite >= 0 ? Read(vector, instructions[firstMaskWrite].Pc) : null;
+        }
+
+        private static bool WritesSavedMask(Gen5ShaderInstruction instruction, Gen5Operand saved)
+        {
+            // RDNA2 CMPX updates EXEC only, leaving the explicit condition SGPRs intact.
+            if (instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) && saved.Value < 126) return false;
+            var pairEnd = saved.Value + 1;
+            var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+            if (instruction.Destinations.Any(destination => destination.Kind == Gen5OperandKind.ScalarRegister &&
+                destination.Value <= pairEnd && destination.Value + width > saved.Value)) return true;
+            if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } vop } && vop <= pairEnd && vop + 1 >= saved.Value ||
+                instruction.Control is Gen5SdwaControl { ScalarDestination: { } sdwa } && sdwa <= pairEnd && sdwa + 1 >= saved.Value)
+                return !instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal);
+            return saved.Value is 106 or 107 &&
+                (instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal) && !instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
+                 instruction.Opcode.Contains("Co", StringComparison.Ordinal) || instruction.Opcode.Contains("Vcc", StringComparison.OrdinalIgnoreCase));
         }
 
         private static bool MayExpandExecution(Gen5ShaderInstruction instruction)

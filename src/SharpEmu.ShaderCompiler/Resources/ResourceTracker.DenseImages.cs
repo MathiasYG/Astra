@@ -416,7 +416,7 @@ public sealed partial class ResourceTracker
         return false;
     }
 
-    private static bool ReadsActiveLane(IReadOnlyList<Gen5ShaderInstruction> instructions, int readLaneIndex)
+    internal static bool ReadsActiveLane(IReadOnlyList<Gen5ShaderInstruction> instructions, int readLaneIndex)
     {
         var exec = Gen5Operand.Scalar(126);
         var readLane = instructions[readLaneIndex];
@@ -430,7 +430,13 @@ public sealed partial class ResourceTracker
             return false;
 
         var copyIndex = FindLastDefinition(instructions, scanIndex, candidates);
-        if (copyIndex < 0 || instructions[copyIndex] is not { Opcode: "SMovB64", Sources.Count: 1 } copy || copy.Sources[0] != exec)
+        if (copyIndex < 0 || instructions[copyIndex] is not { Opcode: "SMovB64", Sources.Count: 1 } copy)
+            return false;
+        if (copy.Sources[0] != exec &&
+            (copyIndex == 0 || instructions[copyIndex - 1] is not { Opcode: "SMovB64", Sources.Count: 1 } execCopy ||
+             !execCopy.Destinations.Contains(exec) || execCopy.Sources[0] != copy.Sources[0])) return false;
+        if (copy.Sources[0] != exec && instructions.Any(instruction =>
+            Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) && target == copy.Pc))
             return false;
 
         for (var index = copyIndex + 1; index < readLaneIndex; index++)
@@ -487,6 +493,31 @@ public sealed partial class ResourceTracker
         }
 
         return true;
+    }
+
+    internal static bool TryGetStableLaneReadStart(IReadOnlyList<Gen5ShaderInstruction> instructions, int readIndex, out uint start)
+    {
+        start = 0;
+        if (!ReadsActiveLane(instructions, readIndex) || instructions[readIndex].Sources[0] is not
+            { Kind: Gen5OperandKind.VectorRegister } vector) return false;
+        var scanIndex = FindLastDefinition(instructions, readIndex, instructions[readIndex].Sources[1]);
+        var copyIndex = FindLastDefinition(instructions, scanIndex, instructions[scanIndex].Sources[0]);
+        for (var index = copyIndex + 1; index < instructions.Count; index++)
+        {
+            var instruction = instructions[index];
+            if (instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+                instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal) ||
+                instruction.Destinations.Any(destination => destination.Kind == Gen5OperandKind.VectorRegister &&
+                    (destination == vector || instruction.Opcode.Contains("64", StringComparison.Ordinal) && destination.Value + 1 == vector.Value)))
+                return false;
+            if (index > readIndex && Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
+                target > instructions[copyIndex].Pc && target <= instructions[scanIndex].Pc)
+            {
+                start = instructions[copyIndex].Pc;
+                return true;
+            }
+        }
+        return false;
     }
 
     private static bool WritesScalarPair(Gen5ShaderInstruction instruction, Gen5Operand register)

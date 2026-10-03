@@ -11,6 +11,63 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DirectImageTableTests
 {
+    private static Gen5ShaderProgram FiniteLaneReadProgram(bool unknownLane = false, bool partialWrite = false,
+        bool loopWrite = false, bool wrongRestore = false)
+    {
+        var prefix = FiniteBufferImageProgram().Instructions.Where(instruction => instruction.Pc < 20).ToList();
+        prefix.AddRange([
+            Sop1(20, "SMovB64", 106, Gen5Operand.Scalar(126)),
+            Vop3(24, "VMadU32U24", 3, Operand(3), Gen5Operand.Vector(1), Gen5Operand.Vector(2)),
+            Vopc(32, "VCmpxEqU32", Operand(0), 0),
+            Sop1(36, "SMovB64", 126, Gen5Operand.Scalar(wrongRestore ? 104u : 106u)),
+            Sop1(40, "SMovB64", 68, Gen5Operand.Scalar(106)),
+            Sop1(44, "SFF1I32B64", 17, Gen5Operand.Scalar(68)),
+            new(48, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(3), Gen5Operand.Scalar(unknownLane ? 12u : 17u), Gen5Operand.Scalar(0)],
+                [Gen5Operand.Scalar(17)], new Gen5Vop3Control(0, 0, 0, false, 0, null)),
+            new(56, Gen5ShaderEncoding.Vop3, "VCmpEqU32", [0u, 0u],
+                [Gen5Operand.Scalar(17), Gen5Operand.Vector(3)], [Gen5Operand.Scalar(70)], new Gen5Vop3Control(0, 0, 0, false, 0, 70)),
+            Sop1(64, "SAndSaveexecB64", 64, Gen5Operand.Scalar(70)),
+            Branch(68, "SCbranchExecz", 6),
+            Sop2(72, "SMulI32", 106, Gen5Operand.Scalar(17), Operand(384)),
+            ScalarBufferLoad(76, 0, 16, 8, dynamicOffsetRegister: 106),
+            Image(84, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
+            loopWrite ? Vop1(92, "VMovB32", 3, Operand(999)) : Sop2(92, "SAndn2B64", 68, Gen5Operand.Scalar(68), Gen5Operand.Scalar(70)),
+            Sop1(96, "SMovB64", 126, Gen5Operand.Scalar(64)), Branch(100, "SCbranchScc1", -15), EndProgram(104),
+        ]);
+        if (partialWrite)
+        {
+            prefix = prefix.Select(instruction => instruction.Pc >= 36 ? instruction with { Pc = instruction.Pc + 4 } : instruction).ToList();
+            prefix.Add(Vop1(36, "VMovB32", 3, Operand(999)));
+            prefix.Sort((left, right) => left.Pc.CompareTo(right.Pc));
+        }
+        return Program([.. prefix]);
+    }
+
+    [Fact]
+    public void FiniteLaneReadWaterfallKeepsTheSelectorOpaqueButProvesItsCandidates()
+    {
+        var plan = Extract(FiniteLaneReadProgram(), userDataCount: 4);
+        var laneReads = plan.Graph.Values.Where(value => value.Kind == ScalarValueKind.FirstLane && value.Payload == 48).ToArray();
+        Assert.NotEmpty(laneReads);
+        Assert.All(laneReads, value => Assert.False(plan.ValidateRuntimeValue(value)));
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Null(source.ZeroExtentBufferSource);
+        Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
+            source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
+    [Theory]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, false, false, true)]
+    public void FiniteLaneReadWaterfallRejectsUnprovenMasksAndModifiedValues(bool unknownLane, bool partialWrite, bool loopWrite, bool wrongRestore)
+    {
+        var plan = Extract(FiniteLaneReadProgram(unknownLane, partialWrite, loopWrite, wrongRestore), userDataCount: 4);
+        Assert.Null(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage);
+    }
+
     private static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
         uint sourceSelect = 6, uint multiplier = 3, uint compare = 0)
     {
@@ -30,7 +87,7 @@ public sealed class DirectImageTableTests
             EndProgram(56));
     }
 
-    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare)
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false)
     {
         var program = FiniteBufferImageProgram(compare: compare) with
         {
@@ -40,6 +97,17 @@ public sealed class DirectImageTableTests
                 BufferAccess(64, "BufferStoreDword", 8, vectorData: 4), EndProgram(72),
             ]).ToArray(),
         };
+        if (laneRead)
+        {
+            var instructions = FiniteLaneReadProgram().Instructions.Select(instruction =>
+                instruction with { Pc = instruction.Pc + (instruction.Pc >= 92 ? 16u : 8u) }).ToList();
+            instructions[instructions.FindIndex(instruction => instruction.Pc == 8)] = Vopc(8, "VCmpEqU32", Operand(compare), 0);
+            instructions[instructions.FindIndex(instruction => instruction.Pc == 76)] = Branch(76, "SCbranchExecz", 8);
+            instructions[instructions.FindIndex(instruction => instruction.Pc == 116)] = Branch(116, "SCbranchScc1", -17);
+            instructions.AddRange([Vop1(0, "VMovB32", 4, Operand(0)), Vop1(4, "VMovB32", 5, Operand(0)),
+                BufferAccess(100, "BufferStoreDword", 8, vectorData: 4)]);
+            program = program with { Instructions = instructions.OrderBy(instruction => instruction.Pc).ToArray() };
+        }
         uint[] registers = [0x1000, 0, 2048, 0, 0, 0, 0, 0, 0, 0, 64, 0];
         bool Read(ulong address, out uint word)
         {
