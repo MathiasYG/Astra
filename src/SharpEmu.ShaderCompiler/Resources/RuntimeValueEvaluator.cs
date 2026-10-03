@@ -460,7 +460,11 @@ public sealed class RuntimeValueEvaluator
             var words = new uint[source.DwordCount];
             if (activeSources.Length == 0 || activeSources[sourceIndex])
             {
-                for (var index = 0; index < words.Length; index++)
+                if (source.PackedPointer is { } packed)
+                {
+                    if (!packed.TryEvaluate(plan, inputs, out words)) return false;
+                }
+                else for (var index = 0; index < words.Length; index++)
                 {
                     if (!evaluator.EvaluateSourceWord((int)sourceIndex, index, out words[index]))
                     {

@@ -153,6 +153,8 @@ public sealed class ShaderResourcePlan
         }
 
         plan.MaterializationSources = materialization;
+        if (materialization.Any(source => plan.DescriptorSources[(int)source].PackedPointer is not null))
+            plan.RequiresSpecializationMemory = true;
 
         var cleanSlots = new byte[plan.TableReads.Count];
         foreach (var image in plan.Info.Images)

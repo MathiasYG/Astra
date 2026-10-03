@@ -272,6 +272,78 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     }
 
     [Theory]
+    [InlineData(0u, 0x5000u)]
+    [InlineData(1u, 0x6000u)]
+    public void PackedPointerDescriptorsPreserveRuntimeMemoryLoads(uint selected, uint expectedPointer)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var program = Program(
+            Sop1(0, "SMovB64", 40, Gen5Operand.Scalar(126)),
+            Vop1(4, "VMovB32", 5, Operand(0)),
+            Vop2(8, "VAddU32", 7, Gen5Operand.Scalar(12), Gen5Operand.Vector(0)),
+            BufferAccess(12, "BufferLoadDwordx2", 0, dwords: 2, vectorData: 4, indexEnabled: true, vectorAddress: 7),
+            Sop1(20, "SMovB64", 126, Gen5Operand.Scalar(40)),
+            new(24, Gen5ShaderEncoding.Vop1, "VMovB32", [0u, 0u],
+                [Gen5Operand.Vector(5)], [Gen5Operand.Vector(6)],
+                new Gen5SdwaControl(6, 0, 5, 6, false, false, 0, 0, 0, false, null)),
+            ReadFirstLane(32, 16, 6),
+            Sop2(36, "SMulI32", 17, Operand(16), Gen5Operand.Scalar(16)),
+            ScalarBufferLoad(40, 4, 20, 2, dynamicOffsetRegister: 17),
+            ScalarLoad(48, 20, 24, 8),
+            Vop1(56, "VMovB32", 0, Operand(0)), Vop1(60, "VMovB32", 1, Operand(0)),
+            Image(64, "ImageLoad", 24, dmask: 1, vectorAddress: 0),
+            BufferAccess(72, "BufferStoreDword", 8, vectorData: 4),
+            Vop1(80, "VMovB32", 8, Gen5Operand.Scalar(20)),
+            BufferAccess(84, "BufferStoreDword", 8, offset: 4, vectorData: 8), EndProgram(92));
+        uint[] registers = [0x1000, 8u << 16, 2, 1u << 12,
+            0x3000, 16u << 16, 2, 1u << 12,
+            0x8000, 0, ResultBytes, 1u << 12, selected];
+        var memory = new TestWordMemory { Base = 0, Words = new uint[0x10000 / 4], RequireAlignment = true };
+        memory.At(0x1004) = 0;
+        memory.At(0x100C) = 1u << 16;
+        memory.At(0x3000) = 0x5000;
+        memory.At(0x3010) = 0x6000;
+        var descriptor = ResourceTrackerTests.ImageDescriptor();
+        ResourceTrackerTests.WriteImage(memory, 0x5000, descriptor);
+        ResourceTrackerTests.WriteImage(memory, 0x6000, descriptor);
+        var plan = Extract(program, userDataCount: 13);
+        IndirectSelectorValuesTests.AssertPackedPointerEvaluates(plan, Inputs(registers, readCleanMemory: memory.Read));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(registers, readCleanMemory: memory.Read), ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 13),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var result = runner.CreateBuffer(ResultBytes);
+        var guest = runner.CreateBuffer(MemoryMarshal.AsBytes(memory.Words.AsSpan()));
+        var pageTable = runner.CreatePageTable(4, Enumerable.Range(0, 4)
+            .Select(index => ((ulong)index << 14, guest, (ulong)index << 14)));
+        var buffers = snapshot.Buffers.Select(words => words[0] == 0x8000 ? result :
+            runner.CreateBuffer(MemoryMarshal.AsBytes(memory.Words.AsSpan((int)words[0] / 4, (int)(words[2] * Math.Max((words[1] >> 16) & 0x3FFF, 1u)) / 4)))).ToArray();
+        var description = Describe(0, Format.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
+        var image = harness.CreateImage(description);
+        harness.UploadImage(image, MemoryMarshal.AsBytes<uint>([51u]), ImageTestHarness.WholeImageCopies(description, 0));
+        var boundImages = request.Bindings.Descriptors.Where(binding => ImageDescriptorBinding.ResourceClass(binding.Kind) != ImageResourceClass.None)
+            .ToDictionary(binding => binding.Kind, binding => binding.Resources.Select(_ => SampledView(image)).ToArray());
+        harness.Run(() =>
+        {
+            image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, new CommandBuffer(harness.Scheduler.Current.Handle));
+            runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> {
+                [DescriptorBindingKind.Buffers] = buffers, [DescriptorBindingKind.DeviceAddressPageTable] = [pageTable] },
+                1, flattenedTable: snapshot.FlattenedResourceTable, boundImages: boundImages);
+        });
+        var actual = runner.ReadBack(result, 0, ResultBytes);
+        Assert.Equal(51u, BinaryPrimitives.ReadUInt32LittleEndian(actual));
+        Assert.Equal(expectedPointer, BinaryPrimitives.ReadUInt32LittleEndian(actual.AsSpan(4)));
+        harness.AssertNoValidationMessages();
+    }
+
+    [Theory]
     [InlineData(-32768)]
     [InlineData(-1)]
     [InlineData(32767)]

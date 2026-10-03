@@ -326,6 +326,7 @@ public sealed partial class ResourceTracker
         {
             var current = _sources[candidate];
             if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage) ||
+                !Equals(current.PackedPointer, source.PackedPointer) ||
                 current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
                 (current.EquivalentSamplerSources is null) != (source.EquivalentSamplerSources is null) ||
                 current.EquivalentSamplerSources is { } samplerSources &&
@@ -452,6 +453,8 @@ public sealed partial class ResourceTracker
         var controlDependent = false;
         if (nonContiguousImage || !ValidateSource(source, out badDword, out controlDependent))
         {
+            if (!sampleAdjust && IndirectSelectorValues.PackedPointerDescriptor.TryCreate(_plan, handle, out var packedPointer))
+                return InternSource(new DescriptorSource { Dwords = source.Dwords, PackedPointer = packedPointer });
             if (expected == ScalarValueKind.SamplerHandle &&
                 TryMakeFiniteSampler(handle, source, out var finiteSamplerSource)) return finiteSamplerSource;
             if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle &&
@@ -1134,7 +1137,7 @@ public sealed partial class ResourceTracker
             for (var image = 0; image < _info.Images.Count; image++)
             {
                 var imageSource = _sources[(int)_info.Images[image].Source];
-                if (imageSource.DwordCount != 8 || imageSource.IndirectImage is not null)
+                if (imageSource.DwordCount != 8 || imageSource.IndirectImage is not null || imageSource.PackedPointer is not null)
                 {
                     continue;
                 }
