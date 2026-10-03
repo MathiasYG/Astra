@@ -201,17 +201,20 @@ public sealed class DirectImageTableTests
     }
 
     private static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
-        uint sourceSelect = 6, uint multiplier = 3, uint compare = 0, bool splitMultiply = false)
+        uint sourceSelect = 6, uint multiplier = 3, uint compare = 0, bool splitMultiply = false, bool packedWord = false)
     {
         var fullWord = new Gen5SdwaControl(6, 0, sourceSelect, 6, false, false, 0, 0, 0, false, null);
         return Program(
             Vopc(0, "VCmpEqU32", Operand(compare), 0),
             new(4, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
-                [Operand(0), unknown ? Gen5Operand.Vector(0) : Operand(1)], [Gen5Operand.Vector(1)], fullWord),
+                [Operand(0), unknown ? Gen5Operand.Vector(0) : Operand(packedWord ? 0x10000u : 1u)], [Gen5Operand.Vector(1)], fullWord),
             new(12, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
-                [Operand(0), Operand(2)], [Gen5Operand.Vector(2)], fullWord),
+                [Operand(0), Operand(packedWord ? 0x20000u : 2u)], [Gen5Operand.Vector(2)], fullWord),
             splitMultiply ? Vop3(20, "VMulU32U24", 3, Operand(multiplier), Gen5Operand.Vector(1)) :
                 Vop3(20, "VMadU32U24", 3, Operand(multiplier), Gen5Operand.Vector(1), Gen5Operand.Vector(2)),
+            packedWord ? new(28, Gen5ShaderEncoding.Vop1, "VMovB32", [0u, 0u],
+                [Gen5Operand.Vector(3)], [Gen5Operand.Vector(3)],
+                new Gen5SdwaControl(6, 0, 5, 6, false, false, 0, 0, 0, false, null)) :
             expandExec ? Sop1(28, "SMovB64", 126, Gen5Operand.Scalar(12)) : splitMultiply ?
                 Vop2(28, "VAddI32", 3, Gen5Operand.Vector(3), Gen5Operand.Vector(2)) : Nop(28),
             ReadFirstLane(32, 106, 3),
@@ -221,11 +224,11 @@ public sealed class DirectImageTableTests
             EndProgram(56));
     }
 
-    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false, bool negated = false)
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false, bool negated = false, bool packedWord = false)
     {
         var program = FiniteBufferImageProgram(compare: compare) with
         {
-            Instructions = FiniteBufferImageProgram(compare: compare, splitMultiply: splitMultiply).Instructions.Where(instruction => instruction.Pc < 48).Concat([
+            Instructions = FiniteBufferImageProgram(compare: compare, splitMultiply: splitMultiply, packedWord: packedWord).Instructions.Where(instruction => instruction.Pc < 48).Concat([
                 Vop1(48, "VMovB32", 4, Operand(0)), Vop1(52, "VMovB32", 5, Operand(0)),
                 Image(56, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
                 BufferAccess(64, "BufferStoreDword", 8, vectorData: 4), EndProgram(72),
@@ -278,6 +281,28 @@ public sealed class DirectImageTableTests
         var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 12),
             false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         return (snapshot, new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 }, registers);
+    }
+
+    [Fact]
+    public void PackedUpperWordPreservesTheFiniteSelectorDomain()
+    {
+        var plan = Extract(FiniteBufferImageProgram(packedWord: true), userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
+            source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
+    [Theory]
+    [InlineData(true, 6u)]
+    [InlineData(false, 4u)]
+    public void ModifiedOrPartialPackedWordDeclinesTheProof(bool signed, uint destinationSelect)
+    {
+        var program = FiniteBufferImageProgram(packedWord: true);
+        program = program with { Instructions = program.Instructions.Select(instruction => instruction.Pc == 28
+            ? instruction with { Control = new Gen5SdwaControl(destinationSelect, 0, 5, 6, signed, false, 0, 0, 0, false, null) }
+            : instruction).ToArray() };
+        var plan = Extract(program, userDataCount: 4);
+        Assert.Null(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage);
     }
 
     [Fact]

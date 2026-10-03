@@ -189,6 +189,19 @@ public sealed class IndirectSelectorValues
         private Expression? Define(Gen5ShaderInstruction instruction, Gen5Operand destination)
         {
             if (!instruction.Destinations.Contains(destination)) return null;
+            // Packed descriptor selectors may extract the upper word with SDWA.
+            // A full-dword destination discards the previous value; partial
+            // destinations and source modifiers require a separate proof.
+            if (instruction is { Opcode: "VMovB32", Sources.Count: 1,
+                Control: Gen5SdwaControl { DestinationSelect: 6, Source0Select: 5,
+                    Source0SignExtend: false, AbsoluteMask: 0, NegateMask: 0,
+                    OutputModifier: 0, Clamp: false } })
+            {
+                var packed = Read(instruction.Sources[0], instruction.Pc);
+                return packed is null ? null : new(Operation: ScalarOperation.And32, Inputs:
+                    [new(Operation: ScalarOperation.ShiftRightLogical32, Inputs:
+                        [packed, new(Values: [16])]), new(Values: [0xFFFF])]);
+            }
             if (instruction.Control is Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 } or
                 Gen5Vop3Control { Clamp: true } or Gen5Vop3Control { OutputModifier: not 0 } or Gen5Vop3Control { OperandSelect: not 0 } or
                 Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl) return null;
