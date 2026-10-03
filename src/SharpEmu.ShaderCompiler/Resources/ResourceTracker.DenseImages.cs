@@ -444,9 +444,21 @@ public sealed partial class ResourceTracker
                 target > instructions[activeStart].Pc && target <= readLane.Pc)) return false;
         }
         else if (copy.Opcode != "SMovB64") return false;
-        else if (copy.Sources[0] != exec &&
-            (copyIndex == 0 || instructions[copyIndex - 1] is not { Opcode: "SMovB64", Sources.Count: 1 } execCopy ||
-             !execCopy.Destinations.Contains(exec) || execCopy.Sources[0] != copy.Sources[0])) return false;
+        else if (copy.Sources[0] != exec)
+        {
+            var aliasRestoreIndex = copyIndex - 1;
+            for (; aliasRestoreIndex >= 0; aliasRestoreIndex--)
+            {
+                var prior = instructions[aliasRestoreIndex];
+                if (WritesScalarPair(prior, exec)) break;
+                if (IndirectSelectorValues.WritesMask(prior, copy.Sources[0]) ||
+                    Gen5IrBranchResolver.Instance.TryGetBranchTarget(prior, out _)) return false;
+            }
+            if (aliasRestoreIndex < 0 || instructions[aliasRestoreIndex] is not { Opcode: "SMovB64", Sources.Count: 1 } execCopy ||
+                !execCopy.Destinations.Contains(exec) || execCopy.Sources[0] != copy.Sources[0]) return false;
+            if (instructions.Any(edge => Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var target) &&
+                target > execCopy.Pc && target <= copy.Pc)) return false;
+        }
         if (copy.Opcode == "SMovB64" && copy.Sources[0] != exec && instructions.Any(instruction =>
             Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) && target == copy.Pc))
             return false;

@@ -121,6 +121,46 @@ public sealed class DirectImageTableTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void RemainingMaskCopyAllowsIndependentInstructionsButRejectsChangedMask(bool changeMask)
+    {
+        var instructions = FiniteLaneReadProgram().Instructions.Select(instruction => instruction.Pc >= 40
+            ? instruction with { Pc = instruction.Pc + 4 } : instruction).ToList();
+        instructions.Add(changeMask ? Vopc(40, "VCmpEqU32", Operand(0), 0) : Vop1(40, "VMovB32", 10, Operand(0)));
+        var plan = Extract(Program(instructions.OrderBy(instruction => instruction.Pc).ToArray()), userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        if (changeMask) Assert.Null(source.IndirectImage);
+        else Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
+            source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
+    [Fact]
+    public void RestoredMaskUnionsValuesWrittenUnderAnArbitraryIntermediateMask()
+    {
+        var program = FiniteLaneReadProgram(partialWrite: true);
+        program = program with { Instructions = program.Instructions.Select(instruction => instruction.Pc == 32
+            ? Sop2(32, "SAndn2B64", 126, Gen5Operand.Scalar(100), Gen5Operand.Scalar(102)) : instruction).ToArray() };
+        var plan = Extract(program, userDataCount: 4);
+        Assert.Equal(new uint[] { 0, 768, 1152, 1920, 999 * 384 }, plan.DescriptorSources[(int)plan.Info.Images[0].Source]
+            .IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
+    [Fact]
+    public void SavedMaskProofAllowsAForwardExitThatSkipsTheDescriptorAccess()
+    {
+        var instructions = FiniteLaneReadProgram().Instructions.Select(instruction => instruction.Pc >= 32
+            ? instruction with { Pc = instruction.Pc + 4 } : instruction).ToList();
+        instructions.Add(Branch(32, "SCbranchVccz", 18));
+        var plan = Extract(Program(instructions.OrderBy(instruction => instruction.Pc).ToArray()), userDataCount: 4);
+        var selector = plan.Graph.Values.Last(value => value.Kind == ScalarValueKind.FirstLane && value.Payload == 52);
+        Assert.True(ResourceTracker.TryGetStableLaneReadStart(plan.Graph.Program.Instructions,
+            plan.Graph.Program.Instructions.ToList().FindIndex(instruction => instruction.Pc == 52), out _));
+        Assert.True(IndirectSelectorValues.TryGetConstantValues(plan, selector, out var values));
+        Assert.Equal(new uint[] { 0, 2, 3, 5 }, values.Order().ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void CapturedOldExecMaskRequiresAnExactRestoreBeforeTheLaneScan(bool wrongRestore)
     {
         var plan = Extract(CapturedMaskLaneProgram(wrongRestore), userDataCount: 4);

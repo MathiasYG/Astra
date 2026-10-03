@@ -10,6 +10,7 @@ public sealed class IndirectSelectorValues
 {
     private const int MaximumValues = 4096;
     private const int MaximumCombinations = 65536;
+    internal static bool WritesMask(Gen5ShaderInstruction instruction, Gen5Operand mask) => Builder.WritesSavedMask(instruction, mask);
     private sealed record Expression(uint[]? Values = null, ScalarValue? RuntimeValue = null,
         ScalarOperation Operation = ScalarOperation.None, Expression[]? Inputs = null);
     private readonly Expression _root;
@@ -295,11 +296,16 @@ public sealed class IndirectSelectorValues
                     instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal) || WritesSavedMask(instruction, saved)) return null;
                 if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target))
                 {
-                    if (fullMask || target <= instruction.Pc || target > restore.Pc) return null;
-                    var nextRestore = instructions.Skip(index + 1).FirstOrDefault(candidate =>
-                        candidate.Pc <= restore.Pc && candidate is { Opcode: "SMovB64", Sources.Count: 1 } &&
-                        candidate.Destinations.Contains(Gen5Operand.Scalar(126)) && candidate.Sources[0] == saved);
-                    if (nextRestore is null || target > nextRestore.Pc) return null;
+                    if (target <= instruction.Pc) return null;
+                    // An edge leaving this region cannot reach this restoration.
+                    if (target <= restore.Pc)
+                    {
+                        if (fullMask) return null;
+                        var nextRestore = instructions.Skip(index + 1).FirstOrDefault(candidate =>
+                            candidate.Pc <= restore.Pc && candidate is { Opcode: "SMovB64", Sources.Count: 1 } &&
+                            candidate.Destinations.Contains(Gen5Operand.Scalar(126)) && candidate.Sources[0] == saved);
+                        if (nextRestore is null || target > nextRestore.Pc) return null;
+                    }
                 }
                 var writesVector = WritesRegister(instruction, vector);
                 if (MayExpandExecution(instruction) || instruction.Opcode is "SAndSaveexecB64" or "SAndSaveexecB32")
@@ -307,9 +313,7 @@ public sealed class IndirectSelectorValues
                     if (instruction is { Opcode: "SMovB64", Sources.Count: 1 } &&
                         instruction.Destinations.Contains(Gen5Operand.Scalar(126)) && instruction.Sources[0] == saved)
                         fullMask = true;
-                    else if (instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
-                             instruction.Opcode == "SAndSaveexecB64") fullMask = false;
-                    else return null;
+                    else fullMask = false;
                 }
                 if (writesVector)
                 {
@@ -322,7 +326,7 @@ public sealed class IndirectSelectorValues
             return values;
         }
 
-        private static bool WritesSavedMask(Gen5ShaderInstruction instruction, Gen5Operand saved)
+        internal static bool WritesSavedMask(Gen5ShaderInstruction instruction, Gen5Operand saved)
         {
             // RDNA2 CMPX updates EXEC only, leaving the explicit condition SGPRs intact.
             if (instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) && saved.Value < 126) return false;
@@ -333,7 +337,7 @@ public sealed class IndirectSelectorValues
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } vop } && vop <= pairEnd && vop + 1 >= saved.Value ||
                 instruction.Control is Gen5SdwaControl { ScalarDestination: { } sdwa } && sdwa <= pairEnd && sdwa + 1 >= saved.Value)
                 return !instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal);
-            return saved.Value is 106 or 107 &&
+            return saved.Value is 106 or 107 && instruction.Opcode.StartsWith('V') &&
                 (instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal) && !instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
                  instruction.Opcode.Contains("Co", StringComparison.Ordinal) || instruction.Opcode.Contains("Vcc", StringComparison.OrdinalIgnoreCase));
         }
