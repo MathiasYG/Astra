@@ -171,7 +171,7 @@ public sealed class DirectImageTableTests
     }
 
     private static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
-        uint sourceSelect = 6, uint multiplier = 3, uint compare = 0)
+        uint sourceSelect = 6, uint multiplier = 3, uint compare = 0, bool splitMultiply = false)
     {
         var fullWord = new Gen5SdwaControl(6, 0, sourceSelect, 6, false, false, 0, 0, 0, false, null);
         return Program(
@@ -180,8 +180,10 @@ public sealed class DirectImageTableTests
                 [Operand(0), unknown ? Gen5Operand.Vector(0) : Operand(1)], [Gen5Operand.Vector(1)], fullWord),
             new(12, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
                 [Operand(0), Operand(2)], [Gen5Operand.Vector(2)], fullWord),
-            Vop3(20, "VMadU32U24", 3, Operand(multiplier), Gen5Operand.Vector(1), Gen5Operand.Vector(2)),
-            expandExec ? Sop1(28, "SMovB64", 126, Gen5Operand.Scalar(12)) : Nop(28),
+            splitMultiply ? Vop3(20, "VMulU32U24", 3, Operand(multiplier), Gen5Operand.Vector(1)) :
+                Vop3(20, "VMadU32U24", 3, Operand(multiplier), Gen5Operand.Vector(1), Gen5Operand.Vector(2)),
+            expandExec ? Sop1(28, "SMovB64", 126, Gen5Operand.Scalar(12)) : splitMultiply ?
+                Vop2(28, "VAddI32", 3, Gen5Operand.Vector(3), Gen5Operand.Vector(2)) : Nop(28),
             ReadFirstLane(32, 106, 3),
             Sop2(36, "SMulI32", 106, Gen5Operand.Scalar(106), Operand(384)),
             ScalarBufferLoad(40, 0, 16, 8, dynamicOffsetRegister: 106),
@@ -189,11 +191,11 @@ public sealed class DirectImageTableTests
             EndProgram(56));
     }
 
-    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false)
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false)
     {
         var program = FiniteBufferImageProgram(compare: compare) with
         {
-            Instructions = FiniteBufferImageProgram(compare: compare).Instructions.Where(instruction => instruction.Pc < 48).Concat([
+            Instructions = FiniteBufferImageProgram(compare: compare, splitMultiply: splitMultiply).Instructions.Where(instruction => instruction.Pc < 48).Concat([
                 Vop1(48, "VMovB32", 4, Operand(0)), Vop1(52, "VMovB32", 5, Operand(0)),
                 Image(56, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
                 BufferAccess(64, "BufferStoreDword", 8, vectorData: 4), EndProgram(72),

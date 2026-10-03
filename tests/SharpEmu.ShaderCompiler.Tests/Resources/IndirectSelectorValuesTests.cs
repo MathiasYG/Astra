@@ -50,6 +50,24 @@ public sealed class IndirectSelectorValuesTests
         Assert.Null(Selector(Extract(CreateProgram(expandsExecution: true))));
     }
 
+    [Theory]
+    [InlineData(3u)]
+    [InlineData(0xFF000003u)]
+    [InlineData(0x00FFFFFFu)]
+    public void Unsigned24BitMultiplyMasksBothOperandsAndWrapsTheProduct(uint multiplier)
+    {
+        var original = CreateProgram();
+        var program = Program(original.Instructions.Select(instruction => instruction.Pc == 0x1000
+            ? Vop3(0x1000, "VMulU32U24", 1, Operand(multiplier), Gen5Operand.Vector(2))
+            : instruction).ToArray());
+        var plan = Extract(program);
+        var selector = Assert.IsType<IndirectSelectorValues>(Selector(plan));
+        Assert.True(selector.TryEvaluate(plan, Inputs(new uint[64]), out var values));
+        var expected = Enumerable.Range(0, 32).Select(value => (uint)value).Append(uint.MaxValue)
+            .Select(value => unchecked((multiplier & 0x00FFFFFF) * (value & 0x00FFFFFF))).Distinct().Order();
+        Assert.Equal(expected, values.Order());
+    }
+
     [Fact]
     public void PathWithoutTheVectorDefinitionDeclinesTheProof()
     {

@@ -216,7 +216,8 @@ public sealed class IndirectSelectorValues
                 var trueArm = Read(instruction.Sources[1], instruction.Pc);
                 return falseArm is null || trueArm is null ? null : new(Inputs: [falseArm, trueArm]);
             }
-            if (instruction.Opcode == "VMadU32U24" && instruction.Sources.Count == 3)
+            if (instruction.Opcode is "VMadU32U24" or "VMulU32U24" &&
+                instruction.Sources.Count == (instruction.Opcode == "VMadU32U24" ? 3 : 2))
             {
                 var operands = instruction.Sources.Select(source => Read(source, instruction.Pc)).ToArray();
                 if (operands.Any(operand => operand is null)) return null;
@@ -224,6 +225,7 @@ public sealed class IndirectSelectorValues
                 var multiplicand = new Expression(Operation: ScalarOperation.And32, Inputs: [operands[0]!, mask]);
                 var multiplier = new Expression(Operation: ScalarOperation.And32, Inputs: [operands[1]!, mask]);
                 var product = new Expression(Operation: ScalarOperation.IMul32, Inputs: [multiplicand, multiplier]);
+                if (instruction.Opcode == "VMulU32U24") return product;
                 return new(Operation: ScalarOperation.IAdd32, Inputs: [product, operands[2]!]);
             }
             var operation = instruction.Opcode switch
