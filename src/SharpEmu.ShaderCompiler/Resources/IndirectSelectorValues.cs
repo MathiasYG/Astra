@@ -840,8 +840,11 @@ public sealed class IndirectSelectorValues
                 for (var index = start + 1; index < restoreIndex; index++)
                 {
                     var instruction = instructions[index];
-                    if (MayExpandExecution(instruction) || instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
-                        Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _)) break;
+                    if (MayExpandExecution(instruction) || instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal)) break;
+                    // A retry before initialization must cross this restoration
+                    // again. Incoming edges that bypass it are rejected below.
+                    if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var retry) &&
+                        retry > restored.Pc) break;
                     if (WritesRegister(instruction, vector)) candidate = index;
                 }
                 if (candidate < 0 || Define(instructions[candidate], vector) is null) continue;

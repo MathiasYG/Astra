@@ -15,6 +15,35 @@ public sealed class IndirectSelectorValuesTests
     [InlineData(2, false)]
     [InlineData(3, false)]
     [InlineData(4, false)]
+    public void SelectorInitializationAfterRetryRequiresRestorationOnEveryEntry(int change, bool expected)
+    {
+        var program = Program(
+            Sop1(0, "SMovB64", 32, Gen5Operand.Scalar(126)),
+            Vop1(4, "VSinF32", 3, Gen5Operand.Vector(0)),
+            Sop1(8, "SMovB64", 32, Gen5Operand.Scalar(126)),
+            change == 1 ? Branch(12, "SCbranchScc1", 2) : Nop(12),
+            Sop1(16, "SMovB64", 126, Gen5Operand.Scalar(change == 3 ? 34u : 32u)),
+            Branch(20, "SCbranchScc1", change == 2 ? (short)2 : (short)-5),
+            Vop1(24, "VMovB32", 3, Operand(0)),
+            Vopc(28, "VCmpxEqU32", Operand(0), 0),
+            Branch(32, "SCbranchExecz", 2),
+            Vop2(36, "VCndmaskB32", 3, Operand(1), Operand(2)),
+            change == 4 ? Sop1(40, "SMovB64", 32, Gen5Operand.Scalar(34)) : Nop(40),
+            Sop1(44, "SMovB64", 126, Gen5Operand.Scalar(32)),
+            ReadFirstLane(48, 20, 3), EndProgram(52));
+        var plan = Extract(program);
+        var selector = plan.Graph.FirstLane(plan.Graph.Undefined(ScalarValueType.U32),
+            plan.Graph.Undefined(ScalarValueType.Bool), 48);
+        Assert.Equal(expected, IndirectSelectorValues.TryGetConstantValues(plan, selector, out var values));
+        if (expected) Assert.Equal(new uint[] { 0, 1, 2 }, values.Order().ToArray());
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(3, false)]
+    [InlineData(4, false)]
     public void SavedMaskOverwriteKillsEarlierUnknownLoopValuesOnlyWhenDominating(int change, bool expected)
     {
         var program = Program(
