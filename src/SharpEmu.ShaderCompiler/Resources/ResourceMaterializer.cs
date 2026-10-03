@@ -138,6 +138,18 @@ public static class ResourceMaterializer
             return false;
         }
 
+        foreach (var source in plan.DescriptorSources)
+        {
+            if (source.ZeroExtentBufferSource is not { } bufferSource) continue;
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, [bufferSource], inputs.WithReader(inputs.ReadCleanMemory), [],
+                    evaluateTable: false, out var descriptors, out _) ||
+                descriptors.Count != 1 || descriptors[0].DwordCount != 4 || ScalarBufferSize(descriptors[0].Dwords) != 0)
+            {
+                SpecializationFailed("a dynamically loaded descriptor requires an empty source buffer");
+                return false;
+            }
+        }
+
         var cursor = 0;
         snapshot.Buffers = new uint[plan.Info.Buffers.Count][];
         for (var index = 0; index < snapshot.Buffers.Length; index++)

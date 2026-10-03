@@ -226,6 +226,9 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    // Scalar loads from an empty buffer return zero regardless of the offset.
+    // Materialization must recheck the source extent before using these words.
+    public uint? ZeroExtentBufferSource { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.

@@ -325,7 +325,8 @@ public sealed partial class ResourceTracker
         for (var candidate = 0; candidate < _sources.Count; candidate++)
         {
             var current = _sources[candidate];
-            if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage))
+            if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage) ||
+                current.ZeroExtentBufferSource != source.ZeroExtentBufferSource)
             {
                 continue;
             }
@@ -448,6 +449,10 @@ public sealed partial class ResourceTracker
         var controlDependent = false;
         if (nonContiguousImage || !ValidateSource(source, out badDword, out controlDependent))
         {
+            if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle &&
+                TryMakeZeroExtentBufferSource(source, pc, out var emptyBufferSource))
+                return emptyBufferSource;
+
             // A bindless image/sampler descriptor whose dwords resolve through a
             // control-dependent phi (e.g. a hash-table/linear-probe material lookup, as seen
             // in Ghost of Yotei) has no single compile-time source: real support needs
@@ -478,6 +483,37 @@ public sealed partial class ResourceTracker
         }
 
         return InternSource(source);
+    }
+
+    private bool TryMakeZeroExtentBufferSource(DescriptorSource source, uint pc, out uint sourceIndex)
+    {
+        sourceIndex = 0;
+        ScalarValue? bufferHandle = null;
+        var hasBufferRead = false;
+        foreach (var operand in source.Dwords)
+        {
+            var word = _graph.ResolveInvariantPhi(operand);
+            if (word is null) return false;
+            if (word.IsConstant && word.ConstantU32 == 0) continue;
+            if (word.Kind != ScalarValueKind.ScalarBufferWord || word.Operands.Length != 2)
+                return false;
+            var current = word.Operands[0];
+            if (bufferHandle is not null && !_graph.Equivalent(bufferHandle, current))
+                return false;
+            bufferHandle = current;
+            hasBufferRead = true;
+        }
+
+        if (!hasBufferRead || bufferHandle is null ||
+            !MakeRuntimeBufferSource(bufferHandle, pc, out var bufferSource, out _))
+            return false;
+
+        sourceIndex = InternSource(new DescriptorSource
+        {
+            Dwords = Enumerable.Repeat(_graph.Constant(0u), (int)source.DwordCount).ToArray(),
+            ZeroExtentBufferSource = bufferSource,
+        });
+        return true;
     }
 
     private string DescribeValueShape(ScalarValue value, int depth = 0)
