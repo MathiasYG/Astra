@@ -671,6 +671,17 @@ public sealed partial class ScalarValueGraph
                 case "SFF1I32B32":
                     state.WriteScalar(destinationRegister, _graph.FindLowestSetBit(left, instruction.Pc));
                     return;
+                case "SFlbitI32B32":
+                {
+                    // RDNA returns -1 for zero; otherwise this is the number of
+                    // zeros before the most significant set bit.
+                    var high = Unary(ScalarOperation.FindHighestBit32, left);
+                    var leading = Binary(ScalarOperation.ISub32, _graph.Constant(31u), high);
+                    state.WriteScalar(destinationRegister,
+                        _graph.Select(Bool(ScalarOperation.IEqual32, left, _graph.Constant(0u)),
+                            _graph.Constant(uint.MaxValue), leading));
+                    return;
+                }
                 case "SBitset0B32":
                 {
                     var bit = Binary(ScalarOperation.ShiftLeft32, _graph.Constant(1u), Binary(ScalarOperation.And32, left, _graph.Constant(31u)));
