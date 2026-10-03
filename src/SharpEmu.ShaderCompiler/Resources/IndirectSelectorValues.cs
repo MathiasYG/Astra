@@ -718,6 +718,11 @@ public sealed class IndirectSelectorValues
                 saved.Value >= 126 || (saved.Value & 1) != 0) return null;
             var instructions = plan.Graph.Program.Instructions;
             var restoreIndex = instructions.ToList().IndexOf(restore);
+            // A later full-mask definition can kill every value from an earlier
+            // waterfall. Start there only when its saved-mask restoration cannot
+            // be bypassed and the defining write dominates this restoration.
+            if (TryFindFullSavedMaskOverwrite(vector, saved, restoreIndex, out var overwrite))
+                return ReadAfterFullSavedMaskOverwrite(vector, saved, overwrite, restoreIndex);
             var saveIndex = -1;
             for (var index = restoreIndex - 1; index >= 0; index--)
             {
@@ -813,6 +818,65 @@ public sealed class IndirectSelectorValues
                     else if (values is null || written is null) values = null;
                     else values = new(Inputs: [values, written]);
                 }
+            }
+            return values;
+        }
+
+        private bool TryFindFullSavedMaskOverwrite(Gen5Operand vector, Gen5Operand saved,
+            int restoreIndex, out int overwrite)
+        {
+            overwrite = -1;
+            var instructions = plan.Graph.Program.Instructions;
+            var end = instructions[restoreIndex].Pc;
+            for (var start = restoreIndex - 1; start >= 0; start--)
+            {
+                var restored = instructions[start];
+                if (restored is not { Opcode: "SMovB64", Sources.Count: 1 } ||
+                    !restored.Destinations.Contains(Gen5Operand.Scalar(126)) || restored.Sources[0] != saved) continue;
+                if (instructions.Skip(start + 1).Take(restoreIndex - start - 1).Any(instruction =>
+                    WritesSavedMask(instruction, saved) || instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+                    instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal))) continue;
+                var candidate = -1;
+                for (var index = start + 1; index < restoreIndex; index++)
+                {
+                    var instruction = instructions[index];
+                    if (MayExpandExecution(instruction) || instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
+                        Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _)) break;
+                    if (WritesRegister(instruction, vector)) candidate = index;
+                }
+                if (candidate < 0 || Define(instructions[candidate], vector) is null) continue;
+                var definition = instructions[candidate].Pc;
+                var bypass = instructions.Any(edge => Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var target) &&
+                    ((target > restored.Pc && target <= definition && (edge.Pc < restored.Pc || edge.Pc >= end)) ||
+                     (target > definition && target <= end && (edge.Pc < definition || edge.Pc >= end)) ||
+                     (edge.Pc > definition && edge.Pc < end && target <= edge.Pc && target > restored.Pc)));
+                if (bypass) continue;
+                overwrite = candidate;
+                return true;
+            }
+            return false;
+        }
+
+        private Expression? ReadAfterFullSavedMaskOverwrite(Gen5Operand vector, Gen5Operand saved,
+            int overwrite, int restoreIndex)
+        {
+            var instructions = plan.Graph.Program.Instructions;
+            var values = Define(instructions[overwrite], vector);
+            for (var index = overwrite + 1; index < restoreIndex; index++)
+            {
+                var instruction = instructions[index];
+                if (MayExpandExecution(instruction))
+                {
+                    var restoresSavedMask = instruction is { Opcode: "SMovB64", Sources.Count: 1 } &&
+                        instruction.Destinations.Contains(Gen5Operand.Scalar(126)) && instruction.Sources[0] == saved;
+                    if (!restoresSavedMask && !instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal)) return null;
+                }
+                if (!WritesRegister(instruction, vector)) continue;
+                var written = Define(instruction, vector);
+                // Later branches may bypass a restore. Keep all possible earlier values
+                // rather than assuming a subsequent write replaces every saved lane.
+                if (values is null || written is null) values = null;
+                else values = new(Inputs: [values, written]);
             }
             return values;
         }
