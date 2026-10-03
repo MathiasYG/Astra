@@ -11,6 +11,86 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DirectImageTableTests
 {
+    private static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
+        uint sourceSelect = 6, uint multiplier = 3)
+    {
+        var fullWord = new Gen5SdwaControl(6, 0, sourceSelect, 6, false, false, 0, 0, 0, false, null);
+        return Program(
+            Vopc(0, "VCmpEqU32", Operand(0), 0),
+            new(4, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
+                [Operand(0), unknown ? Gen5Operand.Vector(0) : Operand(1)], [Gen5Operand.Vector(1)], fullWord),
+            new(12, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
+                [Operand(0), Operand(2)], [Gen5Operand.Vector(2)], fullWord),
+            Vop3(20, "VMadU32U24", 3, Operand(multiplier), Gen5Operand.Vector(1), Gen5Operand.Vector(2)),
+            expandExec ? Sop1(28, "SMovB64", 126, Gen5Operand.Scalar(12)) : Nop(28),
+            ReadFirstLane(32, 106, 3),
+            Sop2(36, "SMulI32", 106, Gen5Operand.Scalar(106), Operand(384)),
+            ScalarBufferLoad(40, 0, 16, 8, dynamicOffsetRegister: 106),
+            Image(48, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
+            EndProgram(56));
+    }
+
+    [Fact]
+    public void FiniteScalarBufferImagesKeepEveryConditionalCandidate()
+    {
+        var plan = Extract(FiniteBufferImageProgram(), userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Null(source.ZeroExtentBufferSource);
+        var candidates = Assert.IsType<List<DirectImageCandidate>>(source.IndirectImage!.DirectCandidates);
+        Assert.Equal(new uint[] { 0, 768, 1152, 1920 }, candidates.Select(candidate => candidate.Offset).Order().ToArray());
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x1800) return false;
+            var relative = address - 0x1000;
+            word = (relative % 384 / 4) switch
+            {
+                0 => 0x2000u + (uint)(relative / 384) * 0x100u,
+                1 => 20u << 20,
+                3 => 0xFACu | (9u << 28),
+                _ => 0,
+            };
+            return true;
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0, 2048, 0], readCleanMemory: Read),
+            ref snapshot, ref specialization));
+        Assert.Equal(4, snapshot.Images.Length);
+        Assert.Equal(new uint[] { 0x2000, 0x2200, 0x2300, 0x2500 }, snapshot.Images.Select(item => item[0]).Order().ToArray());
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 4),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 64, ThreadCountX = 64 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+
+        var prior = snapshot;
+        Assert.False(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0, 32, 0], readCleanMemory: Read),
+            ref snapshot, ref specialization));
+        Assert.Same(prior, snapshot);
+    }
+
+    [Theory]
+    [InlineData(true, false, 6u)]
+    [InlineData(false, true, 6u)]
+    [InlineData(false, false, 0u)]
+    public void FiniteScalarBufferImagesRejectUnknownOrUnprovenLaneValues(bool unknown, bool expandExec, uint select)
+    {
+        var plan = Extract(FiniteBufferImageProgram(unknown, expandExec, select), userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Null(source.IndirectImage);
+        Assert.NotNull(source.ZeroExtentBufferSource);
+    }
+
+    [Fact]
+    public void FiniteSelectorMadUsesOnlyLow24BitsOfMultiplicands()
+    {
+        var plan = Extract(FiniteBufferImageProgram(multiplier: 0x01000003), userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
+            source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
     internal static Gen5ShaderProgram CreateWaveIndexedDescriptorProgram()
     {
         return Program(

@@ -30,6 +30,27 @@ public sealed class IndirectSelectorValues
             WaveMaskSelectorBounds.TryCreate(plan, instruction));
     }
 
+    // Only constant reaching definitions qualify here. Runtime memory/user data,
+    // unknown writes and execution-mask expansion must not manufacture a bound.
+    internal static bool TryGetConstantValues(ShaderResourcePlan plan, ScalarValue selector, out uint[] values)
+    {
+        values = [];
+        if (selector.Kind != ScalarValueKind.FirstLane) return false;
+        var instruction = plan.Graph.Program.Instructions.FirstOrDefault(candidate => candidate.Pc == selector.Payload);
+        if (instruction is not { Opcode: "VReadfirstlaneB32", Sources.Count: 1 }) return false;
+        var root = new Builder(plan).Read(instruction.Sources[0], instruction.Pc);
+        if (root is null) return false;
+        var pending = new Stack<Expression>();
+        pending.Push(root);
+        while (pending.TryPop(out var expression))
+        {
+            if (expression.RuntimeValue is not null) return false;
+            if (expression.Inputs is { } operands)
+                foreach (var operand in operands) pending.Push(operand);
+        }
+        return new IndirectSelectorValues(root, null).TryEvaluate(plan, new ResourceRuntimeInputs(), out values);
+    }
+
     internal bool TryEvaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] values,
         IndirectSelectorDiagnostic? diagnostic = null)
     {
@@ -153,7 +174,12 @@ public sealed class IndirectSelectorValues
             if (!instruction.Destinations.Contains(destination)) return null;
             if (instruction.Control is Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 } or
                 Gen5Vop3Control { Clamp: true } or Gen5Vop3Control { OutputModifier: not 0 } or Gen5Vop3Control { OperandSelect: not 0 } or
-                Gen5SdwaControl or Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl) return null;
+                Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl) return null;
+            if (instruction.Control is Gen5SdwaControl sdwa &&
+                (instruction.Opcode != "VCndmaskB32" || sdwa.DestinationSelect != 6 ||
+                 sdwa.Source0Select != 6 || sdwa.Source1Select != 6 ||
+                 sdwa.Source0SignExtend || sdwa.Source1SignExtend ||
+                 sdwa.AbsoluteMask != 0 || sdwa.NegateMask != 0 || sdwa.OutputModifier != 0 || sdwa.Clamp)) return null;
             if (instruction.Opcode is "SFF1I32B32" or "VFfblB32")
             {
                 HasBitScan = true;
@@ -167,6 +193,22 @@ public sealed class IndirectSelectorValues
                 return read is not null && plan.ValidateRuntimeValue(read) ? new(RuntimeValue: read) : null;
             }
             if (instruction.Opcode is "SMovB32" or "VMovB32") return Read(instruction.Sources[0], instruction.Pc);
+            if (instruction.Opcode == "VCndmaskB32" && instruction.Sources.Count >= 2)
+            {
+                var falseArm = Read(instruction.Sources[0], instruction.Pc);
+                var trueArm = Read(instruction.Sources[1], instruction.Pc);
+                return falseArm is null || trueArm is null ? null : new(Inputs: [falseArm, trueArm]);
+            }
+            if (instruction.Opcode == "VMadU32U24" && instruction.Sources.Count == 3)
+            {
+                var operands = instruction.Sources.Select(source => Read(source, instruction.Pc)).ToArray();
+                if (operands.Any(operand => operand is null)) return null;
+                var mask = new Expression(Values: [0x00FF_FFFF]);
+                var multiplicand = new Expression(Operation: ScalarOperation.And32, Inputs: [operands[0]!, mask]);
+                var multiplier = new Expression(Operation: ScalarOperation.And32, Inputs: [operands[1]!, mask]);
+                var product = new Expression(Operation: ScalarOperation.IMul32, Inputs: [multiplicand, multiplier]);
+                return new(Operation: ScalarOperation.IAdd32, Inputs: [product, operands[2]!]);
+            }
             var operation = instruction.Opcode switch
             {
                 "SAddU32" or "SAddI32" or "VAddU32" or "VAddI32" or "VAdd3U32" => ScalarOperation.IAdd32,

@@ -17,11 +17,14 @@ public sealed partial class ResourceTracker
         for (var component = 0; component < reads.Length; component++)
         {
             var read = reads[component];
-            if (read.Kind != ScalarValueKind.ScalarAddressWord || read.MemoryIndex < 0 ||
+            if (read.Kind is not (ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord) ||
+                read.Kind != reads[0].Kind || read.MemoryIndex < 0 ||
                 read.MemoryIndex >= _plan.Memory.Count || !MemoryIndexBelongsTo(read.MemoryIndex, read) ||
                 !UsesOnly(read, [handle])) return false;
             var memory = _plan.Memory[read.MemoryIndex];
-            if (memory.Kind != MemoryResourceKind.ScalarAddress || memory.DataBits != 32 || memory.DataDwords != 1)
+            if (memory.Kind != (read.Kind == ScalarValueKind.ScalarBufferWord
+                    ? MemoryResourceKind.ScalarBuffer : MemoryResourceKind.ScalarAddress) ||
+                memory.DataBits != 32 || memory.DataDwords != 1)
                 return false;
             canSuppressMemoryReads &= HasOnlyImageConsumers(memory, handle);
             memoryIndices[component] = read.MemoryIndex;
@@ -40,6 +43,7 @@ public sealed partial class ResourceTracker
         var pending = new Stack<ScalarValue>(reads.Select(read => read.Operands[1]));
         var visited = new HashSet<ScalarValue>();
         ScalarValue? selector = null;
+        uint[]? finiteValues = null;
         while (pending.TryPop(out var value))
         {
             if (!visited.Add(value)) continue;
@@ -47,6 +51,14 @@ public sealed partial class ResourceTracker
             {
                 if (selector is not null && !ReferenceEquals(selector, value)) return false;
                 selector = value;
+                continue;
+            }
+            if (value.Kind == ScalarValueKind.FirstLane &&
+                IndirectSelectorValues.TryGetConstantValues(_plan, value, out var values))
+            {
+                if (selector is not null && !ReferenceEquals(selector, value)) return false;
+                selector = value;
+                finiteValues = values;
                 continue;
             }
             if (!value.IsConstant && value.Kind != ScalarValueKind.Operation) return false;
@@ -57,8 +69,8 @@ public sealed partial class ResourceTracker
         var candidates = new List<DirectImageCandidate>();
         var sources = new List<DescriptorSource>();
         var keys = new HashSet<uint>();
-        var results = Enumerable.Range(0, 32).Select(index => (uint)index);
-        if (!_graph.HasNonZeroBitScanInput(selector)) results = results.Append(uint.MaxValue);
+        IEnumerable<uint> results = finiteValues ?? Enumerable.Range(0, 32).Select(index => (uint)index).ToArray();
+        if (finiteValues is null && !_graph.HasNonZeroBitScanInput(selector)) results = results.Append(uint.MaxValue);
         foreach (var result in results)
         {
             var replacements = new Dictionary<ScalarValue, ScalarValue> { [selector] = _graph.Constant(result) };
