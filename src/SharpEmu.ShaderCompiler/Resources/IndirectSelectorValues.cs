@@ -241,8 +241,8 @@ public sealed class IndirectSelectorValues
             return third is null ? null : new(Operation: ScalarOperation.IAdd32, Inputs: [result, third]);
         }
 
-        // A vector written under a saved full mask and left untouched while EXEC
-        // is restricted still has those values when exactly that mask is restored.
+        // Restoring a saved mask exposes both unchanged lanes and lanes written
+        // while restricted. Retain every reaching value until a full-mask overwrite.
         private Expression? ReadBeforeSavedExecRestore(Gen5Operand vector, Gen5ShaderInstruction restore)
         {
             if (restore is not { Opcode: "SMovB64", Sources.Count: 1 } ||
@@ -257,7 +257,26 @@ public sealed class IndirectSelectorValues
                 var instruction = instructions[index];
                 if (!WritesSavedMask(instruction, saved)) continue;
                 if (instruction is not { Opcode: "SMovB64", Sources.Count: 1 } ||
-                    instruction.Sources[0] != Gen5Operand.Scalar(126) || !instruction.Destinations.Contains(saved)) return null;
+                    !instruction.Destinations.Contains(saved)) return null;
+                if (instruction.Sources[0] != Gen5Operand.Scalar(126))
+                {
+                    var alias = instruction.Sources[0];
+                    if (alias is not { Kind: Gen5OperandKind.ScalarRegister } || alias.Value >= 126 || (alias.Value & 1) != 0)
+                        return null;
+                    var restoredAlias = false;
+                    for (var previous = index - 1; previous >= 0; previous--)
+                    {
+                        var prior = instructions[previous];
+                        if (WritesSavedMask(prior, alias) || Gen5IrBranchResolver.Instance.TryGetBranchTarget(prior, out _)) return null;
+                        if (!MayExpandExecution(prior) && prior.Opcode is not ("SAndSaveexecB64" or "SAndSaveexecB32")) continue;
+                        restoredAlias = prior is { Opcode: "SMovB64", Sources.Count: 1 } &&
+                            prior.Destinations.Contains(Gen5Operand.Scalar(126)) && prior.Sources[0] == alias;
+                        if (instructions.Any(edge => Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var target) &&
+                            target > prior.Pc && target <= instruction.Pc)) return null;
+                        break;
+                    }
+                    if (!restoredAlias) return null;
+                }
                 saveIndex = index;
                 break;
             }
@@ -267,8 +286,8 @@ public sealed class IndirectSelectorValues
                 if ((instruction.Pc < instructions[saveIndex].Pc || instruction.Pc >= restore.Pc) &&
                     Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
                     target > instructions[saveIndex].Pc && target <= restore.Pc) return null;
-            var firstMaskWrite = -1;
-            var defined = false;
+            var fullMask = true;
+            Expression? values = Read(vector, instructions[saveIndex].Pc);
             for (var index = saveIndex + 1; index < restoreIndex; index++)
             {
                 var instruction = instructions[index];
@@ -276,21 +295,31 @@ public sealed class IndirectSelectorValues
                     instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal) || WritesSavedMask(instruction, saved)) return null;
                 if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target))
                 {
-                    if (firstMaskWrite < 0 || target <= instruction.Pc || target > restore.Pc) return null;
+                    if (fullMask || target <= instruction.Pc || target > restore.Pc) return null;
+                    var nextRestore = instructions.Skip(index + 1).FirstOrDefault(candidate =>
+                        candidate.Pc <= restore.Pc && candidate is { Opcode: "SMovB64", Sources.Count: 1 } &&
+                        candidate.Destinations.Contains(Gen5Operand.Scalar(126)) && candidate.Sources[0] == saved);
+                    if (nextRestore is null || target > nextRestore.Pc) return null;
                 }
                 var writesVector = WritesRegister(instruction, vector);
-                if (firstMaskWrite < 0 && (instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
-                    instruction.Opcode.Contains("Wrexec", StringComparison.Ordinal) ||
-                    instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
-                    WritesRegister(instruction, Gen5Operand.Scalar(126)) || WritesRegister(instruction, Gen5Operand.Scalar(127))))
-                    firstMaskWrite = index;
+                if (MayExpandExecution(instruction) || instruction.Opcode is "SAndSaveexecB64" or "SAndSaveexecB32")
+                {
+                    if (instruction is { Opcode: "SMovB64", Sources.Count: 1 } &&
+                        instruction.Destinations.Contains(Gen5Operand.Scalar(126)) && instruction.Sources[0] == saved)
+                        fullMask = true;
+                    else if (instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
+                             instruction.Opcode == "SAndSaveexecB64") fullMask = false;
+                    else return null;
+                }
                 if (writesVector)
                 {
-                    if (firstMaskWrite >= 0) return null;
-                    defined = true;
+                    var written = Define(instruction, vector);
+                    if (fullMask) values = written;
+                    else if (values is null || written is null) values = null;
+                    else values = new(Inputs: [values, written]);
                 }
             }
-            return defined && firstMaskWrite >= 0 ? Read(vector, instructions[firstMaskWrite].Pc) : null;
+            return values;
         }
 
         private static bool WritesSavedMask(Gen5ShaderInstruction instruction, Gen5Operand saved)
