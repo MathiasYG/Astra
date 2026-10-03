@@ -256,9 +256,9 @@ public sealed class IndirectSelectorValues
             {
                 var instruction = instructions[index];
                 if (!WritesSavedMask(instruction, saved)) continue;
-                if (instruction is not { Opcode: "SMovB64", Sources.Count: 1 } ||
+                if (instruction is not { Sources.Count: 1 } || instruction.Opcode is not ("SMovB64" or "SAndSaveexecB64") ||
                     !instruction.Destinations.Contains(saved)) return null;
-                if (instruction.Sources[0] != Gen5Operand.Scalar(126))
+                if (instruction.Opcode == "SMovB64" && instruction.Sources[0] != Gen5Operand.Scalar(126))
                 {
                     var alias = instruction.Sources[0];
                     if (alias is not { Kind: Gen5OperandKind.ScalarRegister } || alias.Value >= 126 || (alias.Value & 1) != 0)
@@ -286,7 +286,7 @@ public sealed class IndirectSelectorValues
                 if ((instruction.Pc < instructions[saveIndex].Pc || instruction.Pc >= restore.Pc) &&
                     Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
                     target > instructions[saveIndex].Pc && target <= restore.Pc) return null;
-            var fullMask = true;
+            var fullMask = instructions[saveIndex].Opcode != "SAndSaveexecB64";
             Expression? values = Read(vector, instructions[saveIndex].Pc);
             for (var index = saveIndex + 1; index < restoreIndex; index++)
             {

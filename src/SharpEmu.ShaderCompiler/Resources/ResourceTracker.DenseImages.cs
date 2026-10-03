@@ -430,16 +430,28 @@ public sealed partial class ResourceTracker
             return false;
 
         var copyIndex = FindLastDefinition(instructions, scanIndex, candidates);
-        if (copyIndex < 0 || instructions[copyIndex] is not { Opcode: "SMovB64", Sources.Count: 1 } copy)
+        if (copyIndex < 0 || instructions[copyIndex] is not { Sources.Count: 1 } copy)
             return false;
-        if (copy.Sources[0] != exec &&
+        var activeStart = copyIndex;
+        if (copy.Opcode == "SAndSaveexecB64")
+        {
+            activeStart = FindLastDefinition(instructions, readLaneIndex, exec);
+            if (activeStart <= copyIndex || instructions[activeStart] is not { Opcode: "SMovB64", Sources.Count: 1 } activeRestore ||
+                activeRestore.Sources[0] != candidates) return false;
+            for (var index = copyIndex + 1; index < activeStart; index++)
+                if (WritesScalarPair(instructions[index], candidates)) return false;
+            if (instructions.Any(edge => edge.Pc < readLane.Pc && Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var target) &&
+                target > instructions[activeStart].Pc && target <= readLane.Pc)) return false;
+        }
+        else if (copy.Opcode != "SMovB64") return false;
+        else if (copy.Sources[0] != exec &&
             (copyIndex == 0 || instructions[copyIndex - 1] is not { Opcode: "SMovB64", Sources.Count: 1 } execCopy ||
              !execCopy.Destinations.Contains(exec) || execCopy.Sources[0] != copy.Sources[0])) return false;
-        if (copy.Sources[0] != exec && instructions.Any(instruction =>
+        if (copy.Opcode == "SMovB64" && copy.Sources[0] != exec && instructions.Any(instruction =>
             Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) && target == copy.Pc))
             return false;
 
-        for (var index = copyIndex + 1; index < readLaneIndex; index++)
+        for (var index = activeStart + 1; index < readLaneIndex; index++)
         {
             if (WritesScalarPair(instructions[index], exec) || WritesScalarPair(instructions[index], candidates) ||
                 Gen5IrBranchResolver.Instance.TryGetBranchTarget(instructions[index], out _))
@@ -453,6 +465,7 @@ public sealed partial class ResourceTracker
                 continue;
             if (target > instructions[copyIndex].Pc && target <= instructions[scanIndex].Pc)
             {
+                if (copy.Opcode == "SAndSaveexecB64" && target < instructions[activeStart + 1].Pc) return false;
                 backIndex = index;
                 break;
             }
@@ -460,6 +473,9 @@ public sealed partial class ResourceTracker
 
         if (backIndex < 0)
             return false;
+        for (var index = backIndex + 1; index < instructions.Count; index++)
+            if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instructions[index], out var target) &&
+                target > instructions[activeStart].Pc && target <= instructions[scanIndex].Pc) return false;
 
         var restoreIndex = -1;
         for (var index = backIndex - 1; index > readLaneIndex; index--)
@@ -502,7 +518,9 @@ public sealed partial class ResourceTracker
             { Kind: Gen5OperandKind.VectorRegister } vector) return false;
         var scanIndex = FindLastDefinition(instructions, readIndex, instructions[readIndex].Sources[1]);
         var copyIndex = FindLastDefinition(instructions, scanIndex, instructions[scanIndex].Sources[0]);
-        for (var index = copyIndex + 1; index < instructions.Count; index++)
+        var stableIndex = instructions[copyIndex].Opcode == "SAndSaveexecB64"
+            ? FindLastDefinition(instructions, readIndex, Gen5Operand.Scalar(126)) + 1 : copyIndex;
+        for (var index = stableIndex; index < instructions.Count; index++)
         {
             var instruction = instructions[index];
             if (instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
@@ -513,7 +531,7 @@ public sealed partial class ResourceTracker
             if (index > readIndex && Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
                 target > instructions[copyIndex].Pc && target <= instructions[scanIndex].Pc)
             {
-                start = instructions[copyIndex].Pc;
+                start = instructions[stableIndex].Pc;
                 return true;
             }
         }

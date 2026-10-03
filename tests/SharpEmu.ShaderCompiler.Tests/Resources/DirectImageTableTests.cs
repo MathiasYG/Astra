@@ -104,6 +104,32 @@ public sealed class DirectImageTableTests
             source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
     }
 
+    private static Gen5ShaderProgram CapturedMaskLaneProgram(bool wrongRestore = false)
+    {
+        var instructions = FiniteLaneReadProgram().Instructions.Select(instruction =>
+            instruction with { Pc = instruction.Pc >= 20 ? instruction.Pc + 12 : instruction.Pc }).ToList();
+        instructions.AddRange([Sop1(20, "SAndSaveexecB64", 104, Gen5Operand.Scalar(100)),
+            Sop1(24, "SMovB64", 126, Gen5Operand.Scalar(104)), Nop(28)]);
+        instructions[instructions.FindIndex(instruction => instruction.Pc == 32)] = Sop1(32, "SMovB64", 106, Gen5Operand.Scalar(104));
+        instructions[instructions.FindIndex(instruction => instruction.Pc == 48)] = Sop1(48, "SMovB64", 126, Gen5Operand.Scalar(wrongRestore ? 102u : 104u));
+        instructions[instructions.FindIndex(instruction => instruction.Pc == 52)] = Nop(52);
+        instructions[instructions.FindIndex(instruction => instruction.Pc == 56)] = Sop1(56, "SFF1I32B64", 17, Gen5Operand.Scalar(104));
+        instructions[instructions.FindIndex(instruction => instruction.Pc == 104)] = Sop2(104, "SAndn2B64", 104, Gen5Operand.Scalar(104), Gen5Operand.Scalar(70));
+        return Program(instructions.OrderBy(instruction => instruction.Pc).ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CapturedOldExecMaskRequiresAnExactRestoreBeforeTheLaneScan(bool wrongRestore)
+    {
+        var plan = Extract(CapturedMaskLaneProgram(wrongRestore), userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        if (wrongRestore) Assert.Null(source.IndirectImage);
+        else Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
+            source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
     private static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
         uint sourceSelect = 6, uint multiplier = 3, uint compare = 0)
     {
@@ -123,7 +149,7 @@ public sealed class DirectImageTableTests
             EndProgram(56));
     }
 
-    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false)
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false)
     {
         var program = FiniteBufferImageProgram(compare: compare) with
         {
@@ -135,13 +161,17 @@ public sealed class DirectImageTableTests
         };
         if (laneRead)
         {
-            var instructions = FiniteLaneReadProgram().Instructions.Select(instruction =>
-                instruction with { Pc = instruction.Pc + (instruction.Pc >= 92 ? 16u : 8u) }).ToList();
+            var laneProgram = capturedMask ? CapturedMaskLaneProgram() : FiniteLaneReadProgram();
+            var imagePc = laneProgram.Instructions.Single(instruction => instruction.Opcode == "ImageLoad").Pc;
+            var instructions = laneProgram.Instructions.Select(instruction =>
+                instruction with { Pc = instruction.Pc + (instruction.Pc > imagePc ? 16u : 8u) }).ToList();
             instructions[instructions.FindIndex(instruction => instruction.Pc == 8)] = Vopc(8, "VCmpEqU32", Operand(compare), 0);
-            instructions[instructions.FindIndex(instruction => instruction.Pc == 76)] = Branch(76, "SCbranchExecz", 8);
-            instructions[instructions.FindIndex(instruction => instruction.Pc == 116)] = Branch(116, "SCbranchScc1", -17);
+            var skipIndex = instructions.FindIndex(instruction => instruction.Opcode == "SCbranchExecz");
+            instructions[skipIndex] = Branch(instructions[skipIndex].Pc, "SCbranchExecz", 8);
+            var backIndex = instructions.FindIndex(instruction => instruction.Opcode == "SCbranchScc1");
+            instructions[backIndex] = Branch(instructions[backIndex].Pc, "SCbranchScc1", -17);
             instructions.AddRange([Vop1(0, "VMovB32", 4, Operand(0)), Vop1(4, "VMovB32", 5, Operand(0)),
-                BufferAccess(100, "BufferStoreDword", 8, vectorData: 4)]);
+                BufferAccess(imagePc + 16, "BufferStoreDword", 8, vectorData: 4)]);
             program = program with { Instructions = instructions.OrderBy(instruction => instruction.Pc).ToArray() };
         }
         if (partialSelector)
