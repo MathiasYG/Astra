@@ -55,6 +55,8 @@ public static class ImageDescriptorBinding
     private const uint SampledCompare2DBinding = 43;
     private const uint SampledCompare2DArrayBinding = 44;
     private const uint SampledCompareCubeBinding = 45;
+    private const uint StorageSintBinding = 46;
+    private const uint StorageCubeSintBinding = 51;
 
     public static DescriptorBindingKind? ForImage(ImageResource image)
     {
@@ -115,6 +117,7 @@ public static class ImageDescriptorBinding
                 {
                     ImageNumericClass.Float => (DescriptorBindingKind)StorageCubeFloatBinding,
                     ImageNumericClass.Uint => (DescriptorBindingKind)StorageCubeUintBinding,
+                    ImageNumericClass.Sint => (DescriptorBindingKind)StorageCubeSintBinding,
                     _ => null,
                 };
             }
@@ -167,6 +170,9 @@ public static class ImageDescriptorBinding
                         break;
                     case ImageNumericClass.Uint:
                         baseBinding = StorageUintBinding;
+                        break;
+                    case ImageNumericClass.Sint:
+                        baseBinding = StorageSintBinding;
                         break;
                     default:
                         return null;
@@ -249,7 +255,7 @@ public static class ImageDescriptorBinding
     public static uint ArrayIndex(DescriptorBindingKind kind) => (uint)kind - BindingLayout.FirstImageBinding;
 
     public static bool IsCube(DescriptorBindingKind kind) =>
-        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding;
+        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding or StorageCubeSintBinding;
 
     private static readonly ImageDimension[] SampledDimensions =
     [
@@ -311,7 +317,12 @@ public static class ImageDescriptorBinding
             return (ImageResourceClass.Storage, offset / 5 == 0 ? ImageNumericClass.Float : ImageNumericClass.Uint, StorageDimensions[offset % 5], false);
         }
 
-        if (index >= AtomicUintBinding && index < (uint)DescriptorBindingKind.Samplers)
+        if (index >= StorageSintBinding && index < StorageCubeSintBinding)
+            return (ImageResourceClass.Storage, ImageNumericClass.Sint, StorageDimensions[index - StorageSintBinding], false);
+        if (index == StorageCubeSintBinding)
+            return (ImageResourceClass.Storage, ImageNumericClass.Sint, ImageDimension.Dim2DArray, false);
+
+        if (index >= AtomicUintBinding && index < SampledCubeFloatBinding)
         {
             return (ImageResourceClass.Storage, ImageNumericClass.Uint, StorageDimensions[index - AtomicUintBinding], true);
         }
@@ -326,7 +337,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 {
     public const uint FirstImageBinding = 1;
     public const uint FirstStorageImageBinding = 22;
-    public const uint ImageBindingCount = 45;
+    public const uint ImageBindingCount = 51;
     public const uint NoShaderBase = uint.MaxValue;
     public const uint ShaderBaseDwordCount = 2;
     private const int ScalarRegisterCount = 256;

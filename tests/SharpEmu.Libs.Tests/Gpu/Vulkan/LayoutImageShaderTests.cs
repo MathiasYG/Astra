@@ -221,6 +221,44 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
             ImageLayout = ImageLayout.General,
         };
 
+    [Theory]
+    [InlineData(-32768)]
+    [InlineData(-1)]
+    [InlineData(32767)]
+    public void Signed16StorageImage_PreservesSignedLoadsAndStores(short input)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, 12));
+        instructions.Add(MoveVector(pc, 1, 0)); pc += 8;
+        instructions.Add(MoveVector(pc, 2, 0)); pc += 8;
+        instructions.Add(Image(pc, "ImageLoad", FirstImageRegister, vectorAddress: 1, dmask: 1)); pc += 8;
+        instructions.Add(BufferAccess(pc, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 4)); pc += 8;
+        instructions.Add(MoveVector(pc, 4, unchecked((uint)-12345))); pc += 8;
+        instructions.Add(Image(pc, "ImageStore", FirstImageRegister, vectorAddress: 1, dmask: 1)); pc += 8;
+        instructions.Add(EndProgram(pc));
+        using var run = new Run(vulkan, Program([.. instructions]), UserData(), 1);
+        Assert.All(run.Resources.Info.Images, resource => Assert.Equal(ImageNumericClass.Sint, resource.NumericClass));
+        var image = run.Harness.CreateImage(Describe(0, Format.R16Sint, GuestPixelFormat.Bits16SInt, 4, 4, 1));
+        var pixels = Enumerable.Repeat(input, 16).ToArray();
+        var copies = ImageTestHarness.WholeImageCopies(image.Description, 0);
+        run.Harness.UploadImage(image, MemoryMarshal.AsBytes(pixels.AsSpan()), copies);
+        var view = new DescriptorImageInfo
+        {
+            ImageView = image.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R16Sint, Usage = ImageUsageFlags.SampledBit | ImageUsageFlags.StorageBit, LevelCount = 1 }),
+            ImageLayout = ImageLayout.General,
+        };
+        var views = Enumerable.Range(0, run.Snapshot.Images.Length).ToDictionary(index => index, _ => new[] { view });
+        run.Dispatch(run.BindImages(views), command => image.Transition(ImageLayout.General, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit, null, command));
+        Assert.Equal(unchecked((uint)(int)input), run.ResultWord(0));
+        var actual = MemoryMarshal.Cast<byte, short>(run.Harness.ReadImage(image, copies, 32)).ToArray();
+        pixels[0] = -12345;
+        Assert.Equal(pixels, actual);
+        run.Harness.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void SampledClassArray_SamplesEachElementThroughTheLayout()
     {

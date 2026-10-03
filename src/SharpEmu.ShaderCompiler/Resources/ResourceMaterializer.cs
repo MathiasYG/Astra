@@ -1068,7 +1068,7 @@ public static class ResourceMaterializer
             var numericClass = GuestImageFormat.SampledNumericClass(format);
             if (storage)
             {
-                if ((!rawSintStorage && numericClass == ImageNumericClass.Sint) || numericClass == ImageNumericClass.Unsupported)
+                if (numericClass == ImageNumericClass.Unsupported)
                 {
                     return Fail($"storage image descriptor {index} uses unsupported format {format}");
                 }
