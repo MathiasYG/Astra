@@ -23,6 +23,44 @@ public sealed class HttpUriTests
     private readonly FakeCpuMemory _memory = new(MemoryBase, MemorySize);
 
     [Fact]
+    public void TemplateTransferTimeoutsRemainIndependentAndExpireWithTheTemplate()
+    {
+        var context = new CpuContext(_memory, Generation.Gen5) { [CpuRegister.Rdx] = 0x80000 };
+        Assert.Equal(0, HttpExports.HttpInit(context));
+        var contextId = context[CpuRegister.Rax];
+        context[CpuRegister.Rdi] = contextId;
+        Assert.Equal(0, HttpExports.HttpCreateTemplate(context));
+        var templateId = context[CpuRegister.Rax];
+        try
+        {
+            context[CpuRegister.Rdi] = templateId;
+            context[CpuRegister.Rsi] = 30_000_000;
+            Assert.Equal(0, HttpExports.HttpSetConnectTimeOut(context));
+            context[CpuRegister.Rsi] = 0;
+            Assert.Equal(0, HttpExports.HttpSetRecvTimeOut(context));
+            context[CpuRegister.Rsi] = 0xFFFF_FFFF_1234_5678;
+            Assert.Equal(0, HttpExports.HttpSetSendTimeOut(context));
+            var templates = (System.Collections.IDictionary)typeof(HttpExports).GetField("Templates",
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+            var template = templates[unchecked((int)templateId)]!;
+            uint ReadSetting(string name) => (uint)template.GetType().GetProperty(name)!.GetValue(template)!;
+            Assert.Equal(30_000_000U, ReadSetting("ConnectTimeoutMicroseconds"));
+            Assert.Equal(0U, ReadSetting("ReceiveTimeoutMicroseconds"));
+            Assert.Equal(0x1234_5678U, ReadSetting("SendTimeoutMicroseconds"));
+            context[CpuRegister.Rdi] = contextId;
+            Assert.Equal(0, HttpExports.HttpTerm(context));
+            context[CpuRegister.Rdi] = templateId;
+            Assert.Equal(unchecked((int)0x80431100), HttpExports.HttpSetRecvTimeOut(context));
+            Assert.Equal(unchecked((int)0x80431100), HttpExports.HttpSetSendTimeOut(context));
+        }
+        finally
+        {
+            context[CpuRegister.Rdi] = contextId;
+            HttpExports.HttpTerm(context);
+        }
+    }
+
+    [Fact]
     public void ComponentLayout_HasFixedGuestOffsetsAndSize()
     {
         Assert.Equal(80, Marshal.SizeOf<HttpExports.HttpUriComponents>());

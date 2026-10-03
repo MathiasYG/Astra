@@ -23,7 +23,9 @@ public static partial class HttpExports
         ulong UserAgentAddress,
         int HttpVersion,
         bool AutoProxyConfig,
-        uint ConnectTimeoutMicroseconds = 30_000_000);
+        uint ConnectTimeoutMicroseconds = 30_000_000,
+        uint ReceiveTimeoutMicroseconds = 0,
+        uint SendTimeoutMicroseconds = 0);
 
     [SysAbiExport(
         Nid = "A9cVMUtEp4Y",
@@ -105,6 +107,37 @@ public static partial class HttpExports
         Templates[id] = template with { ConnectTimeoutMicroseconds = timeoutMicroseconds };
         TraceHttp("set_connect_timeout", id, timeoutMicroseconds, 0, 0, 0);
         return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "yigr4V0-HTM",
+        ExportName = "sceHttpSetRecvTimeOut",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpSetRecvTimeOut(CpuContext ctx) => SetTransferTimeout(ctx, receive: true);
+
+    [SysAbiExport(
+        Nid = "xegFfZKBVlw",
+        ExportName = "sceHttpSetSendTimeOut",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpSetSendTimeOut(CpuContext ctx) => SetTransferTimeout(ctx, receive: false);
+
+    private static int SetTransferTimeout(CpuContext ctx, bool receive)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var microseconds = unchecked((uint)ctx[CpuRegister.Rsi]);
+        while (Templates.TryGetValue(id, out var template))
+        {
+            var updated = receive
+                ? template with { ReceiveTimeoutMicroseconds = microseconds }
+                : template with { SendTimeoutMicroseconds = microseconds };
+            if (!Templates.TryUpdate(id, updated, template))
+                continue;
+            TraceHttp(receive ? "set_recv_timeout" : "set_send_timeout", id, microseconds, 0, 0, 0);
+            return ctx.SetReturn(0);
+        }
+        return ctx.SetReturn(HttpErrorInvalidId);
     }
 
     [SysAbiExport(
