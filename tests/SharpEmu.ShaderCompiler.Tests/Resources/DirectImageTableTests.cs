@@ -71,11 +71,12 @@ public sealed class DirectImageTableTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void RestoredMaskRetainsBothUntouchedAndPartiallyWrittenSelectorValues(bool andSave)
+    [InlineData(true, true)]
+    public void RestoredMaskRetainsBothUntouchedAndPartiallyWrittenSelectorValues(bool andSave, bool negated = false)
     {
         var program = FiniteLaneReadProgram(partialWrite: true);
         if (andSave) program = program with { Instructions = program.Instructions.Select(instruction => instruction.Pc == 32
-            ? Sop1(32, "SAndSaveexecB64", 102, Gen5Operand.Scalar(100)) : instruction).ToArray() };
+            ? Sop1(32, negated ? "SAndn1SaveexecB64" : "SAndSaveexecB64", 102, Gen5Operand.Scalar(100)) : instruction).ToArray() };
         var plan = Extract(program, userDataCount: 4);
         var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
         Assert.Equal(new uint[] { 0, 768, 1152, 1920, 999 * 384 },
@@ -104,11 +105,11 @@ public sealed class DirectImageTableTests
             source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
     }
 
-    private static Gen5ShaderProgram CapturedMaskLaneProgram(bool wrongRestore = false)
+    private static Gen5ShaderProgram CapturedMaskLaneProgram(bool wrongRestore = false, bool negated = false)
     {
         var instructions = FiniteLaneReadProgram().Instructions.Select(instruction =>
             instruction with { Pc = instruction.Pc >= 20 ? instruction.Pc + 12 : instruction.Pc }).ToList();
-        instructions.AddRange([Sop1(20, "SAndSaveexecB64", 104, Gen5Operand.Scalar(100)),
+        instructions.AddRange([Sop1(20, negated ? "SAndn1SaveexecB64" : "SAndSaveexecB64", 104, Gen5Operand.Scalar(100)),
             Sop1(24, "SMovB64", 126, Gen5Operand.Scalar(104)), Nop(28)]);
         instructions[instructions.FindIndex(instruction => instruction.Pc == 32)] = Sop1(32, "SMovB64", 106, Gen5Operand.Scalar(104));
         instructions[instructions.FindIndex(instruction => instruction.Pc == 48)] = Sop1(48, "SMovB64", 126, Gen5Operand.Scalar(wrongRestore ? 102u : 104u));
@@ -188,9 +189,11 @@ public sealed class DirectImageTableTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void CapturedOldExecMaskRequiresAnExactRestoreBeforeTheLaneScan(bool wrongRestore)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void CapturedOldExecMaskRequiresAnExactRestoreBeforeTheLaneScan(bool wrongRestore, bool negated = false)
     {
-        var plan = Extract(CapturedMaskLaneProgram(wrongRestore), userDataCount: 4);
+        var plan = Extract(CapturedMaskLaneProgram(wrongRestore, negated), userDataCount: 4);
         var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
         if (wrongRestore) Assert.Null(source.IndirectImage);
         else Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
@@ -218,7 +221,7 @@ public sealed class DirectImageTableTests
             EndProgram(56));
     }
 
-    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false)
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false, bool negated = false)
     {
         var program = FiniteBufferImageProgram(compare: compare) with
         {
@@ -230,7 +233,7 @@ public sealed class DirectImageTableTests
         };
         if (laneRead)
         {
-            var laneProgram = afterWaterfall ? InvariantAfterWaterfallProgram() : capturedMask ? CapturedMaskLaneProgram() : FiniteLaneReadProgram();
+            var laneProgram = afterWaterfall ? InvariantAfterWaterfallProgram() : capturedMask ? CapturedMaskLaneProgram(negated: negated) : FiniteLaneReadProgram();
             var imagePc = laneProgram.Instructions.Single(instruction => instruction.Opcode == "ImageLoad").Pc;
             var instructions = laneProgram.Instructions.Select(instruction =>
                 instruction with { Pc = instruction.Pc + (instruction.Pc > imagePc ? 16u : 8u) }).ToList();

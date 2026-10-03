@@ -433,7 +433,8 @@ public sealed partial class ResourceTracker
         if (copyIndex < 0 || instructions[copyIndex] is not { Sources.Count: 1 } copy)
             return false;
         var activeStart = copyIndex;
-        if (copy.Opcode == "SAndSaveexecB64")
+        var capturesOldExec = copy.Opcode is "SAndSaveexecB64" or "SAndn1SaveexecB64";
+        if (capturesOldExec)
         {
             activeStart = FindLastDefinition(instructions, readLaneIndex, exec);
             if (activeStart <= copyIndex || instructions[activeStart] is not { Opcode: "SMovB64", Sources.Count: 1 } activeRestore ||
@@ -477,7 +478,7 @@ public sealed partial class ResourceTracker
                 continue;
             if (target > instructions[copyIndex].Pc && target <= instructions[scanIndex].Pc)
             {
-                if (copy.Opcode == "SAndSaveexecB64" && target < instructions[activeStart + 1].Pc) return false;
+                if (capturesOldExec && target < instructions[activeStart + 1].Pc) return false;
                 backIndex = index;
                 break;
             }
@@ -538,7 +539,7 @@ public sealed partial class ResourceTracker
         if (vector.Kind != Gen5OperandKind.VectorRegister || !ReadsActiveLane(instructions, readIndex)) return false;
         var scanIndex = FindLastDefinition(instructions, readIndex, instructions[readIndex].Sources[1]);
         var copyIndex = FindLastDefinition(instructions, scanIndex, instructions[scanIndex].Sources[0]);
-        var stableIndex = instructions[copyIndex].Opcode == "SAndSaveexecB64"
+        var stableIndex = instructions[copyIndex].Opcode is "SAndSaveexecB64" or "SAndn1SaveexecB64"
             ? FindLastDefinition(instructions, readIndex, Gen5Operand.Scalar(126)) + 1 : copyIndex;
         for (var index = stableIndex; index < instructions.Count; index++)
         {
