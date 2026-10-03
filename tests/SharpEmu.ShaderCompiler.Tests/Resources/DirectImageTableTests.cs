@@ -119,6 +119,33 @@ public sealed class DirectImageTableTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void InvariantSelectorSurvivesAWaterfallRestoreUnlessItsValueOrSavedMaskChanges(bool changeValue, bool changeMask)
+    {
+        var plan = Extract(InvariantAfterWaterfallProgram(changeValue, changeMask), userDataCount: 4);
+        var source = plan.DescriptorSources[(int)Assert.Single(plan.Info.Images).Source];
+        if (changeValue || changeMask) Assert.Null(source.IndirectImage);
+        else Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
+            source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
+    private static Gen5ShaderProgram InvariantAfterWaterfallProgram(bool changeValue = false, bool changeMask = false)
+    {
+        var instructions = FiniteLaneReadProgram().Instructions.Where(instruction => instruction.Pc < 104)
+            .Select(instruction => instruction.Pc is 72 or 76 ? Nop(instruction.Pc) : instruction.Pc == 84
+                ? changeValue ? Vop1(84, "VMovB32", 3, Gen5Operand.Vector(0))
+                    : changeMask ? Sop1(84, "SMovB64", 64, Gen5Operand.Scalar(102)) : Nop(84)
+                : instruction).ToList();
+        instructions.AddRange([Sop1(104, "SMovB64", 126, Gen5Operand.Scalar(64)),
+            ReadFirstLane(108, 106, 3), Sop2(112, "SMulI32", 106, Gen5Operand.Scalar(106), Operand(384)),
+            ScalarBufferLoad(116, 0, 16, 8, dynamicOffsetRegister: 106),
+            Image(124, "ImageLoad", 16, dmask: 1, vectorAddress: 4), EndProgram(132)]);
+        return Program(instructions.ToArray());
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void RemainingMaskCopyAllowsIndependentInstructionsButRejectsChangedMask(bool changeMask)
@@ -191,7 +218,7 @@ public sealed class DirectImageTableTests
             EndProgram(56));
     }
 
-    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false)
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false)
     {
         var program = FiniteBufferImageProgram(compare: compare) with
         {
@@ -203,15 +230,15 @@ public sealed class DirectImageTableTests
         };
         if (laneRead)
         {
-            var laneProgram = capturedMask ? CapturedMaskLaneProgram() : FiniteLaneReadProgram();
+            var laneProgram = afterWaterfall ? InvariantAfterWaterfallProgram() : capturedMask ? CapturedMaskLaneProgram() : FiniteLaneReadProgram();
             var imagePc = laneProgram.Instructions.Single(instruction => instruction.Opcode == "ImageLoad").Pc;
             var instructions = laneProgram.Instructions.Select(instruction =>
                 instruction with { Pc = instruction.Pc + (instruction.Pc > imagePc ? 16u : 8u) }).ToList();
             instructions[instructions.FindIndex(instruction => instruction.Pc == 8)] = Vopc(8, "VCmpEqU32", Operand(compare), 0);
             var skipIndex = instructions.FindIndex(instruction => instruction.Opcode == "SCbranchExecz");
-            instructions[skipIndex] = Branch(instructions[skipIndex].Pc, "SCbranchExecz", 8);
+            instructions[skipIndex] = Branch(instructions[skipIndex].Pc, "SCbranchExecz", (short)(afterWaterfall ? 6 : 8));
             var backIndex = instructions.FindIndex(instruction => instruction.Opcode == "SCbranchScc1");
-            instructions[backIndex] = Branch(instructions[backIndex].Pc, "SCbranchScc1", -17);
+            instructions[backIndex] = Branch(instructions[backIndex].Pc, "SCbranchScc1", (short)(afterWaterfall ? -15 : -17));
             instructions.AddRange([Vop1(0, "VMovB32", 4, Operand(0)), Vop1(4, "VMovB32", 5, Operand(0)),
                 BufferAccess(imagePc + 16, "BufferStoreDword", 8, vectorData: 4)]);
             program = program with { Instructions = instructions.OrderBy(instruction => instruction.Pc).ToArray() };

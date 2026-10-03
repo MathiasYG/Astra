@@ -528,6 +528,14 @@ public sealed partial class ResourceTracker
         start = 0;
         if (!ReadsActiveLane(instructions, readIndex) || instructions[readIndex].Sources[0] is not
             { Kind: Gen5OperandKind.VectorRegister } vector) return false;
+        return TryGetStableLaneReadStart(instructions, readIndex, vector, out start);
+    }
+
+    internal static bool TryGetStableLaneReadStart(IReadOnlyList<Gen5ShaderInstruction> instructions, int readIndex,
+        Gen5Operand vector, out uint start)
+    {
+        start = 0;
+        if (vector.Kind != Gen5OperandKind.VectorRegister || !ReadsActiveLane(instructions, readIndex)) return false;
         var scanIndex = FindLastDefinition(instructions, readIndex, instructions[readIndex].Sources[1]);
         var copyIndex = FindLastDefinition(instructions, scanIndex, instructions[scanIndex].Sources[0]);
         var stableIndex = instructions[copyIndex].Opcode == "SAndSaveexecB64"

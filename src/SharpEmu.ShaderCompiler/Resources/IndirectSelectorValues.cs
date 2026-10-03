@@ -284,6 +284,31 @@ public sealed class IndirectSelectorValues
                 break;
             }
             if (saveIndex < 0) return null;
+            // A waterfall can recapture the same mask on every iteration. If this
+            // register is invariant, read it before the loop rather than following
+            // a cyclic reaching definition through the loop's EXEC restoration.
+            if (instructions[saveIndex].Opcode == "SAndSaveexecB64")
+            {
+                for (var readIndex = saveIndex - 1; readIndex >= 0; readIndex--)
+                {
+                    var laneRead = instructions[readIndex];
+                    if (laneRead.Opcode != "VReadlaneB32") continue;
+                    if (!ResourceTracker.TryGetStableLaneReadStart(instructions, readIndex, vector, out var start) ||
+                        start >= instructions[saveIndex].Pc) break;
+                    var region = instructions.Where(candidate => candidate.Pc >= start && candidate.Pc < restore.Pc).ToArray();
+                    var unchanged = region.All(candidate => !WritesRegister(candidate, vector) &&
+                        !candidate.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) &&
+                        !candidate.Opcode.Contains("GprIdx", StringComparison.Ordinal) &&
+                        (candidate == instructions[saveIndex] || !WritesSavedMask(candidate, saved)) &&
+                        (candidate.Pc >= instructions[saveIndex].Pc || !MayExpandExecution(candidate) &&
+                            candidate.Opcode is not ("SAndSaveexecB64" or "SAndSaveexecB32")));
+                    var bypass = instructions.Any(edge => (edge.Pc < start || edge.Pc >= restore.Pc) &&
+                        Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var target) &&
+                        target > start && target <= restore.Pc);
+                    if (unchanged && !bypass) return Read(vector, start);
+                    break;
+                }
+            }
             // An incoming edge must not bypass the saved mask or the defining write.
             foreach (var instruction in instructions)
                 if ((instruction.Pc < instructions[saveIndex].Pc || instruction.Pc >= restore.Pc) &&

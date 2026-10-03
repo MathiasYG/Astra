@@ -232,11 +232,13 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     [InlineData(1u, 20u, true, false, true)]
     [InlineData(0u, 25u, false, false, false, true)]
     [InlineData(1u, 20u, false, false, false, true)]
-    public void FiniteScalarBufferImageSelectorUsesTheRuntimeOffset(uint compare, uint expected, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false)
+    [InlineData(0u, 25u, true, false, false, false, true)]
+    [InlineData(1u, 20u, true, false, false, false, true)]
+    public void FiniteScalarBufferImageSelectorUsesTheRuntimeOffset(uint compare, uint expected, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan)) return;
-        var (snapshot, request, registers) = DirectImageTableTests.PrepareFiniteBufferImages(compare, laneRead, partialSelector, capturedMask, splitMultiply);
+        var (snapshot, request, registers) = DirectImageTableTests.PrepareFiniteBufferImages(compare, laneRead, partialSelector, capturedMask, splitMultiply, afterWaterfall);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);
         using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
