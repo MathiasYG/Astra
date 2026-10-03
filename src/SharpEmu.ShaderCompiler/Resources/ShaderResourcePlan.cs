@@ -148,6 +148,8 @@ public sealed class ShaderResourcePlan
         foreach (var sampler in plan.Info.Samplers)
         {
             materialization.Add(sampler.Source);
+            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not null)
+                plan.RequiresSpecializationMemory = true;
         }
 
         plan.MaterializationSources = materialization;
@@ -177,6 +179,10 @@ public sealed class ShaderResourcePlan
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
             }
         }
+
+        foreach (var sampler in plan.Info.Samplers)
+            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is { } candidates)
+                foreach (var candidate in candidates) plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate], cleanSlots);
 
         plan.CleanFlatSlots = cleanSlots;
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);

@@ -222,6 +222,42 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         };
 
     [Theory]
+    [InlineData(0u, 25u)]
+    [InlineData(1u, 20u)]
+    public void FiniteScalarBufferImageSelectorUsesTheRuntimeOffset(uint compare, uint expected)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var (snapshot, request, registers) = DirectImageTableTests.PrepareFiniteBufferImages(compare);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var result = runner.CreateBuffer(new byte[ResultBytes]);
+        var images = new CachedImage[snapshot.Images.Length];
+        var views = new DescriptorImageInfo[images.Length];
+        for (var index = 0; index < images.Length; index++)
+        {
+            var description = Describe((ulong)index * 0x10000, Format.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
+            images[index] = harness.CreateImage(description);
+            uint[] texel = [20 + (snapshot.Images[index][0] - 0x2000) / 0x100];
+            harness.UploadImage(images[index], MemoryMarshal.AsBytes<uint>(texel), ImageTestHarness.WholeImageCopies(description, 0));
+            views[index] = SampledView(images[index]);
+        }
+        var bound = request.Bindings.Descriptors
+            .Where(binding => ImageDescriptorBinding.ResourceClass(binding.Kind) != ImageResourceClass.None)
+            .ToDictionary(binding => binding.Kind, binding => binding.Resources.Select(index => views[index]).ToArray());
+        harness.Run(() =>
+        {
+            var command = new CommandBuffer(harness.Scheduler.Current.Handle);
+            foreach (var image in images) image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
+            runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] },
+                1, flattenedTable: snapshot.FlattenedResourceTable, boundImages: bound);
+        });
+        Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(result, 0, ResultBytes)));
+        harness.AssertNoValidationMessages();
+    }
+
+    [Theory]
     [InlineData(-32768)]
     [InlineData(-1)]
     [InlineData(32767)]

@@ -12,11 +12,11 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class DirectImageTableTests
 {
     private static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
-        uint sourceSelect = 6, uint multiplier = 3)
+        uint sourceSelect = 6, uint multiplier = 3, uint compare = 0)
     {
         var fullWord = new Gen5SdwaControl(6, 0, sourceSelect, 6, false, false, 0, 0, 0, false, null);
         return Program(
-            Vopc(0, "VCmpEqU32", Operand(0), 0),
+            Vopc(0, "VCmpEqU32", Operand(compare), 0),
             new(4, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
                 [Operand(0), unknown ? Gen5Operand.Vector(0) : Operand(1)], [Gen5Operand.Vector(1)], fullWord),
             new(12, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
@@ -28,6 +28,41 @@ public sealed class DirectImageTableTests
             ScalarBufferLoad(40, 0, 16, 8, dynamicOffsetRegister: 106),
             Image(48, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
             EndProgram(56));
+    }
+
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare)
+    {
+        var program = FiniteBufferImageProgram(compare: compare) with
+        {
+            Instructions = FiniteBufferImageProgram(compare: compare).Instructions.Where(instruction => instruction.Pc < 48).Concat([
+                Vop1(48, "VMovB32", 4, Operand(0)), Vop1(52, "VMovB32", 5, Operand(0)),
+                Image(56, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
+                BufferAccess(64, "BufferStoreDword", 8, vectorData: 4), EndProgram(72),
+            ]).ToArray(),
+        };
+        uint[] registers = [0x1000, 0, 2048, 0, 0, 0, 0, 0, 0, 0, 64, 0];
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x1800) return false;
+            var relative = address - 0x1000;
+            word = (relative % 384 / 4) switch
+            {
+                0 => 0x2000u + (uint)(relative / 384) * 0x100,
+                1 => 20u << 20,
+                3 => 0xFACu | (9u << 28),
+                _ => 0,
+            };
+            return true;
+        }
+        var plan = Extract(program, userDataCount: 12);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(registers, readCleanMemory: Read), ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 12),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        return (snapshot, new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 }, registers);
     }
 
     [Fact]
@@ -89,6 +124,63 @@ public sealed class DirectImageTableTests
         var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
         Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
             source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+    }
+
+    [Fact]
+    public void FiniteSamplersUseOneBindingOnlyAfterEveryCandidateMatches()
+    {
+        var program = FiniteBufferImageProgram() with
+        {
+            Instructions = FiniteBufferImageProgram().Instructions.Where(instruction => instruction.Pc < 48).Concat([
+                ScalarBufferLoad(48, 0, 28, 4, immediateOffset: 256, dynamicOffsetRegister: 106),
+                Image(56, "ImageSampleLz", 16, 28, dmask: 1, vectorAddress: 4), EndProgram(64),
+            ]).ToArray(),
+        };
+        var plan = Extract(program, userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Samplers[0].Source];
+        Assert.Null(source.ZeroExtentBufferSource);
+        Assert.Equal(4, source.EquivalentSamplerSources!.Count);
+        var mismatch = false;
+        var unreadable = false;
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x2000) return false;
+            var relative = address - 0x1000;
+            var component = relative % 384 / 4;
+            if (relative / 384 == 5 && component == 64 && unreadable) return false;
+            word = component switch
+            {
+                0 => 0x2000u + (uint)(relative / 384) * 0x100,
+                1 => 22u << 20,
+                3 => 0xFACu | (9u << 28),
+                64 => mismatch && relative / 384 == 5 ? 1u : 0u,
+                66 => 0x10,
+                _ => 0,
+            };
+            return true;
+        }
+        var dirtyReads = 0;
+        bool Dirty(ulong address, out uint word) { dirtyReads++; word = 0; return false; }
+        var inputs = Inputs([0x1000, 0, 4096, 0], readMemory: Dirty, readCleanMemory: Read);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Equal(new uint[] { 0, 0, 0x10, 0 }, Assert.Single(snapshot.Samplers));
+        Assert.Equal(0, dirtyReads);
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 4),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout)
+            { LocalSizeX = 64, ThreadCountX = 64 }, out _, out var error), error);
+        var prior = snapshot;
+        mismatch = true;
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Same(prior, snapshot);
+        mismatch = false;
+        unreadable = true;
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Same(prior, snapshot);
     }
 
     internal static Gen5ShaderProgram CreateWaveIndexedDescriptorProgram()

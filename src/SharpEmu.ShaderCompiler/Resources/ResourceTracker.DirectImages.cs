@@ -5,6 +5,60 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 public sealed partial class ResourceTracker
 {
+    private bool TryMakeFiniteSampler(ScalarValue handle, DescriptorSource original, out uint sourceIndex)
+    {
+        sourceIndex = 0;
+        var reads = handle.Operands;
+        if (reads.Length != 4 || reads.Any(read => read.Kind != ScalarValueKind.ScalarBufferWord)) return false;
+        var first = ScalarReadMemory(reads[0], out _);
+        if (first is null) return false;
+        for (var component = 0; component < reads.Length; component++)
+        {
+            var memory = ScalarReadMemory(reads[component], out _);
+            if (memory is null || memory.Offset != first.Offset + (uint)component * sizeof(uint) ||
+                !_graph.Equivalent(reads[component].Operands[0], reads[0].Operands[0]) ||
+                !_graph.Equivalent(reads[component].Operands[1], reads[0].Operands[1])) return false;
+        }
+        var pending = new Stack<ScalarValue>();
+        pending.Push(reads[0].Operands[1]);
+        var visited = new HashSet<ScalarValue>();
+        ScalarValue? selector = null;
+        uint[] values = [];
+        while (pending.TryPop(out var value))
+        {
+            if (!visited.Add(value)) continue;
+            if (value.Kind == ScalarValueKind.FirstLane &&
+                IndirectSelectorValues.TryGetConstantValues(_plan, value, out var finite))
+            {
+                if (selector is not null && !ReferenceEquals(selector, value)) return false;
+                selector = value;
+                values = finite;
+                continue;
+            }
+            if (!value.IsConstant && value.Kind != ScalarValueKind.Operation) return false;
+            foreach (var operand in value.Operands) pending.Push(operand);
+        }
+        if (selector is null || values.Length == 0) return false;
+        var candidates = new List<DescriptorSource>();
+        foreach (var value in values)
+        {
+            var replacements = new Dictionary<ScalarValue, ScalarValue> { [selector] = _graph.Constant(value) };
+            var memo = new Dictionary<ScalarValue, ScalarValue>();
+            var candidate = new DescriptorSource
+            {
+                Dwords = original.Dwords.Select(word => _graph.Substitute(word, replacements, memo)).ToArray(),
+            };
+            if (!ValidateSource(candidate, out _)) return false;
+            candidates.Add(candidate);
+        }
+        sourceIndex = InternSource(new DescriptorSource
+        {
+            Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray(),
+            EquivalentSamplerSources = candidates.Select(InternSource).ToArray(),
+        });
+        return true;
+    }
+
     private bool TryMakeDirectImage(ScalarValue handle, out IndirectImagePlan plan)
     {
         plan = null!;

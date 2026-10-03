@@ -256,7 +256,21 @@ public static class ResourceMaterializer
 
         snapshot.Samplers = new uint[plan.Info.Samplers.Count][];
         for (var index = 0; index < snapshot.Samplers.Length; index++)
+        {
+            var sampler = plan.Info.Samplers[index];
             snapshot.Samplers[index] = values[cursor++].Dwords;
+            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not { } candidates ||
+                activeSources.Length != 0 && !activeSources[sampler.Source]) continue;
+            if (inputs.ReadCleanMemory is null ||
+                !RuntimeValueEvaluator.EvaluateSources(plan, candidates.ToArray(), inputs.WithReader(inputs.ReadCleanMemory), [],
+                    evaluateTable: false, out var descriptors, out _) || descriptors.Count == 0 ||
+                descriptors.Any(descriptor => descriptor.DwordCount != 4 || !descriptor.SameAs(descriptors[0])))
+            {
+                SpecializationFailed($"finite sampler resource {index} requires identical readable candidates");
+                return false;
+            }
+            snapshot.Samplers[index] = descriptors[0].Dwords;
+        }
 
         // Bounded runtime V# tables: the whole table is read and validated before it is
         // published, so a single unreadable candidate leaves the previous snapshot intact.

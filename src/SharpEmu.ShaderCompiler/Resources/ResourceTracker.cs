@@ -326,7 +326,10 @@ public sealed partial class ResourceTracker
         {
             var current = _sources[candidate];
             if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage) ||
-                current.ZeroExtentBufferSource != source.ZeroExtentBufferSource)
+                current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
+                (current.EquivalentSamplerSources is null) != (source.EquivalentSamplerSources is null) ||
+                current.EquivalentSamplerSources is { } samplerSources &&
+                    !samplerSources.SequenceEqual(source.EquivalentSamplerSources!))
             {
                 continue;
             }
@@ -449,6 +452,8 @@ public sealed partial class ResourceTracker
         var controlDependent = false;
         if (nonContiguousImage || !ValidateSource(source, out badDword, out controlDependent))
         {
+            if (expected == ScalarValueKind.SamplerHandle &&
+                TryMakeFiniteSampler(handle, source, out var finiteSamplerSource)) return finiteSamplerSource;
             if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle &&
                 TryMakeZeroExtentBufferSource(source, pc, out var emptyBufferSource))
                 return emptyBufferSource;

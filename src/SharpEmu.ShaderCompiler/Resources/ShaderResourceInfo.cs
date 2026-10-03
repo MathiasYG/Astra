@@ -226,6 +226,9 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    // A finite selector can use one native sampler only when all candidate
+    // descriptors are identical. Rechecked against clean memory on every draw.
+    public IReadOnlyList<uint>? EquivalentSamplerSources { get; init; }
     // Scalar loads from an empty buffer return zero regardless of the offset.
     // Materialization must recheck the source extent before using these words.
     public uint? ZeroExtentBufferSource { get; init; }
