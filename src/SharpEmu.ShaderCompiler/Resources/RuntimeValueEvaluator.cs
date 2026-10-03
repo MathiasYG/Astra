@@ -128,6 +128,7 @@ public sealed class RuntimeValueEvaluator
         switch (value.Kind)
         {
             case ScalarValueKind.Undefined:
+            case ScalarValueKind.WorkgroupId:
                 return false;
             case ScalarValueKind.MemoryAperture:
                 result = Gen5InlineConstants.DecodeAperture64((uint)value.Payload) >> 32;

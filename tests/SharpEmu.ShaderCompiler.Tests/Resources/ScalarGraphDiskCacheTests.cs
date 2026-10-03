@@ -10,6 +10,29 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class ScalarGraphDiskCacheTests
 {
     [Fact]
+    public void DiskCacheSeparatesWorkgroupLayoutsAndPreservesAxisLeaves()
+    {
+        var program = Program(ScalarLoad(0, 0, 8, 4),
+            ScalarBufferLoad(8, 8, 16, dynamicOffsetRegister: 3), EndProgram(16));
+        var directory = Path.Combine(Path.GetTempPath(), "SharpEmu-workgroup-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var layout = new Gen5ComputeSystemRegisters(3, null, null, null);
+            var first = ScalarGraphDiskCache.Build(program, 0, 3, null, 64, directory, layout);
+            var second = ScalarGraphDiskCache.Build(program, 0, 3, null, 64, directory, layout);
+            Assert.Equal(ScalarValueKind.WorkgroupId, second.Accesses[4]!.Read!.Operands[1].Kind);
+            Assert.Equal(0ul, second.Accesses[4]!.Read!.Operands[1].Payload);
+            Assert.Equal(first.Values.Count, second.Values.Count);
+            var key = ScalarGraphDiskCache.Key(program, 0, 3, null, 64, layout);
+            Assert.NotEqual(key, ScalarGraphDiskCache.Key(program, 0, 3, null, 64));
+            Assert.NotEqual(key, ScalarGraphDiskCache.Key(program, 0, 3, null, 64, new(null, 3, null, null)));
+            var different = ScalarGraphDiskCache.Build(program, 0, 3, null, 64, directory, new(null, 3, null, null));
+            Assert.Equal(1ul, different.Accesses[4]!.Read!.Operands[1].Payload);
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void SnapshotPreservesCyclesInterningAndInstructionProvenance()
     {
         var program = Program(ScalarLoad(0, 0, 4), EndProgram(8));

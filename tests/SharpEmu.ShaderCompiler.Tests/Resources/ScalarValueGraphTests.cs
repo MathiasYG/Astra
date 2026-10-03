@@ -10,6 +10,37 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class ScalarValueGraphTests
 {
+    [Fact]
+    public void WorkgroupInputsKeepLogicalAxesAndCannotBecomeCpuConstants()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, 8, 4),
+            Sop2(8, "SLshrB32", 4, Gen5Operand.Scalar(3), Operand(4)),
+            ScalarBufferLoad(12, 8, 16, dynamicOffsetRegister: 4), EndProgram(20));
+        var graph = ScalarValueGraph.Build(program, 0, 3,
+            computeSystemRegisters: new(3, 5, 6, null));
+        var offset = graph.Accesses[4]!.Read!.Operands[1];
+        Assert.Equal(ScalarOperation.ShiftRightLogical32, offset.Operation);
+        Assert.Equal(ScalarValueKind.WorkgroupId, offset.Operands[0].Kind);
+        Assert.Equal(0ul, offset.Operands[0].Payload);
+        Assert.False(new RuntimeValueValidator(graph, 0, 3, 0).Validate(offset));
+        Assert.False(graph.Equivalent(graph.WorkgroupId(0), graph.WorkgroupId(1)));
+        Assert.True(graph.Equivalent(graph.WorkgroupId(1), graph.WorkgroupId(1)));
+        var ordinary = ScalarValueGraph.Build(program, 0, 3);
+        Assert.DoesNotContain(ordinary.Values, value => value.Kind == ScalarValueKind.WorkgroupId);
+    }
+
+    [Theory]
+    [InlineData(2u, 5u, 6u, 7u)]
+    [InlineData(3u, 3u, 6u, 7u)]
+    [InlineData(106u, 5u, 6u, 7u)]
+    [InlineData(3u, 5u, 6u, 3u)]
+    public void WorkgroupInputsRejectOverlappingOrReservedRegisters(uint x, uint y, uint z, uint size)
+    {
+        Assert.Throws<ArgumentException>(() => ScalarValueGraph.Build(Program(EndProgram(0)), 0, 3,
+            computeSystemRegisters: new(x, y, z, size)));
+    }
+
     private static Gen5ShaderInstruction[] Descriptor(uint pc, uint register, uint dword1, uint dword2, uint dword3) =>
     [
         MoveScalar(pc, register + 1, dword1),

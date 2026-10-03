@@ -21,7 +21,7 @@ public sealed partial class ScalarValueGraph
 
     // Walks the control-flow graph to a fixpoint. Registers hold graph values, joins
     // create phis per register, and a final pass records each memory access's handles.
-    private sealed class Builder(ScalarValueGraph graph)
+    private sealed class Builder(ScalarValueGraph graph, Gen5ComputeSystemRegisters? computeSystemRegisters)
     {
         private readonly ScalarValueGraph _graph = graph;
         private readonly Gen5ShaderProgram _program = graph.Program;
@@ -175,6 +175,21 @@ public sealed partial class ScalarValueGraph
                 if (register < ScalarRegisterCount)
                 {
                     state.Scalars[register] = _graph.UserData(register);
+                }
+            }
+
+            if (computeSystemRegisters is { } system)
+            {
+                uint?[] registers = [system.WorkGroupXRegister, system.WorkGroupYRegister, system.WorkGroupZRegister];
+                var assigned = new HashSet<uint>();
+                for (var axis = 0u; axis < registers.Length; axis++)
+                {
+                    if (registers[axis] is not { } register) continue;
+                    if (register >= VccLow || !assigned.Add(register) ||
+                        register >= _graph.UserDataBase && register - _graph.UserDataBase < _graph.UserDataCount ||
+                        register == system.ThreadGroupSizeRegister)
+                        throw new ArgumentException("Compute workgroup registers overlap user data, another system input, or reserved registers.");
+                    state.Scalars[register] = _graph.WorkgroupId(axis);
                 }
             }
 

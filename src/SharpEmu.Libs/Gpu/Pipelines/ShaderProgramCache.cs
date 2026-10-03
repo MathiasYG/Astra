@@ -332,6 +332,10 @@ internal sealed class ShaderProgramCache
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
+                _staticState.Add(options.ComputeSystemRegisters?.WorkGroupXRegister ?? uint.MaxValue);
+                _staticState.Add(options.ComputeSystemRegisters?.WorkGroupYRegister ?? uint.MaxValue);
+                _staticState.Add(options.ComputeSystemRegisters?.WorkGroupZRegister ?? uint.MaxValue);
+                _staticState.Add(options.ComputeSystemRegisters?.ThreadGroupSizeRegister ?? uint.MaxValue);
                 break;
         }
     }
@@ -363,7 +367,8 @@ internal sealed class ShaderProgramCache
                 fetch?.Loads.Select(load => load.Pc).ToHashSet(),
                 beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
                 // Graphics stages compile as wave32 (see the compile request); compute follows the dispatch.
-                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u);
+                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u,
+                computeSystemRegisters: source.Stage == ShaderStage.Compute ? options.ComputeSystemRegisters : null);
         }
         catch (ResourcePlanException exception)
         {
@@ -687,7 +692,7 @@ internal sealed class ShaderProgramCache
             }
 
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, record.Hash, record.UserDataBase, record.UserDataCount,
-                waveSize: record.Info.WaveSize);
+                waveSize: record.Info.WaveSize, computeSystemRegisters: record.SystemRegisters);
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions);
