@@ -313,6 +313,37 @@ public static class NetExports
     }
 
     [SysAbiExport(
+        Nid = "v6M4txecCuo",
+        ExportName = "sceNetEtherNtostr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEtherNtostr(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var outputAddress = ctx[CpuRegister.Rsi];
+        var capacity = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (address == 0 || outputAddress == 0 || capacity < 18)
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+
+        Span<byte> mac = stackalloc byte[6];
+        if (!ctx.Memory.TryRead(address, mac))
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+
+        const string hex = "0123456789abcdef";
+        Span<byte> text = stackalloc byte[18];
+        for (var index = 0; index < mac.Length; index++)
+        {
+            text[index * 3] = (byte)hex[mac[index] >> 4];
+            text[index * 3 + 1] = (byte)hex[mac[index] & 15];
+            text[index * 3 + 2] = index == 5 ? (byte)0 : (byte)':';
+        }
+        if (!ctx.Memory.TryWrite(outputAddress, text))
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+        TraceNet("ether_ntostr", 0, address, outputAddress, 18);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "Q4qBuN-c0ZM",
         ExportName = "sceNetSocket",
         Target = Generation.Gen4 | Generation.Gen5,

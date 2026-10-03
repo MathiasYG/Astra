@@ -15,6 +15,40 @@ public sealed class NetExportsTests
     private readonly CpuContext _ctx = new(new FakeCpuMemory(0x1_0000_0000, 0x1000), Generation.Gen5);
 
     [Fact]
+    public void EthernetFormattingWritesExactlyEighteenBytesAndSupportsOverlap()
+    {
+        const ulong address = 0x1_0000_0100;
+        var initial = Enumerable.Repeat((byte)0xA5, 20).ToArray();
+        new byte[] { 0x02, 0x7F, 0x80, 0xAB, 0xCD, 0xFF }.CopyTo(initial, 0);
+        Assert.True(_ctx.Memory.TryWrite(address, initial));
+        _ctx[CpuRegister.Rdi] = address;
+        _ctx[CpuRegister.Rsi] = address;
+        _ctx[CpuRegister.Rdx] = 18;
+        Assert.Equal(0, NetExports.NetEtherNtostr(_ctx));
+        var actual = new byte[20];
+        Assert.True(_ctx.Memory.TryRead(address, actual));
+        Assert.Equal(System.Text.Encoding.ASCII.GetBytes("02:7f:80:ab:cd:ff\0"), actual[..18]);
+        Assert.Equal(new byte[] { 0xA5, 0xA5 }, actual[18..]);
+    }
+
+    [Theory]
+    [InlineData(17)]
+    [InlineData(-1)]
+    public void EthernetFormattingRejectsSmallOrNegativeCapacityWithoutWriting(int capacity)
+    {
+        const ulong address = 0x1_0000_0100;
+        var sentinel = Enumerable.Repeat((byte)0xA5, 18).ToArray();
+        Assert.True(_ctx.Memory.TryWrite(address, sentinel));
+        _ctx[CpuRegister.Rdi] = address;
+        _ctx[CpuRegister.Rsi] = address;
+        _ctx[CpuRegister.Rdx] = unchecked((ulong)capacity);
+        Assert.Equal(unchecked((int)0x80410116), NetExports.NetEtherNtostr(_ctx));
+        var actual = new byte[18];
+        Assert.True(_ctx.Memory.TryRead(address, actual));
+        Assert.Equal(sentinel, actual);
+    }
+
+    [Fact]
     public void EpollDestroy_WakesAnInfiniteWaitWithBadDescriptor()
     {
         Assert.Equal(0, NetExports.NetEpollCreate(_ctx));
