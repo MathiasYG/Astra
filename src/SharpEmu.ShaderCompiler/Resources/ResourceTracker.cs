@@ -424,6 +424,16 @@ public sealed partial class ResourceTracker
         return false;
     }
 
+    private void TrackDeviceStoreValidation(int index, MemoryAccessInfo memory, ScalarValue handle)
+    {
+        if (!memory.Formatted || memory.Access != MemoryAccess.Write ||
+            !IndirectSelectorValues.PackedPointerDescriptor.TryCreateBufferFields(_plan, handle, out var fields)) return;
+        _info.DeviceStoreValidationSources[index] = InternSource(new DescriptorSource
+        {
+            Dwords = handle.Operands, PackedPointer = fields,
+        });
+    }
+
     private uint GetHandleSource(
         ScalarValue? handle,
         ScalarValueKind expected,
@@ -986,6 +996,7 @@ public sealed partial class ResourceTracker
                 if (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle))
                 {
                     memory.DeviceDescriptor = true;
+                    TrackDeviceStoreValidation(index, memory, access.Handle!);
                     _info.UsesDeviceAddresses = true;
                     return;
                 }
@@ -1004,6 +1015,8 @@ public sealed partial class ResourceTracker
                 (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle)))
             {
                 memory.DeviceDescriptor = true;
+                if (memory.Kind == MemoryResourceKind.Buffer)
+                    TrackDeviceStoreValidation(index, memory, access.Handle!);
                 _info.UsesDeviceAddresses = true;
                 return;
             }

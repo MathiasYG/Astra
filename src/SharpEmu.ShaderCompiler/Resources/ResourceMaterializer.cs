@@ -272,6 +272,29 @@ public static class ResourceMaterializer
             snapshot.Samplers[index] = descriptors[0].Dwords;
         }
 
+        foreach (var (memoryIndex, _) in plan.Info.DeviceStoreValidationSources)
+        {
+            var fields = values[cursor++].Dwords;
+            var memory = plan.Memory[memoryIndex];
+            var format = (fields[3] >> 12) & 0x7F;
+            var valid = Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out _) &&
+                memory.DataBits == 32 && !memory.Typed && (fields[1] & 0x80000000) == 0 &&
+                (fields[3] & 0xF0800000) == 0;
+            if (format != 0)
+            {
+                var count = Gfx10UnifiedFormat.ComponentCount(dataFormat);
+                valid &= count != 0 && count == memory.DataDwords &&
+                    ((fields[1] >> 16) & 0x3FFF) >= Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, count);
+                for (uint component = 0; component < count; component++)
+                    valid &= ((fields[3] >> (int)(component * 3)) & 7) == component + 4;
+            }
+            if (!valid)
+            {
+                SpecializationFailed($"device formatted store at 0x{memory.Pc:X} requires a proven linear, structured descriptor with matching identity channels");
+                return false;
+            }
+        }
+
         // Bounded runtime V# tables: the whole table is read and validated before it is
         // published, so a single unreadable candidate leaves the previous snapshot intact.
         foreach (var candidatePlan in plan.BufferCandidateTables)

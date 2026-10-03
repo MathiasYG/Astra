@@ -56,8 +56,34 @@ public sealed class IndirectSelectorValues
 
     internal sealed record PackedPointerDescriptor(PackedBufferWordDomain Domain,
         ScalarValue MaterialHandle, uint Stride, uint Offset, uint PointerImmediate,
-        uint DescriptorImmediate, uint Width, uint SelectorPc)
+        uint DescriptorImmediate, uint Width, uint SelectorPc, bool BufferFieldsOnly = false)
     {
+        internal static bool TryCreateBufferFields(ShaderResourcePlan plan, ScalarValue handle,
+            out PackedPointerDescriptor result)
+        {
+            result = null!;
+            if (handle.Kind != ScalarValueKind.BufferHandle || handle.Operands.Length != 4 ||
+                !TryGetSingleBufferRead(handle.Operands[0], out var first) ||
+                !TryGetOffset(first.Operands[1], out var selector, out var stride, out var offset) ||
+                !TryGetPackedBufferWordDomain(plan, selector, out var domain) ||
+                !plan.ValidateRuntimeValue(first.Operands[0])) return false;
+            var firstMemory = plan.Memory[first.MemoryIndex];
+            if ((firstMemory.Offset & 3) != 0) return false;
+            for (var component = 0; component < 4; component++)
+            {
+                if (!TryGetSingleBufferRead(handle.Operands[component], out var read) ||
+                    !plan.Graph.Equivalent(first.Operands[0], read.Operands[0]) ||
+                    !plan.Graph.Equivalent(first.Operands[1], read.Operands[1])) return false;
+                var memory = plan.Memory[read.MemoryIndex];
+                if (memory.Kind != MemoryResourceKind.ScalarBuffer || memory.Access != MemoryAccess.Read ||
+                    memory.DataBits != 32 || memory.DataDwords != 1 || memory.Pc != firstMemory.Pc ||
+                    (ulong)memory.Offset != (ulong)firstMemory.Offset + (uint)component * 4) return false;
+            }
+            result = new(domain, first.Operands[0], stride, offset, firstMemory.Offset,
+                0, 4, (uint)selector.Payload, BufferFieldsOnly: true);
+            return true;
+        }
+
         internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue handle,
             out PackedPointerDescriptor result)
         {
@@ -180,14 +206,26 @@ public sealed class IndirectSelectorValues
             foreach (var selector in selectors)
             {
                 var dynamicOffset = unchecked(selector * Stride + Offset);
-                if (!ReadMaterial(dynamicOffset, PointerImmediate, out var low) ||
-                    !ReadMaterial(dynamicOffset, (ulong)PointerImmediate + 4, out var high)) return false;
-                var pointer = ((ulong)high << 32) | low;
-                if (pointer == 0 || pointer > 0xFFFFFFFFFFFFul ||
-                    pointer + DescriptorImmediate + Width * 4ul > 1ul << 48) return false;
                 var current = new uint[Width];
-                for (uint component = 0; component < Width; component++)
-                    if (!Read((pointer & ~3ul) + DescriptorImmediate + component * 4, out current[component])) return false;
+                if (BufferFieldsOnly)
+                {
+                    for (uint component = 0; component < Width; component++)
+                        if (!ReadMaterial(dynamicOffset, (ulong)PointerImmediate + component * 4, out current[component])) return false;
+                    if (!Range(current, out _, out _)) return false;
+                    // Addresses and record counts stay in the executing SGPRs.
+                    // Only require agreement on addressing/conversion fields.
+                    current = [0, current[1] & 0xFFFF0000, 0, current[3]];
+                }
+                else
+                {
+                    if (!ReadMaterial(dynamicOffset, PointerImmediate, out var low) ||
+                        !ReadMaterial(dynamicOffset, (ulong)PointerImmediate + 4, out var high)) return false;
+                    var pointer = ((ulong)high << 32) | low;
+                    if (pointer == 0 || pointer > 0xFFFFFFFFFFFFul ||
+                        pointer + DescriptorImmediate + Width * 4ul > 1ul << 48) return false;
+                    for (uint component = 0; component < Width; component++)
+                        if (!Read((pointer & ~3ul) + DescriptorImmediate + component * 4, out current[component])) return false;
+                }
                 if (candidate is not null && !candidate.AsSpan().SequenceEqual(current)) return false;
                 candidate = current;
 

@@ -9,6 +9,46 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class IndirectSelectorValuesTests
 {
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(3, false)]
+    [InlineData(4, false)]
+    [InlineData(5, false)]
+    [InlineData(6, false)]
+    [InlineData(7, false)]
+    public void PackedFormattedStoresRequireStableSupportedFieldsAndDisjointWrites(int change, bool expected)
+    {
+        var program = Program(
+            Sop1(0, "SMovB64", 40, Gen5Operand.Scalar(126)), Vop1(4, "VMovB32", 5, Operand(0)),
+            BufferAccess(8, "BufferLoadDwordx2", 0, dwords: 2, vectorData: 4, indexEnabled: true),
+            Sop1(16, "SMovB64", 126, Gen5Operand.Scalar(40)),
+            new(20, Gen5ShaderEncoding.Vop1, "VMovB32", [0u, 0u], [Gen5Operand.Vector(5)], [Gen5Operand.Vector(6)],
+                new Gen5SdwaControl(6, 0, 5, 6, false, false, 0, 0, 0, false, null)),
+            ReadFirstLane(28, 16, 6), Sop2(32, "SMulI32", 17, Operand(16), Gen5Operand.Scalar(16)),
+            ScalarBufferLoad(36, 4, 20, 4, dynamicOffsetRegister: 17),
+            BufferAccess(44, "BufferStoreFormatX", 20, vectorData: 4), EndProgram(52));
+        var plan = Extract(program, userDataCount: 8);
+        Assert.Single(plan.Info.DeviceStoreValidationSources);
+        uint[] registers = [0x1000, 8u << 16, 2, 1u << 12, 0x3000, 16u << 16, 2, 1u << 12];
+        var memory = new TestWordMemory { Base = 0, Words = new uint[0x10000 / 4], RequireAlignment = true };
+        memory.At(0x100C) = 1u << 16;
+        for (uint candidate = 0; candidate < 2; candidate++)
+        {
+            var address = 0x3000ul + candidate * 16;
+            memory.At(address) = change == 2 ? 0x1000u : 0x8000u + candidate * 0x1000;
+            memory.At(address + 4) = change == 4 && candidate == 1 ? 2u << 16 : 1u << 16;
+            memory.At(address + 8) = 4 + candidate;
+            memory.At(address + 12) = ((change == 1 && candidate == 1 ? 5u : change == 7 ? 18u : 6u) << 12) |
+                (change == 6 ? 5u : 4u) | (change == 5 ? 1u << 28 : 0u);
+        }
+        if (change == 3) memory.FailAddress = 0x301C;
+        var snapshot = new ResourceSnapshot(); var specialization = new ResourceSpecialization();
+        Assert.Equal(expected, ResourceMaterializer.Materialize(plan, Inputs(registers, readCleanMemory: memory.Read),
+            ref snapshot, ref specialization));
+    }
+
     internal static void AssertPackedPointerEvaluates(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
         var packed = plan.DescriptorSources[(int)plan.Info.Images[0].Source].PackedPointer;

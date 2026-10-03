@@ -3560,6 +3560,19 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if ((instruction.Opcode is "BufferStoreFormatX" or "BufferStoreFormatXy" or
+                "BufferStoreFormatXyz" or "BufferStoreFormatXyzw") &&
+                _request.Resources.Info.DeviceStoreValidationSources.Keys.Any(index => _request.Memory[index].Pc == instruction.Pc))
+            {
+                var offset = IAdd(UInt(unchecked((uint)control.OffsetBytes)), vectorOffset);
+                var inRange = LogicalAnd(
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, vectorIndex, LoadS(control.ScalarResource + 2)),
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, offset, stride));
+                EmitExecConditional(() => EmitConditional(inRange, () =>
+                    EmitDeviceBufferFormatStore(baseAddress, byteAddress, descriptorWord3, control)));
+                return true;
+            }
+
             if (instruction.Opcode.Contains("Format", StringComparison.Ordinal))
             {
                 error = $"device buffer descriptor operation {instruction.Opcode} is not supported";
@@ -3740,6 +3753,76 @@ public static partial class Gen5SpirvTranslator
                 });
             });
             return true;
+        }
+
+        private void EmitDeviceBufferFormatStore(uint baseAddress, uint byteAddress,
+            uint descriptorWord3, Gen5BufferMemoryControl control)
+        {
+            var format = BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F));
+            var (dataFormat, numberFormat) = DecodeGfx10BufferFormat(format);
+            // Materialization proves identity channels, matching component counts,
+            // linear addressing and OOB_SELECT=0 for every possible descriptor.
+            // The format is still decoded on-device, never frozen to one address.
+            for (uint layoutFormat = 1; layoutFormat <= 14; layoutFormat++)
+            {
+                var componentCount = Gfx10UnifiedFormat.ComponentCount(layoutFormat);
+                if (componentCount != control.DwordCount) continue;
+                var capturedFormat = layoutFormat;
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, dataFormat, UInt(layoutFormat)), () =>
+                {
+                    var bytes = Gfx10UnifiedFormat.GetAccessByteSize(capturedFormat, componentCount);
+                    var element = new (uint Value, uint Mask)[(bytes + 3) / 4];
+                    for (var word = 0; word < element.Length; word++) element[word] = (UInt(0), 0);
+                    for (uint component = 0; component < componentCount; component++)
+                    {
+                        Gfx10UnifiedFormat.TryGetComponentLayout(capturedFormat, component, out var byteOffset, out var bitOffset, out var bits);
+                        var input = LoadV(control.VectorData + component);
+                        var encoded = input;
+                        if (bits != 32)
+                        {
+                            encoded = UInt(0);
+                            foreach (uint numeric in new uint[] { 0, 1, 2, 3, 4, 5, 7 })
+                                encoded = SelectUInt(numberFormat, numeric,
+                                    EncodeGfx10BufferComponent(input, bits, numeric, capturedFormat), encoded);
+                        }
+                        var index = (int)(byteOffset / 4);
+                        var shift = (byteOffset & 3) * 8 + bitOffset;
+                        var mask = bits == 32 ? uint.MaxValue : (1u << (int)bits) - 1;
+                        element[index] = (BitwiseOr(element[index].Value, ShiftLeftLogical(encoded, UInt(shift))),
+                            element[index].Mask | (mask << (int)shift));
+                    }
+                    StoreDeviceBufferElementBits(
+                        And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(DeviceAddressMask)), element);
+                });
+            }
+        }
+
+        private void StoreDeviceBufferElementBits(uint address, IReadOnlyList<(uint Value, uint Mask)> element)
+        {
+            var alignment = Narrow(And64(address, ULong(3)));
+            var shift = ShiftLeftLogical(alignment, UInt(3));
+            var aligned = _module.AddInstruction(SpirvOp.IEqual, _boolType, shift, UInt(0));
+            var carryShift = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(32), shift);
+            var first = And64(address, ULong(~3ul));
+            for (var index = 0; index <= element.Count; index++)
+            {
+                var value = UInt(0);
+                var mask = UInt(0);
+                if (index < element.Count)
+                {
+                    value = ShiftLeftLogical(BitwiseAnd(element[index].Value, UInt(element[index].Mask)), shift);
+                    mask = ShiftLeftLogical(UInt(element[index].Mask), shift);
+                }
+                if (index > 0)
+                {
+                    var previous = element[index - 1];
+                    value = BitwiseOr(value, _module.AddInstruction(SpirvOp.Select, _uintType, aligned, UInt(0),
+                        ShiftRightLogical(BitwiseAnd(previous.Value, UInt(previous.Mask)), carryShift)));
+                    mask = BitwiseOr(mask, _module.AddInstruction(SpirvOp.Select, _uintType, aligned, UInt(0),
+                        ShiftRightLogical(UInt(previous.Mask), carryShift)));
+                }
+                StoreDeviceMaskedWord(IAdd64(first, ULong((ulong)index * 4)), value, mask, _module.ConstantBool(true));
+            }
         }
 
         private void EmitDeviceBufferFormatLoad(

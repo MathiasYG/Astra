@@ -152,6 +152,7 @@ public sealed class ShaderResourcePlan
                 plan.RequiresSpecializationMemory = true;
         }
 
+        materialization.AddRange(plan.Info.DeviceStoreValidationSources.Values);
         plan.MaterializationSources = materialization;
         if (materialization.Any(source => plan.DescriptorSources[(int)source].PackedPointer is not null))
             plan.RequiresSpecializationMemory = true;
