@@ -36,6 +36,8 @@ public static class NetExports
     private static readonly ConcurrentDictionary<int, NetPool> _pools = new();
     private static readonly ConcurrentDictionary<int, ResolverContext> _resolvers = new();
     private static readonly ConcurrentDictionary<int, Socket> _sockets = new();
+    private static readonly ConcurrentDictionary<int, NetEpoll> _epolls = new();
+    private static int _nextEpollId = 0x6000;
     private static int _nextPoolId;
     private static int _nextResolverId = 0x2000;
     private static int _nextSocketId = 255;
@@ -49,6 +51,46 @@ public static class NetExports
     private static nint _errnoAddress;
 
     private sealed record NetPool(string Name, int Size, int Flags);
+
+    // Keep poll descriptors separate from socket descriptors. Event control and wait
+    // require their own ABI implementation; creating a poll does not signal readiness.
+    private sealed record NetEpoll(string Name);
+
+    [SysAbiExport(
+        Nid = "SF47kB2MNTo",
+        ExportName = "sceNetEpollCreate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollCreate(CpuContext ctx)
+    {
+        if (!_initialized)
+            return SetNetError(ctx, NetErrorNotInitialized, NetErrnoNotInitialized);
+        if (ctx[CpuRegister.Rsi] != 0)
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+
+        var name = string.Empty;
+        if (ctx[CpuRegister.Rdi] != 0 &&
+            !TryReadUtf8Z(ctx, ctx[CpuRegister.Rdi], MaxNameLength, out name))
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+
+        var id = Interlocked.Increment(ref _nextEpollId);
+        if (id <= 0 || !_epolls.TryAdd(id, new NetEpoll(name)))
+            return SetNetError(ctx, NetErrorTooManyFiles, NetErrnoTooManyFiles);
+        ctx[CpuRegister.Rax] = unchecked((ulong)id);
+        return 0;
+    }
+
+    [SysAbiExport(
+        Nid = "Inp1lfL+Jdw",
+        ExportName = "sceNetEpollDestroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollDestroy(CpuContext ctx)
+    {
+        return _epolls.TryRemove(unchecked((int)ctx[CpuRegister.Rdi]), out _)
+            ? ctx.SetReturn(0)
+            : SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+    }
 
     private sealed record ResolverContext(string Name, int PoolId, int Flags, int LastError);
 
@@ -116,6 +158,7 @@ public static class NetExports
         _initialized = false;
         _pools.Clear();
         _resolvers.Clear();
+        _epolls.Clear();
         foreach (var socket in _sockets.Values)
         {
             socket.Dispose();

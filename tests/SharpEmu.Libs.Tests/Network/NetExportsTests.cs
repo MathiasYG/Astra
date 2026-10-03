@@ -15,6 +15,40 @@ public sealed class NetExportsTests
     private readonly CpuContext _ctx = new(new FakeCpuMemory(0x1_0000_0000, 0x1000), Generation.Gen5);
 
     [Fact]
+    public void EpollDescriptorsAreUniqueAndDestroyRejectsClosedDescriptors()
+    {
+        Assert.Equal(0, NetExports.NetEpollCreate(_ctx));
+        var first = _ctx[CpuRegister.Rax];
+        Assert.Equal(0, NetExports.NetEpollCreate(_ctx));
+        var second = _ctx[CpuRegister.Rax];
+        try
+        {
+            Assert.True(first > 0);
+            Assert.NotEqual(first, second);
+            _ctx[CpuRegister.Rdi] = first;
+            Assert.Equal(0, NetExports.NetEpollDestroy(_ctx));
+            Assert.Equal(unchecked((int)0x80410109), NetExports.NetEpollDestroy(_ctx));
+        }
+        finally
+        {
+            _ctx[CpuRegister.Rdi] = first;
+            NetExports.NetEpollDestroy(_ctx);
+            _ctx[CpuRegister.Rdi] = second;
+            NetExports.NetEpollDestroy(_ctx);
+        }
+    }
+
+    [Fact]
+    public void EpollCreateRejectsFlagsAndUnreadableNames()
+    {
+        _ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(unchecked((int)0x80410116), NetExports.NetEpollCreate(_ctx));
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdi] = 1;
+        Assert.Equal(unchecked((int)0x8041010E), NetExports.NetEpollCreate(_ctx));
+    }
+
+    [Fact]
     public void SocketDescriptorsFitGuestFdSet()
     {
         _ctx[CpuRegister.Rsi] = 2; // AF_INET
