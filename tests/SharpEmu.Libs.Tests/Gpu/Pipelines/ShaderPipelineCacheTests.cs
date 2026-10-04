@@ -232,6 +232,28 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     }
 
     [Fact]
+    public void RenderingKeysDistinguishColorAndDepthSampleCounts()
+    {
+        PipelineRenderingState State(uint color, uint depth)
+        {
+            var state = new PipelineRenderingState { ColorCount = 1, DepthFormat = Format.D32Sfloat, DepthSamples = depth };
+            state.ColorFormats[0] = Format.R8G8B8A8Unorm;
+            state.ColorSamples[0] = color;
+            return state;
+        }
+        var entries = new Dictionary<PipelineRenderingState, int>
+        {
+            [State(1, 1)] = 1,
+            [State(1, 2)] = 2,
+            [State(2, 2)] = 3,
+        };
+        Assert.Equal(3, entries.Count);
+        Assert.Equal(1, entries[State(1, 1)]);
+        Assert.Equal(2, entries[State(1, 2)]);
+        Assert.Equal(3, entries[State(2, 2)]);
+    }
+
+    [Fact]
     public void TryCreateComputePipeline_ReportsTheHostCompileAndCachesTheResult()
     {
         var guest = new PipelineTestGuest();

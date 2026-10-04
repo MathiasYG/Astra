@@ -489,6 +489,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             renderingState.ColorFormats[index] = format;
+            renderingState.ColorSamples[index] = color.Resolution.Samples;
             // A target the pixel program never exports keeps its contents, as on hardware; the
             // host output would otherwise write an undefined value (e.g. depth-only passes that
             // leave a color target bound and export only to the null target).
@@ -512,6 +513,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             renderingState.DepthFormat = rendering.DepthFormat;
             renderingState.StencilFormat = rendering.StencilFormat;
+            renderingState.DepthSamples = depth.Target.Target.Samples;
         }
 
         var samples = rendering.Samples;

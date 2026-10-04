@@ -138,17 +138,20 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     }
 }
 
-// The attachment formats a graphics pipeline renders into.
+// The attachment formats and sample counts a graphics pipeline renders into.
 public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
 {
     public Format[] ColorFormats { get; } = new Format[PipelineStaticParameters.ColorAttachmentCount];
+    public uint[] ColorSamples { get; } = new uint[PipelineStaticParameters.ColorAttachmentCount];
     public Format DepthFormat { get; set; } = Format.Undefined;
     public Format StencilFormat { get; set; } = Format.Undefined;
+    public uint DepthSamples { get; set; }
     public uint ColorCount { get; set; }
 
     public bool Equals(PipelineRenderingState? other) =>
         other is not null && ColorCount == other.ColorCount && DepthFormat == other.DepthFormat && StencilFormat == other.StencilFormat &&
-        ColorFormats.AsSpan().SequenceEqual(other.ColorFormats);
+        DepthSamples == other.DepthSamples && ColorFormats.AsSpan().SequenceEqual(other.ColorFormats) &&
+        ColorSamples.AsSpan().SequenceEqual(other.ColorSamples);
 
     public override bool Equals(object? obj) => Equals(obj as PipelineRenderingState);
 
@@ -159,10 +162,12 @@ public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
         for (var index = 0; index < ColorCount; index++)
         {
             hash.Add(ColorFormats[index]);
+            hash.Add(ColorSamples[index]);
         }
 
         hash.Add(DepthFormat);
         hash.Add(StencilFormat);
+        hash.Add(DepthSamples);
         return hash.ToHashCode();
     }
 }
