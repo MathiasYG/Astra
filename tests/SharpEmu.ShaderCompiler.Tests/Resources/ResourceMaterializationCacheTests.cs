@@ -109,6 +109,26 @@ public sealed class ResourceMaterializationCacheTests
     }
 
     [Fact]
+    public void ChangedDispatchBoundsCannotReuseDescriptorProofs()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        foreach (var groups in new uint[] { 16, 16, 32 })
+        {
+            var inputs = new ResourceRuntimeInputs
+            {
+                UserData = [0x1000, 0], ReadMemory = heap.Read, ReadCleanMemory = heap.Read,
+                ComputeState = new(64, 64, 1, 1, false, 0, 1, groups, 1, 1),
+            };
+            Assert.True(cache.Materialize(plan, inputs, heap.ReadResident, ref snapshot, ref specialization, out _));
+        }
+        Assert.Equal((1, 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
     public void AlternatingDescriptorsReuseEveryRecentVariant()
     {
         var plan = Plan();

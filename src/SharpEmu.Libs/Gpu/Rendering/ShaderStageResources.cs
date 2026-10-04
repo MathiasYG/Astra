@@ -178,6 +178,9 @@ public sealed class ComputeInputInfo
     public uint DispatchThreadsX { get; set; }
     public uint DispatchThreadsY { get; set; }
     public uint DispatchThreadsZ { get; set; }
+    public uint DispatchGroupsX { get; init; }
+    public uint DispatchGroupsY { get; init; }
+    public uint DispatchGroupsZ { get; init; }
     public bool GroupIdX { get; init; }
     public bool GroupIdY { get; init; }
     public bool GroupIdZ { get; init; }

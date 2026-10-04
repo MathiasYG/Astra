@@ -81,8 +81,26 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [InlineData(64u, 64u, 1u)]
     [InlineData(65u, 64u, 2u)]
     [InlineData(7u, 0u, 7u)]
+    [InlineData(uint.MaxValue, 64u, 67108864u)]
+    [InlineData(uint.MaxValue, uint.MaxValue, 1u)]
     public void GroupsFromThreads_RoundsUpAndTreatsZeroGroupSizeAsOne(uint threads, uint groupSize, uint expected) =>
         Assert.Equal(expected, RenderExecutor.GroupsFromThreads(threads, groupSize));
+
+    [Theory]
+    [InlineData(false, 100u, 17u, 1u)]
+    [InlineData(true, 13u, 3u, 1u)]
+    public void ResolvedComputeInputs_PreserveActualDispatchGroupBounds(bool threadDimensions, uint x, uint y, uint z)
+    {
+        var registers = new SharpEmu.Libs.Gpu.GpuCommands.Registers.ComputeStageRegisters
+        {
+            ThreadsX = 8, ThreadsY = 8, ThreadsZ = 1,
+        };
+        var shader = new SharpEmu.Libs.Gpu.Pipelines.RegisteredShader(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        var input = SharpEmu.Libs.Gpu.Pipelines.ComputeStageInputResolver.Resolve(registers, shader,
+            threadDimensions ? 1u << 5 : 0, false, 100, 17, 1);
+        Assert.Equal((x, y, z), (input.DispatchGroupsX, input.DispatchGroupsY, input.DispatchGroupsZ));
+        Assert.Equal(threadDimensions ? 100u : 0u, input.DispatchThreadsX);
+    }
 
     [Fact]
     public void ThreadDimensionInitiator_ConvertsThreadsToGroupsAndRecordsTheThreadCounts()

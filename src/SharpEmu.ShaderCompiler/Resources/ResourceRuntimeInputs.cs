@@ -40,4 +40,5 @@ public sealed class ResourceRuntimeInputs
 }
 
 public readonly record struct ComputeSelectorState(uint WaveSize, uint ThreadsX, uint ThreadsY, uint ThreadsZ,
-    bool HasPartialWorkgroups, uint LocalDataShareDwords, int LocalInvocationIdComponents);
+    bool HasPartialWorkgroups, uint LocalDataShareDwords, int LocalInvocationIdComponents,
+    uint DispatchGroupsX = 0, uint DispatchGroupsY = 0, uint DispatchGroupsZ = 0);

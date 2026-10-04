@@ -214,7 +214,7 @@ public sealed partial class RenderExecutor
         }
 
         var size = Math.Max(groupSize, 1u);
-        return (threads + size - 1) / size;
+        return (threads - 1) / size + 1;
     }
 
     private BufferDescriptorWords DecodeBufferDescriptor(ResourceSnapshot resources, int index)
