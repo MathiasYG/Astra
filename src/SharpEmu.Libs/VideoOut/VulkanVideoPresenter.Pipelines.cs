@@ -162,25 +162,9 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryReadCleanGuestWord(ulong address, out uint word)
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
-            word = 0;
-            if (!_guestMemory.CanRead(address, sizeof(uint)))
-            {
-                return false;
-            }
-
-            if ((_bufferCache.MayHaveGpuDirtyPages(address, sizeof(uint)) && _bufferCache.HasGpuDirtyPages(address, sizeof(uint))) ||
-                _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)) ||
-                _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
-            {
-                return false;
-            }
-
             Span<byte> bytes = stackalloc byte[sizeof(uint)];
-            if (!_guestMemory.TryRead(address, bytes))
-            {
-                return false;
-            }
-
+            word = 0;
+            if (!TryReadResidentGuestBytes(address, bytes, clean: true)) return false;
             word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
             return true;
         }
@@ -193,10 +177,16 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (!_guestMemory.CanRead(address, size) ||
                     _bufferCache.HasGpuDirtyBytes(address, size) ||
-                    (clean && (_bufferCache.HasGpuDirtyPages(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size))))
+                    (clean && _imageCache.HasGpuModifiedImageBytes(address, size)))
                 {
                     return false;
                 }
+
+                // GPU ownership is tracked in bytes, but protection covers whole pages.
+                // Read disjoint CPU-owned bytes through the backing alias so a protected
+                // guest view cannot trigger a download of neighboring GPU-owned bytes.
+                if (clean && _bufferCache.HasGpuDirtyPages(address, size))
+                    return _guestBacking.TryReadBacking(address, destination);
 
                 NoteCleanReadPage(address, size);
             }
