@@ -3019,7 +3019,7 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
-            var vector = Load(_vec4Type, input);
+            var vector = LoadOrdinaryInterpolant(input);
             var component = _module.AddInstruction(
                 SpirvOp.CompositeExtract,
                 _floatType,

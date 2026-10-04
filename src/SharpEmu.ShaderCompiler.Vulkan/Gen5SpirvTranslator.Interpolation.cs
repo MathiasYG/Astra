@@ -16,6 +16,7 @@ public static partial class Gen5SpirvTranslator
         private uint _perspectiveBarycentric;
         private readonly Dictionary<int, uint> _barycentricInputs = [];
         private uint _interpolationSampleId;
+        private readonly HashSet<uint> _fixedSampleInterpolants = [];
         private uint _frontFacingInput;
         private uint _ancillaryLayerInput;
         private uint _sampleMaskInput;
@@ -33,7 +34,12 @@ public static partial class Gen5SpirvTranslator
             _module.AddCapability(SpirvCapability.SampleRateShading);
             if (modes == 0x10u)
                 _module.AddDecoration(variable, SpirvDecoration.NoPerspective);
-            _module.AddDecoration(variable, SpirvDecoration.Sample);
+            if (_request.PixelInterpolationSample.HasValue)
+            {
+                _module.AddCapability(SpirvCapability.InterpolationFunction);
+                _fixedSampleInterpolants.Add(variable);
+            }
+            else _module.AddDecoration(variable, SpirvDecoration.Sample);
         }
 
         private void DeclareInterpolationParameters()
@@ -105,7 +111,7 @@ public static partial class Gen5SpirvTranslator
                 _barycentricInputs.Add(bit, variable);
             }
 
-            if ((enabledInputs & 0x11u) != 0)
+            if ((enabledInputs & 0x11u) != 0 && !_request.PixelInterpolationSample.HasValue)
             {
                 _module.AddCapability(SpirvCapability.SampleRateShading);
                 _interpolationSampleId = _module.AddGlobalVariable(
@@ -229,7 +235,10 @@ public static partial class Gen5SpirvTranslator
             var value = LoadVertex(0);
             if (!flat)
             {
-                var barycentric = Load(_vec3Type, _perspectiveBarycentric);
+                var modes = _pixelInputEnable & _pixelInputAddress & 0x7Fu;
+                var barycentric = _request.PixelInterpolationSample.HasValue && modes == 1
+                    ? LoadBarycentricCoordinates(0, _perspectiveBarycentric)
+                    : Load(_vec3Type, _perspectiveBarycentric);
                 value = _module.AddInstruction(SpirvOp.FMul, _floatType, value,
                     _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, barycentric, 0));
                 for (uint vertex = 1; vertex < 3; vertex++)
@@ -243,10 +252,19 @@ public static partial class Gen5SpirvTranslator
             StoreV(destination, Bitcast(_uintType, value));
         }
 
+        private uint InterpolationSampleIndex() => _request.PixelInterpolationSample is uint sample
+            ? _module.Constant(_intType, sample)
+            : Load(_intType, _interpolationSampleId);
+
+        private uint LoadOrdinaryInterpolant(uint variable) => _fixedSampleInterpolants.Contains(variable)
+            ? _module.AddInstruction(SpirvOp.ExtInst, _vec4Type, _glsl, InterpolateAtSample,
+                variable, InterpolationSampleIndex())
+            : Load(_vec4Type, variable);
+
         private uint LoadBarycentricCoordinates(int bit, uint variable) => bit switch
         {
             0 or 4 => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtSample,
-                variable, Load(_intType, _interpolationSampleId)),
+                variable, InterpolationSampleIndex()),
             2 or 6 => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtCentroid, variable),
             _ => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtOffset,
                 variable, _module.ConstantNull(_vec2Type)),

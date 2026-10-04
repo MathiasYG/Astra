@@ -88,6 +88,27 @@ public sealed class Gen5InterpolationParameterTests
     }
 
     [Theory]
+    [InlineData(1u, "VInterpP2F32", 0u)]
+    [InlineData(0x10u, "VInterpP2F32", 1u)]
+    [InlineData(1u, "VInterpMovF32", 0u)]
+    [InlineData(0x77u, "VInterpMovF32", 1u)]
+    public void FixedSampleInterpolation_DoesNotRequestSampleInvocations(uint inputs, string opcode, uint sample)
+    {
+        var request = Request(2, true, inputs, opcode, inputCntl: 0, fixedSample: sample);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.Decorate &&
+            (item.Operands[1] == (uint)SpirvDecoration.Sample ||
+             (item.Operands[1] == (uint)SpirvDecoration.BuiltIn && item.Operands[2] == (uint)SpirvBuiltIn.SampleId)));
+        var interpolations = instructions.Where(item => item.Opcode == SpirvOp.ExtInst && item.Operands[3] == 77).ToArray();
+        Assert.NotEmpty(interpolations);
+        foreach (var interpolation in interpolations)
+            Assert.Contains(instructions, item => item.Opcode == SpirvOp.Constant &&
+                item.Operands[1] == interpolation.Operands[5] && item.Operands[2] == sample);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
     [InlineData(3u, 0u)]
     [InlineData(0x11u, 0u)]
     [InlineData(1u, 0x400u)]
@@ -189,8 +210,10 @@ public sealed class Gen5InterpolationParameterTests
         ValidateWhenAvailable(shader.Spirv);
     }
 
-    [Fact]
-    public void SmoothSlotSharingAPerVertexParameter_InterpolatesThePerVertexInput()
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0u)]
+    public void SmoothSlotSharingAPerVertexParameter_InterpolatesThePerVertexInput(uint? fixedSample)
     {
         // Slot 1 is read per vertex, slot 2 interpolates the same VS parameter: one per-vertex
         // input serves both, and slot 2 is rebuilt from the vertices with the barycentrics.
@@ -202,8 +225,9 @@ public sealed class Gen5InterpolationParameterTests
         var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            PixelInputAddress = 2,
-            PixelInputEnable = 2,
+            PixelInputAddress = fixedSample.HasValue ? 1u : 2u,
+            PixelInputEnable = fixedSample.HasValue ? 1u : 2u,
+            PixelInterpolationSample = fixedSample,
             PixelInputCntl = [0, 0x1, 0x1],
             PixelCustomInterpolationMask = 2,
             SupportsPerVertexPixelInputs = true,
@@ -219,6 +243,12 @@ public sealed class Gen5InterpolationParameterTests
             instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn && instruction.Operands[2] == (uint)SpirvBuiltIn.BaryCoordKhr);
         Assert.Equal(4, instructions.Count(instruction => instruction.Opcode == SpirvOp.AccessChain &&
             instruction.Operands[2] == input));
+        if (fixedSample.HasValue)
+        {
+            Assert.Contains(instructions, item => item.Opcode == SpirvOp.ExtInst && item.Operands[3] == 77);
+            Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.Decorate &&
+                item.Operands[1] == (uint)SpirvDecoration.BuiltIn && item.Operands[2] == (uint)SpirvBuiltIn.SampleId);
+        }
         ValidateWhenAvailable(shader.Spirv);
     }
 
@@ -285,7 +315,7 @@ public sealed class Gen5InterpolationParameterTests
 
     private static ShaderCompileRequest Request(
         uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32",
-        uint inputCntl = 0x401, bool supportsPerVertex = true)
+        uint inputCntl = 0x401, bool supportsPerVertex = true, uint? fixedSample = null)
     {
         var interpolation = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp, opcode,
             [selector], [Gen5Operand.Vector(selector)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 2));
@@ -295,6 +325,7 @@ public sealed class Gen5InterpolationParameterTests
         {
             PixelInputAddress = inputs,
             PixelInputEnable = inputs,
+            PixelInterpolationSample = fixedSample,
             PixelInputCntl = [0, inputCntl],
             PixelCustomInterpolationMask = custom ? 2u : 0u,
             SupportsPerVertexPixelInputs = supportsPerVertex,
