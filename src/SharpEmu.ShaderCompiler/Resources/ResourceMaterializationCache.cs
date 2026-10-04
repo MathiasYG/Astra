@@ -415,6 +415,7 @@ public sealed class ResourceMaterializationCache
     private sealed class ReadRecorder
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private readonly Dictionary<ulong, int> _readIndex = new();
         private bool _inTable;
         private GuestWordReader? _reader;
         private GuestWordReader? _cleanReader;
@@ -438,6 +439,9 @@ public sealed class ResourceMaterializationCache
         public void Reset()
         {
             _reads.Clear();
+            var largeIndex = _readIndex.Count > 16384;
+            _readIndex.Clear();
+            if (largeIndex) _readIndex.TrimExcess();
             // Retain ordinary descriptor walks without keeping unusually large
             // tables alive for the lifetime of the renderer.
             if (_reads.Capacity > 16384)
@@ -475,8 +479,22 @@ public sealed class ResourceMaterializationCache
                 Failed = true;
                 return false;
             }
-            _reads.Add((address, word, clean, _inTable));
+            Record(address, word, clean);
             return true;
+        }
+
+        private void Record(ulong address, uint word, bool clean)
+        {
+            if (_readIndex.TryGetValue(address, out var index))
+            {
+                var previous = _reads[index];
+                // A cache entry cannot validate two different observations of one word.
+                if (previous.Word != word) Failed = true;
+                _reads[index] = (address, previous.Word, previous.Clean || clean, previous.Table && _inTable);
+                return;
+            }
+            _readIndex.Add(address, _reads.Count);
+            _reads.Add((address, word, clean, _inTable));
         }
 
         public ResidentGuestBytesReader? WrapResident(ResidentGuestBytesReader? inner)
@@ -493,8 +511,8 @@ public sealed class ResourceMaterializationCache
                 return false;
 
             for (var offset = 0; offset + sizeof(uint) <= destination.Length; offset += sizeof(uint))
-                _reads.Add((address + (ulong)offset,
-                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean, _inTable));
+                Record(address + (ulong)offset,
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean);
             return true;
         }
 
