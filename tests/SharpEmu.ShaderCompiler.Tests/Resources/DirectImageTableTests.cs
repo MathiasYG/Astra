@@ -11,6 +11,24 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DirectImageTableTests
 {
+    [Theory]
+    [InlineData(0x80000000u, true)]
+    [InlineData(0x10000000u, false)]
+    public void ImageCandidatesDistinguishResourceLevelFromReservedBits(uint bit, bool valid)
+    {
+        var plan = ShaderResourcePlan.Extract(CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 2);
+        bool Read(ulong address, out uint word)
+        {
+            if (!ReadWaveIndexedMemory(address, out word)) return false;
+            if (address >= 0x1100 && (address - 0x1100) % 32 == 8) word |= bit;
+            return true;
+        }
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        Assert.Equal(valid, snapshot.Images.Any(image => image[0] != 0));
+        if (valid) Assert.All(snapshot.Images, image => Assert.Equal(bit, image[2] & bit));
+    }
+
     private static Gen5ShaderProgram FiniteLaneReadProgram(bool unknownLane = false, bool partialWrite = false,
         bool loopWrite = false, bool wrongRestore = false, bool unknownPartial = false)
     {
