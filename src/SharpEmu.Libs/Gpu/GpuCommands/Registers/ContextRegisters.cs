@@ -385,6 +385,7 @@ public sealed class ContextRegisters
     public ColorControlRegisters ColorControl = new();
     public DepthRenderOverrideRegisters DepthRenderOverride;
     public ScanModeRegisters ScanMode = new();
+    public uint ScanModeControl1;
     public SampleLocationRegisters SampleLocations = new();
     public uint ShaderSampleExclusionMask;
     public uint SampleCoverageMaskX0Y0X1Y0 = uint.MaxValue;

@@ -21,7 +21,7 @@ internal static partial class RegisterWriters
                  {
                      DbCountControl, DbRenderOverride2, DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl,
                      TaBcBaseAddr, TaBcBaseAddrHi, CbDccControl, PaSuPointSize, PaSuPointMinMax, DbAlphaToMask, VgtDrawPayloadCntl,
-                     VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaSuVtxCntl, PaScFovWindowLr, PaScFovWindowTb, PaScModeCntl1,
+                     VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaSuVtxCntl, PaScFovWindowLr, PaScFovWindowTb,
                      PaScBinnerCntl0, PaScBinnerCntl1,
                      PaScConservativeRasterizationCntl,
                  })
@@ -62,6 +62,7 @@ internal static partial class RegisterWriters
         direct[PaClVteCntl] = ViewportTransformControlPacket;
         direct[PaSuLineCntl] = LineControlPacket;
         direct[PaScModeCntl0] = ScanModeControlPacket;
+        direct[PaScModeCntl1] = ScanModeControl1Packet;
         direct[PaScAaConfig] = AntialiasingConfigPacket;
         for (var offset = PaScAaSampleLocations0; offset < PaScAaSampleLocations0 + SampleLocationRegisters.LocationCount; offset++)
         {
@@ -168,7 +169,7 @@ internal static partial class RegisterWriters
                      CbDccControl, DbCountControl, DbSResultsCompareState0, DbSResultsCompareState1, DbRenderOverride2,
                      DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl, TaBcBaseAddr, TaBcBaseAddrHi, PaSuPointSize, PaSuPointMinMax,
                      SpiTmpringSize, VgtDrawPayloadCntl, VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaScFovWindowLr, PaScFovWindowTb, PaScFsrEnable,
-                     FsrRecursions0, FsrRecursions1, PaScModeCntl1, PaSuVtxCntl,
+                     FsrRecursions0, FsrRecursions1, PaSuVtxCntl,
                      PaScBinnerCntl0, PaScBinnerCntl1, PaScConservativeRasterizationCntl, DbAlphaToMask,
                  })
         {
@@ -254,6 +255,7 @@ internal static partial class RegisterWriters
         indirect[PaSuLineCntl] = LineControlEntry;
         indirect[PaClVteCntl] = static (banks, _, value) => banks.Context.ScreenViewport.TransformControl = value;
         indirect[PaScModeCntl0] = static (banks, _, value) => banks.Context.ScanMode = ScanModeRegisters.Decode(value);
+        indirect[PaScModeCntl1] = static (banks, _, value) => banks.Context.ScanModeControl1 = value;
         indirect[PaScAaConfig] = static (banks, _, value) => banks.Context.AntialiasingConfig = AntialiasingConfigRegisters.Decode(value);
         indirect[PaScCentroidPriority0] = CentroidPriorityEntry;
         indirect[PaScCentroidPriority1] = CentroidPriorityEntry;
@@ -407,6 +409,9 @@ internal static partial class RegisterWriters
 
     private static uint ScanModeControlPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[PaScModeCntl0]!);
+
+    private static uint ScanModeControl1Packet(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
+        SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[PaScModeCntl1]!);
 
     private static uint AntialiasingConfigPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[PaScAaConfig]!);

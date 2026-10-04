@@ -33,6 +33,16 @@ public sealed class RegisterWriteTableTests
     private static uint Float(float value) => BitConverter.SingleToUInt32Bits(value);
 
     [Fact]
+    public void ScanModeControl1WritesPreserveSampleIterationAndOtherBits()
+    {
+        var banks = NewBanks();
+        Assert.Equal(1u, WriteContext(banks, PaScModeCntl1, 0x08010001));
+        Assert.Equal(0x08010001u, banks.Context.ScanModeControl1);
+        RegisterWriteTable.ContextIndirect[PaScModeCntl1]!(banks, PaScModeCntl1, 0x00000001);
+        Assert.Equal(0x00000001u, banks.Context.ScanModeControl1);
+    }
+
+    [Fact]
     public void EqaaWritesPreserveIndependentRatesAndDepthControls()
     {
         var banks = NewBanks();
