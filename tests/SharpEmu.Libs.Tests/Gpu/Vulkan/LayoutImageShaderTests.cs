@@ -63,6 +63,48 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         output.WriteLine($"Verified workgroup descriptor offsets on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
+    [Theory]
+    [InlineData(0u, 25u)]
+    [InlineData(1u, 50u)]
+    public void JoinedTableBuffersReadTheDescriptorChosenByTheExecutedVccBranch(uint condition, uint expected)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var instructions = ResourceBranchTests.JoinedTableBuffer().Instructions.Where(i => i.Opcode != "SEndpgm").ToList();
+        instructions.Add(BufferAccess(40, "BufferStoreDword", ResultRegister, vectorData: 4));
+        instructions.Add(EndProgram(48));
+        var program = Program([.. instructions]);
+        var registers = UserData();
+        registers[0] = 0x3000;
+        registers[2] = condition;
+        registers[ResultRegister] = 0x4000;
+        var memory = new TestWordMemory { Base = 0, Words = new uint[0x4000 / 4], RequireAlignment = true };
+        memory.At(0x1000) = 25;
+        memory.At(0x2000) = 50;
+        uint[] descriptors = [0x1000, 0, 4, 0, 0x2000, 0, 4, 0];
+        descriptors.CopyTo(memory.Words, 0x3000 / 4);
+        var plan = Extract(program, userDataCount: 12);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(registers, readMemory: memory.Read), ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 12),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var guest = runner.CreateBuffer(MemoryMarshal.AsBytes(memory.Words.AsSpan()));
+        var result = runner.CreateBuffer(ResultBytes);
+        var pageTable = runner.CreatePageTable(1, [(0ul, guest, 0ul)]);
+        harness.Run(() => runner.Dispatch(registers,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result], [DescriptorBindingKind.DeviceAddressPageTable] = [pageTable] },
+            1, flattenedTable: snapshot.FlattenedResourceTable));
+        Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(result, 0, ResultBytes)));
+        harness.AssertNoValidationMessages();
+        output.WriteLine($"VCC descriptor join readback on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
     private const uint Format32Uint = 20;
     private const uint Format32Sint = 21;
     private const uint Format32Float = 22;

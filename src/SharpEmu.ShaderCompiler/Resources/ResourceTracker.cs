@@ -598,8 +598,9 @@ public sealed partial class ResourceTracker
     // whose non-constant leaves are all reads from guest memory. This covers a
     // descriptor read straight from a device address and one read from the SRT
     // buffer at a dynamic offset, including the phi that merges an SRT read
-    // across a loop. A handle that is fully resolvable (constants and flattened
-    // table words only) is not a runtime descriptor and keeps the native binding.
+    // across a loop. Flattening a scalar load into a table word preserves its
+    // memory origin, including descriptors selected by a control-flow join.
+    // Host-resolvable handles still keep the native binding in the caller.
     private bool IsRuntimeDescriptorHandle(ScalarValue? handle, bool allowComputedWords = false)
     {
         if (handle is null || handle.Kind != ScalarValueKind.BufferHandle ||
@@ -728,7 +729,7 @@ public sealed partial class ResourceTracker
 
         try
         {
-            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
+            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord or ScalarValueKind.ResourceTableWord)
             {
                 return true;
             }
