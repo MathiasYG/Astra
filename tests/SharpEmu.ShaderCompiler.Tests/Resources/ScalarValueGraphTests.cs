@@ -485,6 +485,25 @@ public sealed class ScalarValueGraphTests
         Assert.True(plan.Info.UsesDeviceAddresses);
     }
 
+    [Theory]
+    [InlineData(32u, 0x2222u)]
+    [InlineData(64u, 0x1111u)]
+    public void SavedLaneIndicesWrapAtTheGuestWaveSize(uint waveSize, uint expected)
+    {
+        var program = Program(
+            MoveScalar(0, 84, 0x1111),
+            WriteLane(8, vectorRegister: 18, scalarRegister: 84, lane: 31),
+            MoveScalar(16, 84, 0x2222),
+            WriteLane(24, vectorRegister: 18, scalarRegister: 84, lane: 63),
+            ReadLane(32, scalarRegister: 84, vectorRegister: 18, lane: 31),
+            ScalarLoad(40, 84, destination: 4),
+            EndProgram(48));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 84, 2, waveSize: waveSize);
+        var value = plan.Accesses[plan.Memory.Count - 1]!.Handle!.Operands[0];
+        Assert.True(value.IsConstant);
+        Assert.Equal(expected, value.ConstantU32);
+    }
+
     // The restored pointer meets the zeroed one at the join, so the read is not a
     // host-side table read; it stays an in-shader device-address read.
     [Fact]

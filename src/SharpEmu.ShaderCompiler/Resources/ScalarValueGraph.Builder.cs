@@ -1662,7 +1662,7 @@ public sealed partial class ScalarValueGraph
             }
 
             var value = Read(instruction.Sources[0], state);
-            var key = (destination.Value, lane.ConstantU32 & 63);
+            var key = (destination.Value, lane.ConstantU32 & (_graph.WaveSize - 1));
             if (value.IsUndefined)
             {
                 state.Lanes.Remove(key);
@@ -1689,7 +1689,7 @@ public sealed partial class ScalarValueGraph
                 return;
             }
 
-            if (lane.IsConstant && state.Lanes.TryGetValue((source.Value, lane.ConstantU32 & 63), out var value))
+            if (lane.IsConstant && state.Lanes.TryGetValue((source.Value, lane.ConstantU32 & (_graph.WaveSize - 1)), out var value))
             {
                 state.WriteScalar(destination.Value, value);
                 return;
