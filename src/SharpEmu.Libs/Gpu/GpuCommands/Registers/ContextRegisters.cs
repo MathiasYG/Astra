@@ -161,7 +161,11 @@ public struct EnhancedQualityAntialiasingRegisters
     public bool HighQualityIntersections;
     public bool IncoherentReads;
     public bool InterpolateComponentZ;
+    public bool InterpolateSourceZ;
     public bool StaticAnchorAssociations;
+    public bool AlphaToMaskEqaaDisable;
+    public byte OverrasterizationAmount;
+    public bool EnablePostZOverrasterization;
 
     public static EnhancedQualityAntialiasingRegisters Decode(uint value) => new()
     {
@@ -172,7 +176,11 @@ public struct EnhancedQualityAntialiasingRegisters
         HighQualityIntersections = RegisterField.Bit(value, 16),
         IncoherentReads = RegisterField.Bit(value, 17),
         InterpolateComponentZ = RegisterField.Bit(value, 18),
+        InterpolateSourceZ = RegisterField.Bit(value, 19),
         StaticAnchorAssociations = RegisterField.Bit(value, 20),
+        AlphaToMaskEqaaDisable = RegisterField.Bit(value, 21),
+        OverrasterizationAmount = (byte)RegisterField.Get(value, 24, 0x7),
+        EnablePostZOverrasterization = RegisterField.Bit(value, 27),
     };
 }
 

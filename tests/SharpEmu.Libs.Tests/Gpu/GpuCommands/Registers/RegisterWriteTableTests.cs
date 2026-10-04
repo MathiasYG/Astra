@@ -33,6 +33,34 @@ public sealed class RegisterWriteTableTests
     private static uint Float(float value) => BitConverter.SingleToUInt32Bits(value);
 
     [Fact]
+    public void EqaaWritesPreserveIndependentRatesAndDepthControls()
+    {
+        var banks = NewBanks();
+        const uint value = 0x0D3F4321;
+        Assert.Equal(1u, WriteContext(banks, DbEqaa, value));
+        var eqaa = banks.Context.EnhancedQualityAntialiasing;
+        Assert.Equal(1, eqaa.MaxAnchorSamples);
+        Assert.Equal(2, eqaa.PixelShaderIterationSamples);
+        Assert.Equal(3, eqaa.MaskExportSamples);
+        Assert.Equal(4, eqaa.AlphaToMaskSamples);
+        Assert.True(eqaa.HighQualityIntersections);
+        Assert.True(eqaa.IncoherentReads);
+        Assert.True(eqaa.InterpolateComponentZ);
+        Assert.True(eqaa.InterpolateSourceZ);
+        Assert.True(eqaa.StaticAnchorAssociations);
+        Assert.True(eqaa.AlphaToMaskEqaaDisable);
+        Assert.Equal(5, eqaa.OverrasterizationAmount);
+        Assert.True(eqaa.EnablePostZOverrasterization);
+
+        Assert.Equal(1u, WriteContext(banks, DbEqaa, 0));
+        eqaa = banks.Context.EnhancedQualityAntialiasing;
+        Assert.False(eqaa.InterpolateSourceZ);
+        Assert.False(eqaa.AlphaToMaskEqaaDisable);
+        Assert.Equal(0, eqaa.OverrasterizationAmount);
+        Assert.False(eqaa.EnablePostZOverrasterization);
+    }
+
+    [Fact]
     public void SampleMaskWritesPreserveValuesAndFollowingRegisters()
     {
         var banks = NewBanks();
