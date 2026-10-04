@@ -33,6 +33,30 @@ public sealed class RegisterWriteTableTests
     private static uint Float(float value) => BitConverter.SingleToUInt32Bits(value);
 
     [Fact]
+    public void CapturedMixedSampleRegistersKeepDepthStorageSeparateFromEqaaAnchors()
+    {
+        var banks = NewBanks();
+        WriteContext(banks, DbZInfo, 0xA0000187);
+        WriteContext(banks, CbColor0Attrib, 0);
+        WriteContext(banks, PaScAaConfig, 0x00108001);
+        WriteContext(banks, DbEqaa, 0);
+
+        // DB_Z_INFO.NUM_SAMPLES is bits 3:2; CB_COLOR0_ATTRIB has
+        // coverage bits 14:12 and stored fragment bits 16:15.
+        Assert.Equal(2u, 1u << (int)banks.Context.DepthTarget.SamplesLog2);
+        Assert.Equal(1u, 1u << (int)banks.Context.ColorTargets[0].SamplesLog2);
+        Assert.Equal(1u, 1u << (int)banks.Context.ColorTargets[0].FragmentsLog2);
+        Assert.Equal(2u, 1u << banks.Context.AntialiasingConfig.SampleCountLog2);
+        Assert.Equal(2u, 1u << banks.Context.AntialiasingConfig.ExposedSamplesLog2);
+        Assert.Equal(0, banks.Context.EnhancedQualityAntialiasing.MaxAnchorSamples);
+
+        // Anchor association state does not change the depth allocation's sample count.
+        WriteContext(banks, DbEqaa, 1);
+        Assert.Equal(1, banks.Context.EnhancedQualityAntialiasing.MaxAnchorSamples);
+        Assert.Equal(2u, 1u << (int)banks.Context.DepthTarget.SamplesLog2);
+    }
+
+    [Fact]
     public void ScanModeControl1WritesPreserveSampleIterationAndOtherBits()
     {
         var banks = NewBanks();
