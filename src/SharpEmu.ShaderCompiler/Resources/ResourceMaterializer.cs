@@ -950,7 +950,9 @@ public static class ResourceMaterializer
         specializedSnapshot = snapshot;
         specialization = new ResourceSpecialization();
         var info = plan.Info;
-        var imageCount = info.Images.Count;
+        var denseImages = snapshot.Images.ToList();
+        var owners = Enumerable.Range(0, info.Images.Count).Select(index => (uint)index).ToList();
+        var sharedCandidates = new List<(uint Root, uint Candidate)>();
         var mappingWordCount = 0;
         foreach (var table in snapshot.IndirectImages)
         {
@@ -959,13 +961,24 @@ public static class ResourceMaterializer
                 return Fail("indirect image table has an invalid root or candidate count");
             }
 
-            if (imageCount + table.Descriptors.Count - 1 > ShaderResourceInfo.MaxImages)
+            sharedCandidates.Add((table.Resource, table.Resource));
+            for (var candidate = 1; candidate < table.Descriptors.Count; candidate++)
             {
-                failure = ResourceMaterializationFailure.ImageCapacityExceeded;
-                return Fail("indirect image candidates exceed the dense image resource limit");
+                var words = table.Descriptors[candidate].Dwords;
+                var existing = -1;
+                if (!NullImageDescriptor(words))
+                    for (var resource = 0; resource < denseImages.Count; resource++)
+                        if (words.AsSpan().SequenceEqual(denseImages[resource]) &&
+                            CanShareSampledImageUse(info.Images[(int)table.Resource], info.Images[(int)owners[resource]]))
+                        { existing = resource; break; }
+                if (existing < 0)
+                {
+                    existing = denseImages.Count;
+                    denseImages.Add(words);
+                    owners.Add(table.Resource);
+                }
+                sharedCandidates.Add((table.Resource, (uint)existing));
             }
-
-            imageCount += table.Descriptors.Count - 1;
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
@@ -974,11 +987,15 @@ public static class ResourceMaterializer
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
-        // Each draw owns these arrays. Only indirect candidates require a larger table.
-        Array.Resize(ref snapshot.Images, imageCount);
+        var imageCount = denseImages.Count;
+        if (imageCount > ShaderResourceInfo.MaxImages)
+        {
+            failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+            return Fail("indirect image candidates exceed the dense image resource limit");
+        }
+        snapshot.Images = denseImages.ToArray();
         var mappingCursor = snapshot.FlattenedTable.Length;
         Array.Resize(ref snapshot.FlattenedTable, checked(mappingCursor + mappingWordCount));
-        var imageCursor = info.Images.Count;
         var images = new List<ImageSpecialization>(imageCount);
         foreach (var image in info.Images)
         {
@@ -987,15 +1004,12 @@ public static class ResourceMaterializer
                 image.IndirectRoot, image.IndirectMappingOffset, image.IndirectSearchIterations, image.Cube));
         }
 
+        for (var resource = info.Images.Count; resource < imageCount; resource++)
+            images.Add(images[(int)owners[resource]] with { IndirectRoot = owners[resource] });
+
         foreach (var table in snapshot.IndirectImages)
         {
             var rootImage = images[(int)table.Resource];
-            for (var candidate = 1; candidate < table.Descriptors.Count; candidate++)
-            {
-                images.Add(rootImage with { IndirectRoot = table.Resource });
-                snapshot.Images[imageCursor++] = table.Descriptors[candidate].Dwords;
-            }
-
             var mappingOffset = (uint)mappingCursor;
             images[(int)table.Resource] = rootImage with
             {
@@ -1175,11 +1189,12 @@ public static class ResourceMaterializer
                 return Fail("indirect image specialization has an invalid key mapping");
             }
 
+            var candidateSet = ImageCandidates(images, (uint)rootIndex, sharedCandidates).ToHashSet();
             var exemplar = DescriptorConstants.NoIndex;
             var resourceCount = 0;
             for (var resource = 0; resource < images.Count; resource++)
             {
-                if (images[resource].IndirectRoot != rootIndex)
+                if (!candidateSet.Contains((uint)resource))
                 {
                     continue;
                 }
@@ -1201,7 +1216,7 @@ public static class ResourceMaterializer
             for (var candidate = 0; candidate < images.Count; candidate++)
             {
                 var image = images[candidate];
-                if (image.IndirectRoot != rootIndex)
+                if (!candidateSet.Contains((uint)candidate))
                 {
                     continue;
                 }
@@ -1257,7 +1272,7 @@ public static class ResourceMaterializer
             }
         }
 
-        if (!BuildSamplerPlan(info, images, out var samplerPlan))
+        if (!BuildSamplerPlan(info, images, out var samplerPlan, sharedCandidates))
         {
             return Fail("specialized sampler layout exceeds its resource limit");
         }
@@ -1269,7 +1284,7 @@ public static class ResourceMaterializer
         foreach (var pair in info.SampledPairs)
         {
             if (images[(int)pair.Image].IndirectRoot != pair.Image) continue;
-            if (!ImageCandidates(images, pair.Image).Any(candidate => images[(int)candidate].NumericClass == ImageNumericClass.Uint &&
+            if (!ImageCandidates(images, pair.Image, sharedCandidates).Any(candidate => images[(int)candidate].NumericClass == ImageNumericClass.Uint &&
                     images[(int)candidate].ConversionFormat == GuestImageFormat.Invalid)) continue;
             var words = snapshot.Samplers[pair.Sampler];
             if (words.Length < 4 || ((words[2] >> 20) & 0xF) != 0 ||
@@ -1290,7 +1305,7 @@ public static class ResourceMaterializer
         var compareUsage = new byte[ShaderResourceInfo.MaxSamplers];
         foreach (var pair in info.SampledPairs)
         {
-            foreach (var candidate in ImageCandidates(images, pair.Image))
+            foreach (var candidate in ImageCandidates(images, pair.Image, sharedCandidates))
             {
                 var image = info.Images[(int)pair.Image];
                 var specialized = images[(int)candidate];
@@ -1380,11 +1395,20 @@ public static class ResourceMaterializer
             BaseBufferCount = baseBufferCount,
             Buffers = buffers,
             Images = images,
+            IndirectImageCandidates = sharedCandidates,
             BufferCandidateTables = candidateTables,
         };
         specializedSnapshot = snapshot;
         return true;
     }
+
+    internal static bool CanShareSampledImageUse(ImageResource left, ImageResource right) =>
+        left.ResourceClass == ImageResourceClass.Sampled && right.ResourceClass == ImageResourceClass.Sampled &&
+        !left.Written && !right.Written && !left.Atomic && !right.Atomic && !left.DepthCompare && !right.DepthCompare &&
+        left.Read == right.Read && left.NumericClass == right.NumericClass && left.Dimension == right.Dimension && left.MipMode == right.MipMode &&
+        left.MipCount == right.MipCount && left.ConversionFormat == right.ConversionFormat &&
+        left.ShaderSwizzle == right.ShaderSwizzle && left.Cube == right.Cube && left.R128 == right.R128 &&
+        left.EmulatedCompareFunction == right.EmulatedCompareFunction;
 
     private sealed class SamplerPlan
     {
@@ -1392,8 +1416,16 @@ public static class ResourceMaterializer
         public uint SamplerCount;
     }
 
-    private static IEnumerable<uint> ImageCandidates(IReadOnlyList<ImageSpecialization> images, uint root)
+    private static IEnumerable<uint> ImageCandidates(IReadOnlyList<ImageSpecialization> images, uint root,
+        IReadOnlyList<(uint Root, uint Candidate)>? sharedCandidates = null)
     {
+        if (sharedCandidates is { Count: > 0 })
+        {
+            var found = false;
+            foreach (var entry in sharedCandidates)
+                if (entry.Root == root) { found = true; yield return entry.Candidate; }
+            if (found) yield break;
+        }
         yield return root;
         for (var index = 0; index < images.Count; index++)
             if (index != root && images[index].IndirectRoot == root) yield return (uint)index;
@@ -1401,7 +1433,8 @@ public static class ResourceMaterializer
 
     // A sampler that some pair uses with a point-only image needs a point-filtering
     // copy; when every pair does, the sampler itself switches.
-    private static bool BuildSamplerPlan(ShaderResourceInfo info, IReadOnlyList<ImageSpecialization> images, out SamplerPlan plan)
+    private static bool BuildSamplerPlan(ShaderResourceInfo info, IReadOnlyList<ImageSpecialization> images, out SamplerPlan plan,
+        IReadOnlyList<(uint Root, uint Candidate)>? sharedCandidates = null)
     {
         plan = new SamplerPlan();
         if (info.Samplers.Count > plan.PointSampler.Length)
@@ -1419,7 +1452,7 @@ public static class ResourceMaterializer
                 return false;
             }
 
-            foreach (var candidate in ImageCandidates(images, pair.Image))
+            foreach (var candidate in ImageCandidates(images, pair.Image, sharedCandidates))
             {
                 var image = images[(int)candidate];
                 usage[pair.Sampler] |= RequiresPointSampler(image.NumericClass, image.ConversionFormat) ? (byte)2 : (byte)1;
@@ -1530,22 +1563,32 @@ public static class ResourceMaterializer
             image.IndirectResources = [];
         }
 
-        for (var index = 0; index < info.Images.Count; index++)
+        if (specialization.IndirectImageCandidates.Count != 0)
         {
-            var root = info.Images[index].IndirectRoot;
-            if (root != DescriptorConstants.NoIndex)
+            foreach (var entry in specialization.IndirectImageCandidates)
             {
-                info.Images[(int)root].IndirectResources.Add((uint)index);
+                if (entry.Root >= info.Images.Count || entry.Candidate >= info.Images.Count)
+                    throw new ResourcePlanException("shared image candidate is outside the specialized resource table");
+                info.Images[(int)entry.Root].IndirectResources.Add(entry.Candidate);
+            }
+        }
+        else
+        {
+            for (var index = 0; index < info.Images.Count; index++)
+            {
+                var root = info.Images[index].IndirectRoot;
+                if (root != DescriptorConstants.NoIndex)
+                    info.Images[(int)root].IndirectResources.Add((uint)index);
             }
         }
 
-        if (!BuildSamplerPlan(source, specialization.Images, out var samplerPlan))
+        if (!BuildSamplerPlan(source, specialization.Images, out var samplerPlan, specialization.IndirectImageCandidates))
         {
             throw new ResourcePlanException($"shader resource specialization exceeds the sampler limit: hash=0x{plan.Hash:X16}");
         }
 
         foreach (var pair in source.SampledPairs)
-            foreach (var candidate in ImageCandidates(specialization.Images, pair.Image).Skip(1))
+            foreach (var candidate in ImageCandidates(specialization.Images, pair.Image, specialization.IndirectImageCandidates).Where(candidate => candidate != pair.Image))
                 info.SampledPairs.Add(new SampledImagePair { Image = candidate, Sampler = pair.Sampler, FirstUsePc = pair.FirstUsePc });
 
         for (var index = 0; index < source.Samplers.Count; index++)
@@ -1653,7 +1696,7 @@ public static class ResourceMaterializer
                 finiteSamplersByMemory[index] = finite;
             }
             var samplerCandidates = source.Samplers[(int)sampler].Candidates?.Select(candidate => candidate.Sampler) ?? [sampler];
-            foreach (var imageCandidate in ImageCandidates(specialization.Images, memory.Resource))
+            foreach (var imageCandidate in ImageCandidates(specialization.Images, memory.Resource, specialization.IndirectImageCandidates))
                 foreach (var samplerCandidate in samplerCandidates)
                     samplerByImageMemory[(index, imageCandidate, samplerCandidate)] = ResolveSampler(samplerCandidate, info.Images[(int)imageCandidate]);
             if (RequiresPointSampler(image.NumericClass, image.ConversionFormat))

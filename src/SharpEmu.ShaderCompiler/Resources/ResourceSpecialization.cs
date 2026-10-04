@@ -37,11 +37,13 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public int BaseBufferCount { get; init; }
     public List<BufferSpecialization> Buffers { get; init; } = [];
     public List<ImageSpecialization> Images { get; init; } = [];
+    public List<(uint Root, uint Candidate)> IndirectImageCandidates { get; init; } = [];
     public List<BufferCandidateTableSpecialization> BufferCandidateTables { get; init; } = [];
 
     public bool Equals(ResourceSpecialization? other) =>
         other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
-        Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables);
+        Images.SequenceEqual(other.Images) && IndirectImageCandidates.SequenceEqual(other.IndirectImageCandidates) &&
+        BufferCandidateTables.SequenceEqual(other.BufferCandidateTables);
 
     public override bool Equals(object? obj) => Equals(obj as ResourceSpecialization);
 
@@ -59,6 +61,8 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
             hash.Add(image);
         }
 
+        foreach (var candidate in IndirectImageCandidates) hash.Add(candidate);
+
         foreach (var table in BufferCandidateTables)
         {
             hash.Add(table);
@@ -72,6 +76,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
         BaseBufferCount = BaseBufferCount,
         Buffers = [.. Buffers],
         Images = [.. Images],
+        IndirectImageCandidates = [.. IndirectImageCandidates],
         BufferCandidateTables = [.. BufferCandidateTables],
     };
 
