@@ -122,6 +122,18 @@ public sealed class Gen5InterpolationParameterTests
         ValidateWhenAvailable(shader.Spirv);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EarlyDepthRequest_ControlsFragmentExecutionMode(bool earlyTests)
+    {
+        var request = Request(0, false, opcode: "VInterpP2F32", earlyTests: earlyTests);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Equal(earlyTests, Instructions(shader.Spirv).Any(item => item.Opcode == SpirvOp.ExecutionMode &&
+            item.Operands[1] == (uint)SpirvExecutionMode.EarlyFragmentTests));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
     [Fact]
     public void PullModel_DoesNotSilentlyUseZeroCoordinates()
     {
@@ -315,7 +327,7 @@ public sealed class Gen5InterpolationParameterTests
 
     private static ShaderCompileRequest Request(
         uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32",
-        uint inputCntl = 0x401, bool supportsPerVertex = true, uint? fixedSample = null)
+        uint inputCntl = 0x401, bool supportsPerVertex = true, uint? fixedSample = null, bool earlyTests = false)
     {
         var interpolation = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp, opcode,
             [selector], [Gen5Operand.Vector(selector)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 2));
@@ -326,6 +338,7 @@ public sealed class Gen5InterpolationParameterTests
             PixelInputAddress = inputs,
             PixelInputEnable = inputs,
             PixelInterpolationSample = fixedSample,
+            EarlyFragmentTests = earlyTests,
             PixelInputCntl = [0, inputCntl],
             PixelCustomInterpolationMask = custom ? 2u : 0u,
             SupportsPerVertexPixelInputs = supportsPerVertex,

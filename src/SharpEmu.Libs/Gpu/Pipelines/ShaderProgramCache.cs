@@ -639,6 +639,7 @@ internal sealed class ShaderProgramCache
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     PixelOutputs = options.PixelOutputs,
+                    EarlyFragmentTests = info.EarlyDepth,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
                     SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,

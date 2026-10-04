@@ -22,6 +22,25 @@ public sealed class ShaderProgramCacheTests : IDisposable
     private const uint Format32x4Float = 77;
 
     [Fact]
+    public void EarlyDepthStateReachesCompilerAndSeparatesCachedPrograms()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        ShaderProgram CompilePixel(bool early)
+        {
+            var cursor = 0u;
+            return _guest.Programs.GetOrCompile(source,
+                new StageCompileOptions { PixelInfo = new PixelInputInfo { EarlyDepth = early } },
+                ref cursor, out _);
+        }
+        var late = CompilePixel(false);
+        var early = CompilePixel(true);
+        Assert.NotEqual(late, early);
+        Assert.Equal(late, CompilePixel(false));
+        Assert.Equal(new[] { false, true }, _guest.Compiler.Requests.Select(request => request.EarlyFragmentTests));
+    }
+
+    [Fact]
     public void EmbeddedFetchIsReplacedBeforeTheProgramRequestsResourceTables()
     {
         _guest.RegisterProgram(CodeA, HeaderA,

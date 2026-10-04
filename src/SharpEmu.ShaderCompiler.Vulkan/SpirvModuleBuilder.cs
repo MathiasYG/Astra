@@ -240,6 +240,7 @@ public enum SpirvExecutionModel : uint
 public enum SpirvExecutionMode : uint
 {
     OriginUpperLeft = 7,
+    EarlyFragmentTests = 9,
     DepthReplacing = 12,
     LocalSize = 17,
 }

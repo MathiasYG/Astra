@@ -122,7 +122,8 @@ public static class PixelStageInputResolver
             KillEnable = control.KillEnable,
             DepthExportEnable = control.DepthExportEnable,
             SampleMaskExportEnable = control.MaskExportEnable,
-            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable && !control.MaskExportEnable,
+            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
+                !control.MaskExportEnable && !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0,
             ExecuteOnNoop = control.ExecuteOnNoop,
         };
     }

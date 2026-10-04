@@ -179,6 +179,7 @@ public sealed class ShaderCompileRequest
     // Explicit interpolation sample without requiring a fragment invocation per sample.
     // The caller must select a sample valid for the pipeline's rasterization count.
     public uint? PixelInterpolationSample { get; init; }
+    public bool EarlyFragmentTests { get; init; }
     public uint PixelCustomInterpolationMask { get; init; }
 
     // False when the device cannot read one vertex's value of a pixel input (PerVertexKHR).

@@ -521,6 +521,8 @@ public static partial class Gen5SpirvTranslator
                 if (_stage == Gen5SpirvStage.Pixel)
                 {
                     _module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+                    if (_request.EarlyFragmentTests)
+                        _module.AddExecutionMode(main, SpirvExecutionMode.EarlyFragmentTests);
                 }
                 else if (_stage == Gen5SpirvStage.Compute)
                 {
