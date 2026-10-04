@@ -506,9 +506,9 @@ public sealed partial class ScalarValueGraph
                     return;
                 case "SBitreplicateB64B32":
                 {
-                    var replicated = Read(instruction.Sources[0], state);
-                    state.WriteScalar(destinationRegister, replicated);
-                    state.WriteScalar(destinationRegister + 1, replicated);
+                    var source = Read(instruction.Sources[0], state);
+                    state.WritePair(destinationRegister, ReplicateBits16(source),
+                        ReplicateBits16(Binary(ScalarOperation.ShiftRightLogical32, source, _graph.Constant(16u))));
                     return;
                 }
                 case "SMovkI32":
@@ -1858,6 +1858,28 @@ public sealed partial class ScalarValueGraph
 
         private ScalarValue Unary(ScalarOperation operation, ScalarValue value) =>
             _graph.Operation(operation, ScalarValueType.U32, value);
+
+        private ScalarValue ReplicateBits16(ScalarValue source)
+        {
+            var value = Binary(ScalarOperation.And32, source, _graph.Constant(0xFFFFu));
+            foreach (var (shift, mask) in new (uint Shift, uint Mask)[]
+            {
+                (8, 0x00FF_00FF),
+                (4, 0x0F0F_0F0F),
+                (2, 0x3333_3333),
+                (1, 0x5555_5555),
+            })
+            {
+                value = Binary(
+                    ScalarOperation.And32,
+                    Binary(ScalarOperation.Or32, value,
+                        Binary(ScalarOperation.ShiftLeft32, value, _graph.Constant(shift))),
+                    _graph.Constant(mask));
+            }
+
+            return Binary(ScalarOperation.Or32, value,
+                Binary(ScalarOperation.ShiftLeft32, value, _graph.Constant(1u)));
+        }
 
         private ScalarValue Binary(ScalarOperation operation, ScalarValue left, ScalarValue right) =>
             _graph.Operation(operation, ScalarValueType.U32, left, right);
