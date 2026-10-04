@@ -22,7 +22,7 @@ internal static partial class RegisterWriters
                      DbCountControl, DbRenderOverride2, DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl,
                      TaBcBaseAddr, TaBcBaseAddrHi, CbDccControl, PaSuPointSize, PaSuPointMinMax, DbAlphaToMask, VgtDrawPayloadCntl,
                      VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaSuVtxCntl, PaScFovWindowLr, PaScFovWindowTb, PaScModeCntl1,
-                     PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PsShaderSampleExclusionMask, PaScBinnerCntl0, PaScBinnerCntl1,
+                     PaScBinnerCntl0, PaScBinnerCntl1,
                      PaScConservativeRasterizationCntl,
                  })
         {
@@ -168,12 +168,16 @@ internal static partial class RegisterWriters
                      CbDccControl, DbCountControl, DbSResultsCompareState0, DbSResultsCompareState1, DbRenderOverride2,
                      DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl, TaBcBaseAddr, TaBcBaseAddrHi, PaSuPointSize, PaSuPointMinMax,
                      SpiTmpringSize, VgtDrawPayloadCntl, VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaScFovWindowLr, PaScFovWindowTb, PaScFsrEnable,
-                     FsrRecursions0, FsrRecursions1, PaScModeCntl1, PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PaSuVtxCntl, PsShaderSampleExclusionMask,
+                     FsrRecursions0, FsrRecursions1, PaScModeCntl1, PaSuVtxCntl,
                      PaScBinnerCntl0, PaScBinnerCntl1, PaScConservativeRasterizationCntl, DbAlphaToMask,
                  })
         {
             indirect[offset] = IgnoreEntry;
         }
+
+        indirect[PsShaderSampleExclusionMask] = static (banks, _, value) => banks.Context.ShaderSampleExclusionMask = value;
+        indirect[PaScAaMaskX0Y0X1Y0] = static (banks, _, value) => banks.Context.SampleCoverageMaskX0Y0X1Y0 = value;
+        indirect[PaScAaMaskX0Y1X1Y1] = static (banks, _, value) => banks.Context.SampleCoverageMaskX0Y1X1Y1 = value;
 
         indirect[SpiVsOutConfig] = static (banks, _, value) => banks.Context.ShaderInterface.VertexOutputConfiguration = value;
         indirect[DbRenderOverride] = static (banks, _, value) => banks.Context.DepthRenderOverride = DepthRenderOverrideRegisters.Decode(value);

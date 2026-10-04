@@ -33,6 +33,35 @@ public sealed class RegisterWriteTableTests
     private static uint Float(float value) => BitConverter.SingleToUInt32Bits(value);
 
     [Fact]
+    public void SampleMaskWritesPreserveValuesAndFollowingRegisters()
+    {
+        var banks = NewBanks();
+        Assert.Equal(1u, WriteContext(banks, PsShaderSampleExclusionMask, 0xFFFE));
+        Assert.Equal(2u, WriteContext(banks, PaScAaMaskX0Y0X1Y0, 0x00010002, 0x00040008));
+        Assert.Equal(0xFFFEu, banks.Context.ShaderSampleExclusionMask);
+        Assert.Equal(0x00010002u, banks.Context.SampleCoverageMaskX0Y0X1Y0);
+        Assert.Equal(0x00040008u, banks.Context.SampleCoverageMaskX0Y1X1Y1);
+    }
+
+    [Fact]
+    public void SamplePositionsDecodeSignedOffsetsAndQuadPixels()
+    {
+        var locations = new SampleLocationRegisters();
+        locations.Locations[0] = 0x00000C04;
+        locations.Locations[4] = 0x0000040C;
+        locations.Locations[8] = 0x00000088;
+        locations.Locations[15] = 0x77000000;
+        Assert.Equal((0.75f, 0.5f), locations.Position(0, 0));
+        Assert.Equal((0.25f, 0.5f), locations.Position(0, 1));
+        Assert.Equal((0.25f, 0.5f), locations.Position(1, 0));
+        Assert.Equal((0.75f, 0.5f), locations.Position(1, 1));
+        Assert.Equal((0f, 0f), locations.Position(2, 0));
+        Assert.Equal((0.9375f, 0.9375f), locations.Position(3, 15));
+        Assert.Throws<ArgumentOutOfRangeException>(() => locations.Position(4, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => locations.Position(0, 16));
+    }
+
+    [Fact]
     public void DirectWriters_DecodeDepthControlAndModeControl()
     {
         var banks = NewBanks();

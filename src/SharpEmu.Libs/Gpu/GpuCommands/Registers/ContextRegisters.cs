@@ -292,6 +292,17 @@ public sealed class SampleLocationRegisters
     public ulong CentroidPriority;
     public uint[] Locations = new uint[LocationCount];
 
+    // Four-bit signed offsets per coordinate, relative to the pixel center.
+    public (float X, float Y) Position(uint pixel, uint sample)
+    {
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pixel, 4u);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(sample, 16u);
+        var packed = Locations[pixel * 4 + sample / 4] >> (int)((sample % 4) * 8);
+        var x = (int)(packed << 28) >> 28;
+        var y = (int)(packed << 24) >> 28;
+        return ((x + 8) / 16f, (y + 8) / 16f);
+    }
+
     public SampleLocationRegisters Copy()
     {
         var copy = (SampleLocationRegisters)MemberwiseClone();
@@ -367,6 +378,9 @@ public sealed class ContextRegisters
     public DepthRenderOverrideRegisters DepthRenderOverride;
     public ScanModeRegisters ScanMode = new();
     public SampleLocationRegisters SampleLocations = new();
+    public uint ShaderSampleExclusionMask;
+    public uint SampleCoverageMaskX0Y0X1Y0 = uint.MaxValue;
+    public uint SampleCoverageMaskX0Y1X1Y1 = uint.MaxValue;
     public AntialiasingConfigRegisters AntialiasingConfig;
     public uint ShaderStages;
     public DepthTargetWords DepthTarget;
