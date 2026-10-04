@@ -46,11 +46,13 @@ public sealed class ShaderResourcePlan
     private readonly object _compileGate = new();
     private CompiledResourceEvaluator? _compiledEvaluator;
     private int _compiledEvaluatorState;
+    private bool _resourceTrackingComplete;
 
     internal CompiledResourceEvaluator? CompiledEvaluator
     {
         get
         {
+            if (!_resourceTrackingComplete) return null;
             if (Volatile.Read(ref _compiledEvaluatorState) == 2) return _compiledEvaluator;
             if (Interlocked.CompareExchange(ref _compiledEvaluatorState, 1, 0) == 0) CompiledResourceEvaluator.Enqueue(this);
             return null;
@@ -61,6 +63,7 @@ public sealed class ShaderResourcePlan
     {
         lock (_compileGate)
         {
+            if (!_resourceTrackingComplete) return null;
             if (Volatile.Read(ref _compiledEvaluatorState) == 2) return _compiledEvaluator;
             CompiledResourceEvaluator? compiled;
             try
@@ -216,6 +219,7 @@ public sealed class ShaderResourcePlan
         }
 
         plan.WrittenRangeSlotByHandle = writtenSlots;
+        plan._resourceTrackingComplete = true;
         return plan;
     }
 
