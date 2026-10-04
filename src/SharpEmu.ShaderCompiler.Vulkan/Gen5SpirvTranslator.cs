@@ -1030,6 +1030,10 @@ public static partial class Gen5SpirvTranslator
                     {
                         _module.AddDecoration(variable, SpirvDecoration.Flat);
                     }
+                    else
+                    {
+                        DecorateSampleInterpolant(variable);
+                    }
 
                     _pixelInputs.Add(attribute, variable);
                     _interfaces.Add(variable);

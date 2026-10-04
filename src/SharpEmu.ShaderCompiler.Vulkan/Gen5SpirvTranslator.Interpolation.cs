@@ -23,6 +23,19 @@ public static partial class Gen5SpirvTranslator
         private const uint InterpolateAtSample = 77;
         private const uint InterpolateAtOffset = 78;
 
+        private void DecorateSampleInterpolant(uint variable)
+        {
+            // Only a single active interpolation mode establishes one sample position
+            // for ordinary VINTRP inputs. Mixed modes require source-aware lowering.
+            var modes = _pixelInputEnable & _pixelInputAddress & 0x7Fu;
+            if (modes is not (0x1u or 0x10u))
+                return;
+            _module.AddCapability(SpirvCapability.SampleRateShading);
+            if (modes == 0x10u)
+                _module.AddDecoration(variable, SpirvDecoration.NoPerspective);
+            _module.AddDecoration(variable, SpirvDecoration.Sample);
+        }
+
         private void DeclareInterpolationParameters()
         {
             foreach (var instruction in _request.Program.Instructions)

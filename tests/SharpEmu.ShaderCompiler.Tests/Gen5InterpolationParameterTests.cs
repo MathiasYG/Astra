@@ -72,6 +72,35 @@ public sealed class Gen5InterpolationParameterTests
         ValidateWhenAvailable(shader.Spirv);
     }
 
+    [Theory]
+    [InlineData(1u, false)]
+    [InlineData(0x10u, true)]
+    public void SingleSampleModeQualifiesOrdinaryInterpolants(uint inputs, bool noPerspective)
+    {
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(
+            Request(0, false, inputs, "VInterpP2F32", inputCntl: 0), out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        var sample = Assert.Single(instructions, item => item.Opcode == SpirvOp.Decorate &&
+            item.Operands[1] == (uint)SpirvDecoration.Sample);
+        Assert.Equal(noPerspective, instructions.Any(item => item.Opcode == SpirvOp.Decorate &&
+            item.Operands[0] == sample.Operands[0] && item.Operands[1] == (uint)SpirvDecoration.NoPerspective));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(3u, 0u)]
+    [InlineData(0x11u, 0u)]
+    [InlineData(1u, 0x400u)]
+    [InlineData(0x10u, 0x400u)]
+    public void MixedModesAndFlatInputsAreNotSampleQualified(uint inputs, uint inputCntl)
+    {
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(
+            Request(0, false, inputs, "VInterpP2F32", inputCntl), out var shader, out var error), error);
+        Assert.DoesNotContain(Instructions(shader.Spirv), item => item.Opcode == SpirvOp.Decorate &&
+            item.Operands[1] == (uint)SpirvDecoration.Sample);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
     [Fact]
     public void PullModel_DoesNotSilentlyUseZeroCoordinates()
     {
