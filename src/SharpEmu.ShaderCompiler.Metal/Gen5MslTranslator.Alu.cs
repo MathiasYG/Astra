@@ -1560,6 +1560,17 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            if (instruction.Opcode is "SBitset0B64" or "SBitset1B64")
+            {
+                var bitIndex = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
+                var current = Temp("ulong", Scalar64Expression(destination));
+                var updated = Temp("ulong", instruction.Opcode == "SBitset0B64"
+                    ? $"{current} & ~(1ul << {bitIndex})"
+                    : $"{current} | (1ul << {bitIndex})");
+                StoreScalar64(destination, updated);
+                return true;
+            }
+
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {

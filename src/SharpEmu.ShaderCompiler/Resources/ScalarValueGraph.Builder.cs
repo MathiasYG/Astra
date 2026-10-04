@@ -657,6 +657,21 @@ public sealed partial class ScalarValueGraph
             }
 
             var left = Read(instruction.Sources[0], state);
+            if (opcode is "SBitset0B64" or "SBitset1B64")
+            {
+                var bitIndex = Binary(ScalarOperation.And32, left, _graph.Constant(63u));
+                var bit = Binary(ScalarOperation.ShiftLeft32, _graph.Constant(1u),
+                    Binary(ScalarOperation.And32, bitIndex, _graph.Constant(31u)));
+                var mask = opcode == "SBitset0B64" ? Unary(ScalarOperation.Not32, bit) : bit;
+                var operation = opcode == "SBitset0B64" ? ScalarOperation.And32 : ScalarOperation.Or32;
+                var isLow = Bool(ScalarOperation.ULessThan32, bitIndex, _graph.Constant(32u));
+                var low = state.Scalars[destinationRegister];
+                var high = state.Scalars[destinationRegister + 1];
+                state.WritePair(destinationRegister,
+                    _graph.Select(isLow, Binary(operation, low, mask), low),
+                    _graph.Select(isLow, high, Binary(operation, high, mask)));
+                return;
+            }
             switch (opcode)
             {
                 case "SNotB32":

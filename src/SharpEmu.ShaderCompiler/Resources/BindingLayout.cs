@@ -465,7 +465,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             }
         }
 
-        var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+        var width = instruction.Opcode is "SBitset0B64" or "SBitset1B64" ? 1u :
+            instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
         foreach (var source in instruction.Sources)
         {
             if (source.Kind == Gen5OperandKind.ScalarRegister)
@@ -479,14 +480,14 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var comparesDestination = instruction.Encoding == Gen5ShaderEncoding.Sopk &&
             instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal);
         if (comparesDestination ||
-            instruction.Opcode is "SBitset0B32" or "SBitset1B32" ||
+            instruction.Opcode is "SBitset0B32" or "SBitset1B32" or "SBitset0B64" or "SBitset1B64" ||
             instruction.Encoding == Gen5ShaderEncoding.Sopk && instruction.Opcode is "SAddkI32" or "SMulkI32" or "SCmovkI32")
         {
             foreach (var destination in instruction.Destinations)
             {
                 if (destination.Kind == Gen5OperandKind.ScalarRegister)
                 {
-                    Use(destination.Value, 1);
+                    Use(destination.Value, instruction.Opcode is "SBitset0B64" or "SBitset1B64" ? 2u : 1u);
                 }
             }
         }
