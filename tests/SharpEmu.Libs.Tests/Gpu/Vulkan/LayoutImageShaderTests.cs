@@ -22,6 +22,66 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // selection, the duplicated point sampler, and the per-mip storage descriptors.
 public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestOutputHelper output) : IClassFixture<HeadlessVulkanFixture>
 {
+    [Theory]
+    [InlineData(0u, 0.5f)]
+    [InlineData(1u, 1f)]
+    public void FiniteSamplersUseTheFilterSelectedAtTheDescriptorLoad(uint compare, float expected)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var prefix = DirectImageTableTests.FiniteBufferImageProgram(compare: compare).Instructions.Where(i => i.Pc < 48);
+        var program = Program([.. prefix,
+            ScalarBufferLoad(48, 0, 28, 4, immediateOffset: 256, dynamicOffsetRegister: 106),
+            // A later write must not change the descriptor selected by the earlier load.
+            MoveScalar(56, 106, 12345),
+            MoveVector(64, 6, BitConverter.SingleToUInt32Bits(0.5f)),
+            MoveVector(72, 7, BitConverter.SingleToUInt32Bits(0.5f)),
+            Image(80, "ImageSampleLz", 16, 28, dmask: 1, vectorAddress: 6),
+            BufferAccess(88, "BufferStoreDword", ResultRegister, vectorData: 4), EndProgram(96)]);
+        var registers = UserData();
+        registers[0] = 0x1000; registers[2] = 4096;
+        var words = new uint[4096 / 4];
+        for (var candidate = 0; candidate <= 5; candidate++)
+        {
+            var offset = candidate * 384 / 4;
+            new uint[] { 0x2000, Format32Float << 20, 3, 0xFAC | (9u << 28), 0, 0, 0, 0 }.CopyTo(words, offset);
+            new uint[] { 0x92, 0xFFF000, candidate == 5 ? 0x05500000u : 0x05000000u, 0 }.CopyTo(words, offset + 64);
+        }
+        var memory = new TestWordMemory { Base = 0x1000, Words = words, RequireAlignment = true };
+        var plan = Extract(program, userDataCount: 12);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(registers, readMemory: memory.Read, readCleanMemory: memory.Read),
+            ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 12),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var guest = runner.CreateBuffer(MemoryMarshal.AsBytes(words.AsSpan()));
+        var result = runner.CreateBuffer(ResultBytes);
+        var description = Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 4, 1, 1);
+        var image = harness.CreateImage(description);
+        float[] texels = [0, 0, 1, 1];
+        harness.UploadImage(image, MemoryMarshal.AsBytes<float>(texels), ImageTestHarness.WholeImageCopies(description, 0));
+        var bound = layout.Descriptors.Where(binding => ImageDescriptorBinding.ResourceClass(binding.Kind) != ImageResourceClass.None)
+            .ToDictionary(binding => binding.Kind, binding => binding.Resources.Select(_ => SampledView(image)).ToArray());
+        bound[DescriptorBindingKind.Samplers] = snapshot.Samplers.Select(sampler => new DescriptorImageInfo
+            { Sampler = runner.CreateSampler((sampler[2] & 0x00500000) != 0 ? Filter.Linear : Filter.Nearest) }).ToArray();
+        var buffers = snapshot.Buffers.Select(buffer => buffer[0] == 0x1000 ? guest : result).ToArray();
+        harness.Run(() =>
+        {
+            image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, new CommandBuffer(harness.Scheduler.Current.Handle));
+            runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = buffers },
+                1, flattenedTable: snapshot.FlattenedResourceTable, boundImages: bound);
+        });
+        Assert.Equal(expected, BitConverter.ToSingle(runner.ReadBack(result, 0, ResultBytes)));
+        harness.AssertNoValidationMessages();
+        output.WriteLine($"Finite sampler filter readback on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
     [Fact]
     public void WorkgroupSelectedImagesUseTheExecutedDescriptorOffset()
     {

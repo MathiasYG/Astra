@@ -4973,9 +4973,33 @@ public static partial class Gen5SpirvTranslator
         private bool TryEmitImage(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
-            out string error)
+            out string error,
+            uint? fixedSampler = null)
         {
             error = string.Empty;
+            if (fixedSampler is null && _request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) &&
+                _request.Resources.FiniteSamplersByMemoryIndex.TryGetValue(memoryIndex, out var finite))
+            {
+                if (finite.Candidates is not { Count: > 0 } candidates ||
+                    !_indirectKeyScratch.TryGetValue(finite.SelectorMemoryIndex, out var scratch))
+                {
+                    error = "finite sampler has no executed selector read";
+                    return false;
+                }
+                var key = Load(_uintType, scratch);
+                var emitted = true;
+                var caseError = string.Empty;
+                foreach (var candidate in candidates)
+                {
+                    EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, key, UInt(candidate.Offset)), () =>
+                    {
+                        if (!TryEmitImage(instruction, image, out caseError, candidate.Sampler)) emitted = false;
+                    });
+                    if (!emitted) break;
+                }
+                error = caseError;
+                return emitted;
+            }
             SpirvImageResource resource;
             uint imageObject;
             uint dstSelect;
@@ -4992,7 +5016,7 @@ public static partial class Gen5SpirvTranslator
                         EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, selector, UInt((uint)index)), () =>
                         {
                             if (!TryResolveLayoutImage(instruction, image, out var caseResource, out var caseImageObject, out var caseDstSelect, out caseError,
-                                    elementCase))
+                                    elementCase, fixedSampler))
                             {
                                 emitted = false;
                                 return;
@@ -5018,7 +5042,8 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                if (!TryResolveLayoutImage(instruction, image, out resource, out imageObject, out dstSelect, out error))
+                if (!TryResolveLayoutImage(instruction, image, out resource, out imageObject, out dstSelect, out error,
+                        fixedSampler: fixedSampler))
                 {
                     return false;
                 }

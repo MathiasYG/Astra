@@ -426,7 +426,7 @@ public sealed class DirectImageTableTests
             source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
     }
 
-    private static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
+    public static Gen5ShaderProgram FiniteBufferImageProgram(bool unknown = false, bool expandExec = false,
         uint sourceSelect = 6, uint multiplier = 3, uint compare = 0, bool splitMultiply = false, bool packedWord = false)
     {
         var fullWord = new Gen5SdwaControl(6, 0, sourceSelect, 6, false, false, 0, 0, 0, false, null);
@@ -593,7 +593,7 @@ public sealed class DirectImageTableTests
     }
 
     [Fact]
-    public void FiniteSamplersUseOneBindingOnlyAfterEveryCandidateMatches()
+    public void FiniteSamplersPreserveDifferentReadableCandidatesAndRejectUnreadableOnes()
     {
         var program = FiniteBufferImageProgram() with
         {
@@ -605,7 +605,7 @@ public sealed class DirectImageTableTests
         var plan = Extract(program, userDataCount: 4);
         var source = plan.DescriptorSources[(int)plan.Info.Samplers[0].Source];
         Assert.Null(source.ZeroExtentBufferSource);
-        Assert.Equal(4, source.EquivalentSamplerSources!.Count);
+        Assert.Equal(4, source.FiniteSamplerSources!.Count);
         var mismatch = false;
         var unreadable = false;
         bool Read(ulong address, out uint word)
@@ -632,17 +632,22 @@ public sealed class DirectImageTableTests
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
-        Assert.Equal(new uint[] { 0, 0, 0x10, 0 }, Assert.Single(snapshot.Samplers));
+        Assert.Equal(4, snapshot.Samplers.Length);
+        Assert.All(snapshot.Samplers, sampler => Assert.Equal(new uint[] { 0, 0, 0x10, 0 }, sampler));
         Assert.Equal(0, dirtyReads);
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 4),
             false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout)
             { LocalSizeX = 64, ThreadCountX = 64 }, out _, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout)
+            { LocalSizeX = 64, ThreadCountX = 64 }, out _, out var metalError), metalError);
         var prior = snapshot;
         mismatch = true;
-        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
-        Assert.Same(prior, snapshot);
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Equal(1u, snapshot.Samplers[^1][0]);
+        Assert.Equal(0u, snapshot.Samplers[0][0]);
+        prior = snapshot;
         mismatch = false;
         unreadable = true;
         Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));

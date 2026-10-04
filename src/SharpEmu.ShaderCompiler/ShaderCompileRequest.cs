@@ -86,9 +86,10 @@ public sealed class ShaderCompileRequest
 
         FlattenedSlotByMemoryIndex = new Dictionary<int, uint>(plan.FlattenedSlotByMemoryIndex);
         FlattenedTableReservedWords = (uint)plan.FlattenedTableReservedCount;
-        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).ToHashSet();
+        var samplerKeys = resources.FiniteSamplersByMemoryIndex.Values.Select(sampler => sampler.SelectorMemoryIndex).ToArray();
+        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).Concat(samplerKeys).ToHashSet();
         IndirectOffsetKeyMemoryIndices = plan.IndirectImages.Where(access => access.KeyIsAddressOffset)
-            .Select(access => access.Key.MemoryIndex).ToHashSet();
+            .Select(access => access.Key.MemoryIndex).Concat(samplerKeys).ToHashSet();
         IndirectRootByMemoryIndex = plan.IndirectImages.ToDictionary(access => access.MemoryIndex, access => access.Key.MemoryIndex);
 
         var writtenSlots = new Dictionary<int, uint>();

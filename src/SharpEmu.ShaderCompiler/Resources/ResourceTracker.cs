@@ -333,6 +333,9 @@ public sealed partial class ResourceTracker
                         (workgroup.Key is null) != (otherWorkgroup.Key is null) ||
                         workgroup.Key is not null && !_graph.Equivalent(workgroup.Key, otherWorkgroup.Key!)) ||
                 current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
+                current.SamplerSelectorMemoryIndex != source.SamplerSelectorMemoryIndex ||
+                (current.FiniteSamplerSources is null) != (source.FiniteSamplerSources is null) ||
+                current.FiniteSamplerSources is { } finiteSources && !finiteSources.SequenceEqual(source.FiniteSamplerSources!) ||
                 (current.EquivalentSamplerSources is null) != (source.EquivalentSamplerSources is null) ||
                 current.EquivalentSamplerSources is { } samplerSources &&
                     !samplerSources.SequenceEqual(source.EquivalentSamplerSources!))
@@ -850,7 +853,25 @@ public sealed partial class ResourceTracker
         }
 
         _info.Samplers.Add(new SamplerResource { Source = source, FirstUsePc = pc });
-        return (uint)(_info.Samplers.Count - 1);
+        var root = (uint)(_info.Samplers.Count - 1);
+        if (_sources[(int)source].FiniteSamplerSources is { } candidates)
+        {
+            var samplers = new List<FiniteSamplerCandidate> { new(candidates[0].Offset, root) };
+            foreach (var candidate in candidates.Skip(1))
+            {
+                var candidateSource = InternSource(new DescriptorSource
+                {
+                    Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray(),
+                    EquivalentSamplerSources = [candidate.Source],
+                });
+                var sampler = AddSampler(candidateSource, pc);
+                if (sampler == DescriptorConstants.NoIndex) return sampler;
+                samplers.Add(new(candidate.Offset, sampler));
+            }
+            _info.Samplers[(int)root].SelectorMemoryIndex = _sources[(int)source].SamplerSelectorMemoryIndex;
+            _info.Samplers[(int)root].Candidates = samplers;
+        }
+        return root;
     }
 
     private void AddSampledPair(uint image, uint sampler, uint pc)
@@ -1141,6 +1162,8 @@ public sealed partial class ResourceTracker
             }
 
             AddSampledPair(image, sampler, memory.Pc);
+            if (_info.Samplers[(int)sampler].Candidates is { } candidates)
+                foreach (var candidate in candidates) AddSampledPair(image, candidate.Sampler, memory.Pc);
         }
 
         AddMemoryPatch(index, image, sampler, memory.NeedsSampler, memory.Pc);

@@ -1593,6 +1593,7 @@ public static class ResourceMaterializer
         }
 
         var samplerByMemory = new Dictionary<int, uint>();
+        var finiteSamplersByMemory = new Dictionary<int, SamplerResource>();
         for (var index = 0; index < plan.Memory.Count; index++)
         {
             var memory = plan.Memory[index];
@@ -1608,6 +1609,18 @@ public static class ResourceMaterializer
             }
 
             var sampler = memory.Sampler;
+            uint ResolveSampler(uint candidate)
+            {
+                if (RequiresPointSampler(image.NumericClass, image.ConversionFormat)) candidate = samplerPlan.PointSampler[candidate];
+                if (image.DepthCompare) candidate = compareSampler[candidate];
+                return candidate;
+            }
+            if (source.Samplers[(int)sampler].Candidates is { } candidates)
+            {
+                var finite = source.Samplers[(int)sampler].Clone();
+                finite.Candidates = candidates.Select(candidate => candidate with { Sampler = ResolveSampler(candidate.Sampler) }).ToArray();
+                finiteSamplersByMemory[index] = finite;
+            }
             if (RequiresPointSampler(image.NumericClass, image.ConversionFormat))
             {
                 sampler = samplerPlan.PointSampler[sampler];
@@ -1624,6 +1637,7 @@ public static class ResourceMaterializer
             }
         }
 
-        return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory };
+        return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory,
+            FiniteSamplersByMemoryIndex = finiteSamplersByMemory };
     }
 }

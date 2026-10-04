@@ -96,9 +96,13 @@ public sealed class SamplerResource
     public uint FirstUsePc { get; set; }
     public bool ForcePointFiltering { get; set; }
     public bool DepthCompare { get; set; }
+    public int SelectorMemoryIndex { get; set; } = -1;
+    public IReadOnlyList<FiniteSamplerCandidate>? Candidates { get; set; }
 
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
+
+public sealed record FiniteSamplerCandidate(uint Offset, uint Sampler);
 
 public sealed class SampledImagePair
 {
@@ -232,6 +236,8 @@ public sealed class DescriptorSource
     // A finite selector can use one native sampler only when all candidate
     // descriptors are identical. Rechecked against clean memory on every draw.
     public IReadOnlyList<uint>? EquivalentSamplerSources { get; init; }
+    public IReadOnlyList<DirectImageCandidate>? FiniteSamplerSources { get; init; }
+    public int SamplerSelectorMemoryIndex { get; init; } = -1;
     // Scalar loads from an empty buffer return zero regardless of the offset.
     // Materialization must recheck the source extent before using these words.
     public uint? ZeroExtentBufferSource { get; init; }

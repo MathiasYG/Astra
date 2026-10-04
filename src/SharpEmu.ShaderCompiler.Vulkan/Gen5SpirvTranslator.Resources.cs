@@ -1490,7 +1490,8 @@ public static partial class Gen5SpirvTranslator
             out uint imageObject,
             out uint dstSelect,
             out string error,
-            (uint Resource, uint Element)? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null,
+            uint? fixedSampler = null)
         {
             error = string.Empty;
             resource = default;
@@ -1565,7 +1566,7 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(samplerIndex));
+                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(fixedSampler ?? samplerIndex));
                 var sampler = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
                 imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);

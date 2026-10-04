@@ -94,4 +94,5 @@ public sealed class SpecializedResourceInfo
 {
     public ShaderResourceInfo Info { get; init; } = new();
     public IReadOnlyDictionary<int, uint> SamplerByMemoryIndex { get; init; } = new Dictionary<int, uint>();
+    public IReadOnlyDictionary<int, SamplerResource> FiniteSamplersByMemoryIndex { get; init; } = new Dictionary<int, SamplerResource>();
 }

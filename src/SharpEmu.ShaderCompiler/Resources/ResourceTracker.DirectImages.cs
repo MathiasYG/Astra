@@ -76,21 +76,28 @@ public sealed partial class ResourceTracker
         }
         if (selector is null || values.Length == 0) return false;
         var candidates = new List<DescriptorSource>();
+        var offsets = new List<uint>();
         foreach (var value in values)
         {
             var replacements = new Dictionary<ScalarValue, ScalarValue> { [selector] = _graph.Constant(value) };
             var memo = new Dictionary<ScalarValue, ScalarValue>();
+            var offset = _graph.Substitute(reads[0].Operands[1], replacements, memo);
+            if (!offset.IsConstant || offset.Type != ScalarValueType.U32 || offsets.Contains(offset.ConstantU32)) return false;
             var candidate = new DescriptorSource
             {
                 Dwords = original.Dwords.Select(word => _graph.Substitute(word, replacements, memo)).ToArray(),
             };
             if (!ValidateSource(candidate, out _)) return false;
             candidates.Add(candidate);
+            offsets.Add(offset.ConstantU32);
         }
+        var sources = candidates.Select(InternSource).ToArray();
         sourceIndex = InternSource(new DescriptorSource
         {
             Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray(),
-            EquivalentSamplerSources = candidates.Select(InternSource).ToArray(),
+            EquivalentSamplerSources = [sources[0]],
+            FiniteSamplerSources = sources.Select((source, index) => new DirectImageCandidate(offsets[index], source)).ToArray(),
+            SamplerSelectorMemoryIndex = reads[0].MemoryIndex,
         });
         return true;
     }

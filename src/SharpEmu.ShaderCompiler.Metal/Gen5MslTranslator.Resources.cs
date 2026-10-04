@@ -724,7 +724,8 @@ public static partial class Gen5MslTranslator
             out uint dstSelect,
             out string mipLevel,
             out string error,
-            (uint Resource, uint Element)? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null,
+            uint? fixedSampler = null)
         {
             error = string.Empty;
             texture = string.Empty;
@@ -814,7 +815,7 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                samplerName = Temp("sampler", $"{ResourcesName}.samplers[{samplerIndex}]");
+                samplerName = Temp("sampler", $"{ResourcesName}.samplers[{fixedSampler ?? samplerIndex}]");
             }
 
             dstSelect = imageInfo.ShaderSwizzle;
