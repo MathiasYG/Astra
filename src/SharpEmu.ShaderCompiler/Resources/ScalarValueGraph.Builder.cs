@@ -1697,9 +1697,8 @@ public sealed partial class ScalarValueGraph
 
             // Retain the instruction identity for bounded lane-read analysis. The
             // value stays opaque to host evaluation: this is not a first-lane read.
-            state.WriteScalar(destination.Value, !lane.IsConstant
-                ? _graph.FirstLane(_graph.Undefined(ScalarValueType.U32), state.Exec, instruction.Pc)
-                : _graph.Undefined(ScalarValueType.U32));
+            state.WriteScalar(destination.Value,
+                _graph.FirstLane(_graph.Undefined(ScalarValueType.U32), state.Exec, instruction.Pc));
         }
 
         // ---- memory instructions ----

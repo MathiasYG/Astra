@@ -477,7 +477,11 @@ public sealed class ScalarValueGraphTests
 
         Assert.Empty(plan.TableReads);
         var access = plan.Accesses[plan.Memory.Count - 1]!;
-        Assert.True(access.Handle!.Operands[0].IsUndefined);
+        var laneRead = access.Handle!.Operands[0];
+        Assert.Equal(ScalarValueKind.FirstLane, laneRead.Kind);
+        Assert.True(laneRead.Operands[0].IsUndefined);
+        Assert.Equal(16UL, laneRead.Payload);
+        Assert.False(new RuntimeValueEvaluator(plan, new ResourceRuntimeInputs()).Evaluate(laneRead, out _));
         Assert.True(plan.Info.UsesDeviceAddresses);
     }
 
