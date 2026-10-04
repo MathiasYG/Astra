@@ -396,15 +396,19 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     [InlineData(1u, 20u, true, false, true, false, false, true)]
     [InlineData(0u, 25u, false, false, false, false, false, false, true)]
     [InlineData(1u, 20u, false, false, false, false, false, false, true)]
-    public void FiniteScalarBufferImageSelectorUsesTheRuntimeOffset(uint compare, uint expected, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false, bool negated = false, bool packedWord = false)
+    [InlineData(0u, 25u, false, false, false, false, false, false, false, true)]
+    [InlineData(1u, 20u, false, false, false, false, false, false, false, true)]
+    public void FiniteScalarBufferImageSelectorUsesTheRuntimeOffset(uint compare, uint expected, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false, bool negated = false, bool packedWord = false, bool wideSecondHalf = false)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan)) return;
-        var (snapshot, request, registers) = DirectImageTableTests.PrepareFiniteBufferImages(compare, laneRead, partialSelector, capturedMask, splitMultiply, afterWaterfall, negated, packedWord);
+        var (snapshot, request, registers) = DirectImageTableTests.PrepareFiniteBufferImages(compare, laneRead, partialSelector, capturedMask, splitMultiply, afterWaterfall, negated, packedWord, wideSecondHalf);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);
         using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
         var result = runner.CreateBuffer(new byte[ResultBytes]);
+        var guest = runner.CreateBuffer(new byte[2048]);
+        var buffers = snapshot.Buffers.Select(buffer => buffer[0] == 0x1000 ? guest : result).ToArray();
         var images = new CachedImage[snapshot.Images.Length];
         var views = new DescriptorImageInfo[images.Length];
         for (var index = 0; index < images.Length; index++)
@@ -422,7 +426,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         {
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
             foreach (var image in images) image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
-            runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] },
+            runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = buffers },
                 1, flattenedTable: snapshot.FlattenedResourceTable, boundImages: bound);
         });
         Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(result, 0, ResultBytes)));

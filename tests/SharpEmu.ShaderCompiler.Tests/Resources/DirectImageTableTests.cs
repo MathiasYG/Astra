@@ -450,7 +450,7 @@ public sealed class DirectImageTableTests
             EndProgram(56));
     }
 
-    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false, bool negated = false, bool packedWord = false)
+    internal static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers) PrepareFiniteBufferImages(uint compare, bool laneRead = false, bool partialSelector = false, bool capturedMask = false, bool splitMultiply = false, bool afterWaterfall = false, bool negated = false, bool packedWord = false, bool wideSecondHalf = false)
     {
         var program = FiniteBufferImageProgram(compare: compare) with
         {
@@ -460,6 +460,12 @@ public sealed class DirectImageTableTests
                 BufferAccess(64, "BufferStoreDword", 8, vectorData: 4), EndProgram(72),
             ]).ToArray(),
         };
+        if (wideSecondHalf)
+        {
+            program = program with { Instructions = program.Instructions.Select(instruction => instruction.Pc == 40
+                ? ScalarBufferLoad(40, 0, 16, 16, dynamicOffsetRegister: 106)
+                : instruction.Pc == 56 ? Image(56, "ImageLoad", 24, dmask: 1, vectorAddress: 4) : instruction).ToArray() };
+        }
         if (laneRead)
         {
             var laneProgram = afterWaterfall ? InvariantAfterWaterfallProgram() : capturedMask ? CapturedMaskLaneProgram(negated: negated) : FiniteLaneReadProgram();
@@ -490,6 +496,7 @@ public sealed class DirectImageTableTests
             word = 0;
             if (address < 0x1000 || address >= 0x1800) return false;
             var relative = address - 0x1000;
+            if (wideSecondHalf) relative = relative >= 32 ? relative - 32 : 0;
             word = (relative % 384 / 4) switch
             {
                 0 => 0x2000u + (uint)(relative / 384) * 0x100,
