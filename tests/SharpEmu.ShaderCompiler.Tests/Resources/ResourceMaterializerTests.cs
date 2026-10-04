@@ -21,11 +21,13 @@ public sealed class ResourceMaterializerTests
     [InlineData(33)]
     [InlineData(64)]
     [InlineData(65)]
+    [InlineData(256)]
+    [InlineData(257)]
     public void MaterialImageCapacityPreservesTheLimitAndPublishedState(int distinctCount)
     {
         var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
         uint[] userData = [0x1000, 224 << 16, (uint)distinctCount, 0, 0x10000, 16 << 16, (uint)distinctCount * 2, 0, 7];
-        var memory = new TestWordMemory { Words = new uint[0x11000 / 4] };
+        var memory = new TestWordMemory { Words = new uint[0x13000 / 4] };
         for (var index = 0; index < distinctCount; index++)
         {
             memory.At(0x1000 + (ulong)index * 224 + 4) = (uint)index;

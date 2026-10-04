@@ -161,9 +161,11 @@ public sealed class BufferCandidateTableInfo
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
-    public const int MaxImages = 64;
+    // Bound materialized tables independently of the guest descriptor count.
+    // Host layouts are sized from the resulting dense resource table.
+    public const int MaxImages = 256;
     public const int MaxSamplers = 32;
-    public const int MaxSampledPairs = 64;
+    public const int MaxSampledPairs = 256;
     public const int NoScalarRegister = -1;
 
     public List<BufferResource> Buffers { get; set; } = [];
