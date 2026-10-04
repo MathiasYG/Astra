@@ -815,7 +815,10 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                samplerName = Temp("sampler", $"{ResourcesName}.samplers[{fixedSampler ?? samplerIndex}]");
+                if (request.Resources.SamplerByImageMemoryIndex.TryGetValue((memoryIndex, (uint)resourceIndex, fixedSampler ?? entry.Sampler), out var candidateSampler))
+                    samplerIndex = candidateSampler;
+                else if (fixedSampler is { } selectedSampler) samplerIndex = selectedSampler;
+                samplerName = Temp("sampler", $"{ResourcesName}.samplers[{samplerIndex}]");
             }
 
             dstSelect = imageInfo.ShaderSwizzle;

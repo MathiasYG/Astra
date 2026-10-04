@@ -1566,7 +1566,10 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(fixedSampler ?? samplerIndex));
+                if (request.Resources.SamplerByImageMemoryIndex.TryGetValue((memoryIndex, (uint)resourceIndex, fixedSampler ?? entry.Sampler), out var candidateSampler))
+                    samplerIndex = candidateSampler;
+                else if (fixedSampler is { } selectedSampler) samplerIndex = selectedSampler;
+                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(samplerIndex));
                 var sampler = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
                 imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);

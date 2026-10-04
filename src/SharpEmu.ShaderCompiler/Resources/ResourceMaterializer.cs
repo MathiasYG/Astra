@@ -1225,7 +1225,8 @@ public static class ResourceMaterializer
                     separateSampledDimensions && !image.Cube && !imageClass.Cube &&
                     image.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray &&
                     imageClass.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
-                if (image.NumericClass != imageClass.NumericClass || !compatibleDimensions ||
+                var separateSampledTypes = separateSampledDimensions && !info.Images[rootIndex].DepthCompare;
+                if ((image.NumericClass != imageClass.NumericClass && !separateSampledTypes) || !compatibleDimensions ||
                     image.MipCount != imageClass.MipCount || image.ConversionFormat != imageClass.ConversionFormat ||
                     image.ShaderSwizzle != imageClass.ShaderSwizzle || image.Cube != imageClass.Cube)
                 {
@@ -1262,6 +1263,19 @@ public static class ResourceMaterializer
         }
 
         Array.Resize(ref snapshot.Samplers, checked((int)samplerPlan.SamplerCount));
+        // Typed candidates use separate sampling instructions. Every statically used
+        // UINT image/sampler pair must remain legal, including candidate combinations
+        // whose runtime keys differ. Do not invent integer linear-filter semantics.
+        foreach (var pair in info.SampledPairs)
+        {
+            if (images[(int)pair.Image].IndirectRoot != pair.Image) continue;
+            if (!ImageCandidates(images, pair.Image).Any(candidate => images[(int)candidate].NumericClass == ImageNumericClass.Uint &&
+                    images[(int)candidate].ConversionFormat == GuestImageFormat.Invalid)) continue;
+            var words = snapshot.Samplers[pair.Sampler];
+            if (words.Length < 4 || ((words[2] >> 20) & 0xF) != 0 ||
+                ((words[2] >> 24) & 3) > 1 || ((words[2] >> 26) & 3) > 1)
+                return Fail("indirect UINT sampled candidates require point filtering");
+        }
         for (var index = 0; index < info.Samplers.Count; index++)
         {
             var target = samplerPlan.PointSampler[index];
@@ -1276,13 +1290,16 @@ public static class ResourceMaterializer
         var compareUsage = new byte[ShaderResourceInfo.MaxSamplers];
         foreach (var pair in info.SampledPairs)
         {
-            var image = info.Images[(int)pair.Image];
-            var specialized = images[(int)pair.Image];
-            var sampler = RequiresPointSampler(specialized.NumericClass, specialized.ConversionFormat)
-                ? samplerPlan.PointSampler[pair.Sampler]
-                : pair.Sampler;
-            var depthCompare = image.DepthCompare && specialized.EmulatedCompareFunction < 0;
-            compareUsage[sampler] |= depthCompare ? (byte)2 : (byte)1;
+            foreach (var candidate in ImageCandidates(images, pair.Image))
+            {
+                var image = info.Images[(int)pair.Image];
+                var specialized = images[(int)candidate];
+                var sampler = RequiresPointSampler(specialized.NumericClass, specialized.ConversionFormat)
+                    ? samplerPlan.PointSampler[pair.Sampler]
+                    : pair.Sampler;
+                var depthCompare = image.DepthCompare && specialized.EmulatedCompareFunction < 0;
+                compareUsage[sampler] |= depthCompare ? (byte)2 : (byte)1;
+            }
         }
 
         for (var index = 0; index < snapshot.Samplers.Length && index < compareUsage.Length; index++)
@@ -1375,6 +1392,13 @@ public static class ResourceMaterializer
         public uint SamplerCount;
     }
 
+    private static IEnumerable<uint> ImageCandidates(IReadOnlyList<ImageSpecialization> images, uint root)
+    {
+        yield return root;
+        for (var index = 0; index < images.Count; index++)
+            if (index != root && images[index].IndirectRoot == root) yield return (uint)index;
+    }
+
     // A sampler that some pair uses with a point-only image needs a point-filtering
     // copy; when every pair does, the sampler itself switches.
     private static bool BuildSamplerPlan(ShaderResourceInfo info, IReadOnlyList<ImageSpecialization> images, out SamplerPlan plan)
@@ -1395,8 +1419,11 @@ public static class ResourceMaterializer
                 return false;
             }
 
-            var image = images[(int)pair.Image];
-            usage[pair.Sampler] |= RequiresPointSampler(image.NumericClass, image.ConversionFormat) ? (byte)2 : (byte)1;
+            foreach (var candidate in ImageCandidates(images, pair.Image))
+            {
+                var image = images[(int)candidate];
+                usage[pair.Sampler] |= RequiresPointSampler(image.NumericClass, image.ConversionFormat) ? (byte)2 : (byte)1;
+            }
         }
 
         for (var index = 0; index < info.Samplers.Count; index++)
@@ -1517,6 +1544,10 @@ public static class ResourceMaterializer
             throw new ResourcePlanException($"shader resource specialization exceeds the sampler limit: hash=0x{plan.Hash:X16}");
         }
 
+        foreach (var pair in source.SampledPairs)
+            foreach (var candidate in ImageCandidates(specialization.Images, pair.Image).Skip(1))
+                info.SampledPairs.Add(new SampledImagePair { Image = candidate, Sampler = pair.Sampler, FirstUsePc = pair.FirstUsePc });
+
         for (var index = 0; index < source.Samplers.Count; index++)
         {
             var target = samplerPlan.PointSampler[index];
@@ -1594,6 +1625,7 @@ public static class ResourceMaterializer
 
         var samplerByMemory = new Dictionary<int, uint>();
         var finiteSamplersByMemory = new Dictionary<int, SamplerResource>();
+        var samplerByImageMemory = new Dictionary<(int Memory, uint Image, uint Sampler), uint>();
         for (var index = 0; index < plan.Memory.Count; index++)
         {
             var memory = plan.Memory[index];
@@ -1609,18 +1641,21 @@ public static class ResourceMaterializer
             }
 
             var sampler = memory.Sampler;
-            uint ResolveSampler(uint candidate)
+            uint ResolveSampler(uint candidate, ImageResource candidateImage)
             {
-                if (RequiresPointSampler(image.NumericClass, image.ConversionFormat)) candidate = samplerPlan.PointSampler[candidate];
-                if (image.DepthCompare) candidate = compareSampler[candidate];
+                if (RequiresPointSampler(candidateImage.NumericClass, candidateImage.ConversionFormat)) candidate = samplerPlan.PointSampler[candidate];
+                if (candidateImage.DepthCompare) candidate = compareSampler[candidate];
                 return candidate;
             }
-            if (source.Samplers[(int)sampler].Candidates is { } candidates)
+            if (source.Samplers[(int)sampler].Candidates is not null)
             {
                 var finite = source.Samplers[(int)sampler].Clone();
-                finite.Candidates = candidates.Select(candidate => candidate with { Sampler = ResolveSampler(candidate.Sampler) }).ToArray();
                 finiteSamplersByMemory[index] = finite;
             }
+            var samplerCandidates = source.Samplers[(int)sampler].Candidates?.Select(candidate => candidate.Sampler) ?? [sampler];
+            foreach (var imageCandidate in ImageCandidates(specialization.Images, memory.Resource))
+                foreach (var samplerCandidate in samplerCandidates)
+                    samplerByImageMemory[(index, imageCandidate, samplerCandidate)] = ResolveSampler(samplerCandidate, info.Images[(int)imageCandidate]);
             if (RequiresPointSampler(image.NumericClass, image.ConversionFormat))
             {
                 sampler = samplerPlan.PointSampler[sampler];
@@ -1638,6 +1673,6 @@ public static class ResourceMaterializer
         }
 
         return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory,
-            FiniteSamplersByMemoryIndex = finiteSamplersByMemory };
+            FiniteSamplersByMemoryIndex = finiteSamplersByMemory, SamplerByImageMemoryIndex = samplerByImageMemory };
     }
 }

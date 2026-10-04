@@ -654,6 +654,56 @@ public sealed class DirectImageTableTests
         Assert.Same(prior, snapshot);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MixedUintFloatCandidatesRequireLegalSamplersAndKeepTheirNativeTypes(bool linear)
+    {
+        var program = FiniteBufferImageProgram() with
+        {
+            Instructions = FiniteBufferImageProgram().Instructions.Where(instruction => instruction.Pc < 48).Concat([
+                ScalarBufferLoad(48, 0, 28, 4, immediateOffset: 256, dynamicOffsetRegister: 106),
+                Image(56, "ImageSampleLz", 16, 28, dmask: 1, vectorAddress: 4), EndProgram(64),
+            ]).ToArray(),
+        };
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x2000) return false;
+            var offset = address - 0x1000;
+            word = (offset % 384 / 4) switch
+            {
+                0 => 0x2000u + (uint)(offset / 384) * 256,
+                1 => (offset / 384 == 5 ? 22u : 20u) << 20,
+                3 => 0xFAC | (9u << 28),
+                66 => linear ? 0x05500000u : 0x05000000u,
+                _ => 0,
+            };
+            return true;
+        }
+        var plan = Extract(program, userDataCount: 4);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var priorSnapshot = snapshot;
+        var priorSpecialization = specialization;
+        Assert.Equal(!linear, ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0, 4096, 0], readCleanMemory: Read),
+            ref snapshot, ref specialization));
+        if (linear)
+        {
+            Assert.Same(priorSnapshot, snapshot);
+            Assert.Same(priorSpecialization, specialization);
+            return;
+        }
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Contains(resources.Info.Images, image => image.NumericClass == ImageNumericClass.Uint);
+        Assert.Contains(resources.Info.Images, image => image.NumericClass == ImageNumericClass.Float);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 4),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 64, ThreadCountX = 64 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out error), error);
+    }
+
     internal static Gen5ShaderProgram CreateWaveIndexedDescriptorProgram()
     {
         return Program(

@@ -25,7 +25,11 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     [Theory]
     [InlineData(0u, 0.5f)]
     [InlineData(1u, 1f)]
-    public void FiniteSamplersUseTheFilterSelectedAtTheDescriptorLoad(uint compare, float expected)
+    [InlineData(0u, 1f, true)]
+    [InlineData(1u, 0f, true)]
+    [InlineData(0u, 0.5f, true, true)]
+    [InlineData(1u, 0f, true, true)]
+    public void FiniteSamplersUseTheFilterSelectedAtTheDescriptorLoad(uint compare, float expected, bool mixedTypes = false, bool signed = false)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan)) return;
@@ -44,8 +48,9 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         for (var candidate = 0; candidate <= 5; candidate++)
         {
             var offset = candidate * 384 / 4;
-            new uint[] { 0x2000, Format32Float << 20, 3, 0xFAC | (9u << 28), 0, 0, 0, 0 }.CopyTo(words, offset);
-            new uint[] { 0x92, 0xFFF000, candidate == 5 ? 0x05500000u : 0x05000000u, 0 }.CopyTo(words, offset + 64);
+            new uint[] { 0x2000, (mixedTypes && candidate != 5 ? signed ? Format32Sint : Format32Uint : Format32Float) << 20,
+                3, 0xFAC | (9u << 28), 0, 0, 0, 0 }.CopyTo(words, offset);
+            new uint[] { 0x92, 0xFFF000, signed || !mixedTypes && candidate == 5 ? 0x05500000u : 0x05000000u, 0 }.CopyTo(words, offset + 64);
         }
         var memory = new TestWordMemory { Base = 0x1000, Words = words, RequireAlignment = true };
         var plan = Extract(program, userDataCount: 12);
@@ -66,18 +71,28 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         var image = harness.CreateImage(description);
         float[] texels = [0, 0, 1, 1];
         harness.UploadImage(image, MemoryMarshal.AsBytes<float>(texels), ImageTestHarness.WholeImageCopies(description, 0));
+        var uintDescription = Describe(0x10000, signed ? Format.R32Sint : Format.R32Uint,
+            signed ? GuestPixelFormat.Bits32SInt : GuestPixelFormat.Bits32UInt, 4, 1, 1);
+        var uintImage = harness.CreateImage(uintDescription);
+        uint[] uintTexels = [0, 0, 17, 17];
+        harness.UploadImage(uintImage, MemoryMarshal.AsBytes<uint>(uintTexels), ImageTestHarness.WholeImageCopies(uintDescription, 0));
         var bound = layout.Descriptors.Where(binding => ImageDescriptorBinding.ResourceClass(binding.Kind) != ImageResourceClass.None)
-            .ToDictionary(binding => binding.Kind, binding => binding.Resources.Select(_ => SampledView(image)).ToArray());
-        bound[DescriptorBindingKind.Samplers] = snapshot.Samplers.Select(sampler => new DescriptorImageInfo
-            { Sampler = runner.CreateSampler((sampler[2] & 0x00500000) != 0 ? Filter.Linear : Filter.Nearest) }).ToArray();
+            .ToDictionary(binding => binding.Kind, binding => binding.Resources.Select(index =>
+                SampledView(resources.Info.Images[(int)index].NumericClass != ImageNumericClass.Float ? uintImage : image)).ToArray());
+        bound[DescriptorBindingKind.Samplers] = snapshot.Samplers.Select((sampler, index) => new DescriptorImageInfo
+            { Sampler = runner.CreateSampler(!resources.Info.Samplers[index].ForcePointFiltering &&
+                (sampler[2] & 0x00500000) != 0 ? Filter.Linear : Filter.Nearest) }).ToArray();
         var buffers = snapshot.Buffers.Select(buffer => buffer[0] == 0x1000 ? guest : result).ToArray();
         harness.Run(() =>
         {
             image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, new CommandBuffer(harness.Scheduler.Current.Handle));
+            uintImage.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, new CommandBuffer(harness.Scheduler.Current.Handle));
             runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = buffers },
                 1, flattenedTable: snapshot.FlattenedResourceTable, boundImages: bound);
         });
-        Assert.Equal(expected, BitConverter.ToSingle(runner.ReadBack(result, 0, ResultBytes)));
+        var bytes = runner.ReadBack(result, 0, ResultBytes);
+        if (mixedTypes && compare == 1) Assert.Equal(17u, BinaryPrimitives.ReadUInt32LittleEndian(bytes));
+        else Assert.Equal(expected, BitConverter.ToSingle(bytes));
         harness.AssertNoValidationMessages();
         output.WriteLine($"Finite sampler filter readback on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
