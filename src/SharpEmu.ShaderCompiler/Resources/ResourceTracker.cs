@@ -327,6 +327,11 @@ public sealed partial class ResourceTracker
             var current = _sources[candidate];
             if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage) ||
                 !Equals(current.PackedPointer, source.PackedPointer) ||
+                (current.Workgroup is null) != (source.Workgroup is null) ||
+                current.Workgroup is { } workgroup && source.Workgroup is { } otherWorkgroup &&
+                    (!ReferenceEquals(workgroup.Input, otherWorkgroup.Input) ||
+                        (workgroup.Key is null) != (otherWorkgroup.Key is null) ||
+                        workgroup.Key is not null && !_graph.Equivalent(workgroup.Key, otherWorkgroup.Key!)) ||
                 current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
                 (current.EquivalentSamplerSources is null) != (source.EquivalentSamplerSources is null) ||
                 current.EquivalentSamplerSources is { } samplerSources &&
@@ -463,6 +468,9 @@ public sealed partial class ResourceTracker
         var controlDependent = false;
         if (nonContiguousImage || !ValidateSource(source, out badDword, out controlDependent))
         {
+            if (sampler && !sampleAdjust && IndirectSelectorValues.WorkgroupDescriptor.TryCreate(_plan,
+                    ScalarValue.Handle(ScalarValueKind.SamplerHandle, source.Dwords), null, out var workgroupSampler))
+                return InternSource(new DescriptorSource { Dwords = source.Dwords, Workgroup = workgroupSampler });
             if (!sampleAdjust && IndirectSelectorValues.PackedPointerDescriptor.TryCreate(_plan, handle, out var packedPointer))
                 return InternSource(new DescriptorSource { Dwords = source.Dwords, PackedPointer = packedPointer });
             if (expected == ScalarValueKind.SamplerHandle &&
@@ -1217,6 +1225,7 @@ public sealed partial class ResourceTracker
 
             if (TryMakeIndirectImage(handle, memory.Pc, out var plan) ||
                 TryMakeDenseIndirectImage(handle, memory.Pc, out plan) ||
+                TryMakeWorkgroupImage(handle, out plan) ||
                 TryMakeDirectImage(handle, out plan))
             {
                 _indirectImages.Add(plan);

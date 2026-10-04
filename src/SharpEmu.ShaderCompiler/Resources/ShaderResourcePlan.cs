@@ -152,7 +152,8 @@ public sealed class ShaderResourcePlan
         foreach (var sampler in plan.Info.Samplers)
         {
             materialization.Add(sampler.Source);
-            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not null)
+            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not null ||
+                plan.DescriptorSources[(int)sampler.Source].Workgroup is not null)
                 plan.RequiresSpecializationMemory = true;
         }
 
@@ -169,7 +170,11 @@ public sealed class ShaderResourcePlan
                 continue;
             }
 
-            if (indirect.DirectCandidates is { } directCandidates)
+            if (indirect.Workgroup is not null)
+            {
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)image.Source], cleanSlots);
+            }
+            else if (indirect.DirectCandidates is { } directCandidates)
             {
                 foreach (var candidate in directCandidates)
                     plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate.Source], cleanSlots);
@@ -188,8 +193,12 @@ public sealed class ShaderResourcePlan
         }
 
         foreach (var sampler in plan.Info.Samplers)
+        {
+            if (plan.DescriptorSources[(int)sampler.Source].Workgroup is not null)
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)sampler.Source], cleanSlots);
             if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is { } candidates)
                 foreach (var candidate in candidates) plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate], cleanSlots);
+        }
 
         plan.CleanFlatSlots = cleanSlots;
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);

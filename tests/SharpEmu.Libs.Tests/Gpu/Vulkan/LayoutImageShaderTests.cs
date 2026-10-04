@@ -22,6 +22,47 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // selection, the duplicated point sampler, and the per-mip storage descriptors.
 public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestOutputHelper output) : IClassFixture<HeadlessVulkanFixture>
 {
+    [Fact]
+    public void WorkgroupSelectedImagesUseTheExecutedDescriptorOffset()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var (snapshot, request, registers, tableBytes) = DirectImageTableTests.PrepareWorkgroupImages();
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var table = runner.CreateBuffer(tableBytes);
+        var result = runner.CreateBuffer(new byte[ResultBytes]);
+        var images = new CachedImage[snapshot.Images.Length];
+        var views = new DescriptorImageInfo[images.Length];
+        for (var index = 0; index < images.Length; index++)
+        {
+            var description = Describe((ulong)index * 0x10000, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1);
+            images[index] = harness.CreateImage(description);
+            float[] texel = [snapshot.Images[index][0] == 0x2000 ? 0.25f : 0.75f];
+            harness.UploadImage(images[index], MemoryMarshal.AsBytes<float>(texel), ImageTestHarness.WholeImageCopies(description, 0));
+            views[index] = SampledView(images[index]);
+        }
+        var sampler = runner.CreateSampler(Filter.Nearest);
+        var bound = request.Bindings.Descriptors
+            .Where(binding => ImageDescriptorBinding.ResourceClass(binding.Kind) != ImageResourceClass.None)
+            .ToDictionary(binding => binding.Kind, binding => binding.Resources.Select(index => views[index]).ToArray());
+        bound[DescriptorBindingKind.Samplers] = Enumerable.Repeat(new DescriptorImageInfo { Sampler = sampler },
+            request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.Count).ToArray();
+        harness.Run(() =>
+        {
+            var command = new CommandBuffer(harness.Scheduler.Current.Handle);
+            foreach (var image in images) image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
+            runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [table, result] },
+                4, flattenedTable: snapshot.FlattenedResourceTable, boundImages: bound);
+        });
+        var bytes = runner.ReadBack(result, 0, ResultBytes);
+        Assert.Equal(new float[] { 0.25f, 0.25f, 0.75f, 0.75f },
+            Enumerable.Range(0, 4).Select(index => BitConverter.ToSingle(bytes, index * 4)).ToArray());
+        harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified workgroup descriptor offsets on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
     private const uint Format32Uint = 20;
     private const uint Format32Sint = 21;
     private const uint Format32Float = 22;

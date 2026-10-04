@@ -29,6 +29,214 @@ public sealed class DirectImageTableTests
         if (valid) Assert.All(snapshot.Images, image => Assert.Equal(bit, image[2] & bit));
     }
 
+    internal static Gen5ShaderProgram WorkgroupImageProgram(bool unknownWrite = false) => Program([
+        Sop2(0, "SLshrB32", 9, Gen5Operand.Scalar(8), Operand(1)),
+        Sop2(4, "SMulI32", 9, Gen5Operand.Scalar(9), Operand(64)),
+        ScalarBufferLoad(8, 0, 16, 8, dynamicOffsetRegister: 9),
+        ScalarBufferLoad(16, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 9),
+        Image(24, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
+        unknownWrite ? GlobalAccess(32, "FlatStoreDword", 0) : BufferStore(32, 4), EndProgram(40),
+    ]);
+
+    private static ShaderResourcePlan WorkgroupImagePlan(bool unknownWrite = false) =>
+        ShaderResourcePlan.Extract(WorkgroupImageProgram(unknownWrite), ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
+
+    private static ResourceRuntimeInputs WorkgroupImageInputs(uint groups = 4, bool alias = false,
+        bool differentSampler = false, bool unreadable = false, bool provideClean = true, uint imageFormat = 20)
+    {
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x1080 || unreadable && address == 0x1040) return false;
+            var record = (uint)(address - 0x1000) / 64;
+            var component = (uint)(address - 0x1000) % 64 / 4;
+            word = component switch
+            {
+                0 => record == 0 ? 0x2000u : 0x3000u,
+                1 => imageFormat << 20,
+                3 => 0xFACu | (9u << 28),
+                8 => differentSampler && record != 0 ? 1u : 0u,
+                9 => 0xFFF000,
+                _ => 0,
+            };
+            return true;
+        }
+        return new ResourceRuntimeInputs
+        {
+            UserData = [0x1000, 64u << 16, 2, (20u << 12) | 0xFAC,
+                alias ? 0x1040u : 0x4000u, 4u << 16, 16, (20u << 12) | 0xFAC],
+            ReadMemory = Read, ReadCleanMemory = provideClean ? Read : null,
+            ComputeState = new(64, 64, 1, 1, false, 0, 1, groups, 1, 1),
+        };
+    }
+
+    public static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers, byte[] Table)
+        PrepareWorkgroupImages()
+    {
+        var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 24),
+            Vop1(24, "VMovB32", 0, Operand(0x3F000000)),
+            Vop1(28, "VMovB32", 1, Operand(0x3F000000)),
+            Vop1(32, "VMovB32", 2, Gen5Operand.Scalar(8)),
+            Image(36, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
+            BufferAccess(44, "BufferStoreDword", 4, vectorData: 4, indexEnabled: true, vectorAddress: 2), EndProgram(52)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
+        var inputs = WorkgroupImageInputs(imageFormat: 22);
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 8),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 1, ThreadCountX = 4, ComputeSystemRegisters = new(8, null, null, null),
+        };
+        var table = new byte[128];
+        for (uint offset = 0; offset < table.Length; offset += 4)
+        {
+            Assert.True(inputs.ReadCleanMemory!(0x1000 + offset, out var word));
+            BitConverter.TryWriteBytes(table.AsSpan((int)offset), word);
+        }
+        return (snapshot, request, inputs.UserData.ToArray(), table);
+    }
+
+    [Fact]
+    public void WorkgroupTablePreservesLoadsAndMapsRealOffsetsToDifferentImages()
+    {
+        var plan = WorkgroupImagePlan();
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup);
+        Assert.All(plan.IndirectImages, access => Assert.True(access.KeyIsAddressOffset));
+        Assert.All(plan.Memory.Entries.Where(memory => memory.Pc == 8), memory => Assert.False(memory.PlanningOnly));
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, WorkgroupImageInputs(), ref snapshot, ref specialization, out var failure), failure.ToString());
+        Assert.True(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!
+            .TryEvaluate(plan, WorkgroupImageInputs(), out var keys, out var descriptors));
+        Assert.Equal(new uint[] { 0, 64 }, keys);
+        Assert.Equal(new uint[] { 0x2000, 0x3000 }, descriptors.Select(words => words[0]));
+        Assert.Equal(new uint[] { 0x2000, 0x3000 }, snapshot.Images.Select(words => words[0]));
+        Assert.Single(snapshot.Samplers);
+        Assert.Equal(0xFFF000u, snapshot.Samplers[0][1]);
+    }
+
+    [Theory]
+    [InlineData(0u, false, false, false, true)]
+    [InlineData(65537u, false, false, false, true)]
+    [InlineData(4u, true, false, false, true)]
+    [InlineData(4u, false, true, false, true)]
+    [InlineData(4u, false, false, true, true)]
+    [InlineData(4u, false, false, false, false)]
+    [InlineData(5u, false, false, false, true)]
+    public void WorkgroupTableDeclinesMissingBoundsAliasDifferentSamplersOrUnreadableRecords(
+        uint groups, bool alias, bool differentSampler, bool unreadable, bool clean)
+    {
+        var plan = WorkgroupImagePlan();
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        var original = snapshot;
+        Assert.False(ResourceMaterializer.Materialize(plan,
+            WorkgroupImageInputs(groups, alias, differentSampler, unreadable, clean), ref snapshot, ref specialization));
+        Assert.Same(original, snapshot);
+    }
+
+    [Fact]
+    public void WorkgroupTableDeclinesUnknownWriteAddresses()
+    {
+        var plan = WorkgroupImagePlan(unknownWrite: true);
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.False(ResourceMaterializer.Materialize(plan, WorkgroupImageInputs(), ref snapshot, ref specialization));
+    }
+
+    [Fact]
+    public void WorkgroupTableChecksWritesAcrossDifferentGroups()
+    {
+        var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 24),
+            ScalarBufferLoad(24, 0, 4, 4, immediateOffset: 48, dynamicOffsetRegister: 9),
+            Image(32, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1), BufferStore(40, 4), EndProgram(48)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
+        var proof = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!;
+        ResourceRuntimeInputs Inputs(uint groups)
+        {
+            var original = WorkgroupImageInputs(groups);
+            bool Read(ulong address, out uint word)
+            {
+                var offset = (uint)(address - 0x1000) % 64;
+                if (address is >= 0x1000 and < 0x1080 && offset >= 48)
+                {
+                    word = offset switch { 48 => address < 0x1040 ? 0x4000u : 0x1000u,
+                        52 => 4u << 16, 56 => 16, _ => (20u << 12) | 0xFAC };
+                    return true;
+                }
+                return original.ReadCleanMemory!(address, out word);
+            }
+            return new() { UserData = original.UserData, ReadMemory = Read, ReadCleanMemory = Read,
+                ComputeState = original.ComputeState };
+        }
+        Assert.True(proof.TryEvaluate(plan, Inputs(2), out _, out _));
+        Assert.False(proof.TryEvaluate(plan, Inputs(4), out _, out _));
+    }
+
+    [Fact]
+    public void WorkgroupTableCacheRebuildsWhenTheActualDispatchGrows()
+    {
+        var plan = WorkgroupImagePlan();
+        var cache = new ResourceMaterializationCache();
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        foreach (var groups in new uint[] { 2, 2, 4 })
+        {
+            var inputs = WorkgroupImageInputs(groups);
+            bool ReadResident(ulong address, Span<byte> bytes, bool clean)
+            {
+                for (var offset = 0; offset < bytes.Length; offset += 4)
+                {
+                    if (!inputs.ReadCleanMemory!(address + (uint)offset, out var word)) return false;
+                    BitConverter.TryWriteBytes(bytes[offset..], word);
+                }
+                return true;
+            }
+            Assert.True(cache.Materialize(plan, inputs, ReadResident, ref snapshot, ref specialization, out _));
+            Assert.Equal(groups == 2 ? 1 : 2, snapshot.Images.Length);
+        }
+        Assert.Equal((1, 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
+    public void WorkgroupSamplerResourcesAreReusedForRepeatedInstructions()
+    {
+        var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 40),
+            Image(40, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1), EndProgram(48)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
+        Assert.Single(plan.Info.Samplers);
+        Assert.Single(plan.Info.Images);
+    }
+
+    [Fact]
+    public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
+    {
+        var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 40),
+            DataShareWrite(40, gds: true), EndProgram(48)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
+        Assert.Contains(plan.Memory.Entries, memory => memory.Kind == MemoryResourceKind.GlobalDataShare && !memory.PlanningOnly);
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, WorkgroupImageInputs(), ref snapshot, ref specialization));
+    }
+
+    [Fact]
+    public void WorkgroupTableDoesNotInventABoundForAnotherAxis()
+    {
+        var program = WorkgroupImageProgram() with
+        {
+            Instructions = WorkgroupImageProgram().Instructions.Select(instruction => instruction.Pc == 0
+                ? Sop2(0, "SAddU32", 10, Gen5Operand.Scalar(8), Gen5Operand.Scalar(9))
+                : instruction.Pc == 4 ? Sop2(4, "SMulI32", 9, Gen5Operand.Scalar(10), Operand(64)) : instruction).ToArray(),
+        };
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, 9, null, null));
+        Assert.Null(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage);
+    }
+
     private static Gen5ShaderProgram FiniteLaneReadProgram(bool unknownLane = false, bool partialWrite = false,
         bool loopWrite = false, bool wrongRestore = false, bool unknownPartial = false)
     {

@@ -209,6 +209,7 @@ public sealed record IndirectImageSelector(
     public uint DynamicOffsetBase { get; init; }
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
+    internal IndirectSelectorValues.WorkgroupDescriptor? Workgroup { get; init; }
 
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
@@ -235,6 +236,7 @@ public sealed class DescriptorSource
     // Materialization must recheck the source extent before using these words.
     public uint? ZeroExtentBufferSource { get; init; }
     internal IndirectSelectorValues.PackedPointerDescriptor? PackedPointer { get; init; }
+    internal IndirectSelectorValues.WorkgroupDescriptor? Workgroup { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.

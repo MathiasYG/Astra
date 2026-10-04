@@ -168,6 +168,19 @@ public static class ResourceMaterializer
                     continue;
                 }
                 var cleanInputs = inputs.WithReader(inputs.ReadCleanMemory);
+                if (indirect.Workgroup is { } workgroup)
+                {
+                    if (!workgroup.TryEvaluate(plan, inputs, out var keys, out var descriptors) ||
+                        descriptors.Any(words => !UsableImageCandidate(words, image.R128)) ||
+                        !FinishIndirectImage(descriptors, keys, out var workgroupTable, out failure)) return false;
+                    snapshot.Images[imageIndex] = workgroupTable.Descriptors[(int)workgroupTable.Candidates[0]].Dwords;
+                    if (workgroupTable.Descriptors.Count > 1)
+                    {
+                        workgroupTable.Resource = (uint)imageIndex;
+                        snapshot.IndirectImages.Add(workgroupTable);
+                    }
+                    continue;
+                }
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),

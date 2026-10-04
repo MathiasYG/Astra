@@ -20,6 +20,20 @@ public sealed class RuntimeValueEvaluator
     private readonly List<ScalarValue> _visiting;
     private readonly CompiledResourceEvaluator? _compiled;
     private readonly CompiledValueCache _compiledValues;
+    private readonly ScalarValue? _workgroupInput;
+    private readonly uint _workgroupId;
+
+    // Only bounded descriptor proofs supply a workgroup value. Ordinary host
+    // evaluation continues to reject this GPU input.
+    internal RuntimeValueEvaluator(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ScalarValue workgroupInput, uint workgroupId) : this(plan, inputs)
+    {
+        _workgroupInput = workgroupInput;
+        _workgroupId = workgroupId;
+        // Proof evaluation substitutes one GPU workgroup input and must use the
+        // interpreter's bounded-read checks rather than the ordinary compiled path.
+        _compiled = null;
+    }
 
     public RuntimeValueEvaluator(
         ShaderResourcePlan plan,
@@ -81,6 +95,11 @@ public sealed class RuntimeValueEvaluator
     public bool EvaluateWide(ScalarValue value, out ulong result)
     {
         result = 0;
+        if (value.Kind == ScalarValueKind.WorkgroupId && ReferenceEquals(value, _workgroupInput))
+        {
+            result = _workgroupId;
+            return true;
+        }
         if (value.IsConstant)
         {
             result = value.Payload;
@@ -216,6 +235,11 @@ public sealed class RuntimeValueEvaluator
             return false;
         }
 
+        var baseAddress = ((high << 32) | (uint)low) & AddressMask;
+        // Bounded workgroup proofs do not cover a wrapped shader-side byte sum.
+        // Decline it rather than bind the host's unwrapped memory address.
+        if (_workgroupInput is not null && value.Kind == ScalarValueKind.ScalarBufferWord &&
+            (ulong)memory.Offset + (uint)offset > uint.MaxValue) return false;
         ulong records = 0;
         if (value.Kind == ScalarValueKind.ScalarBufferWord &&
             (handle.Operands.Length != 4 ||
@@ -461,7 +485,13 @@ public sealed class RuntimeValueEvaluator
             var words = new uint[source.DwordCount];
             if (activeSources.Length == 0 || activeSources[sourceIndex])
             {
-                if (source.PackedPointer is { } packed)
+                if (source.Workgroup is { } workgroup)
+                {
+                    if (!workgroup.TryEvaluate(plan, inputs, out _, out var descriptors) || descriptors.Length == 0 ||
+                        descriptors.Any(words => !words.AsSpan().SequenceEqual(descriptors[0]))) return false;
+                    words = descriptors[0];
+                }
+                else if (source.PackedPointer is { } packed)
                 {
                     if (!packed.TryEvaluate(plan, inputs, out words)) return false;
                 }

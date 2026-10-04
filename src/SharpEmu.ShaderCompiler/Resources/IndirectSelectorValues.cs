@@ -16,6 +16,123 @@ public sealed class IndirectSelectorValues
     private readonly Expression _root;
     private readonly WaveMaskSelectorBounds? _waveBounds;
 
+    // Enumerate the actual dispatch domain, never a guessed workgroup ID. The
+    // original scalar loads and their run-time image selector remain in the shader.
+    internal sealed record WorkgroupDescriptor(ScalarValue Handle, ScalarValue Input, ScalarValue? Key)
+    {
+        internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue handle, ScalarValue? key,
+            out WorkgroupDescriptor result)
+        {
+            result = null!;
+            if (plan.Stage != ShaderStage.Compute ||
+                handle.Kind is not (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) ||
+                handle.Operands.Length != (handle.Kind == ScalarValueKind.ImageHandle ? 8 : 4)) return false;
+            ScalarValue? input = null;
+            var pending = new Stack<ScalarValue>(handle.Operands);
+            if (key is not null) pending.Push(key);
+            var visited = new HashSet<ScalarValue>();
+            while (pending.TryPop(out var value))
+            {
+                if (!visited.Add(value)) continue;
+                if (value.Kind == ScalarValueKind.WorkgroupId)
+                {
+                    if (value.Payload > 2 || input is not null && !ReferenceEquals(input, value)) return false;
+                    input = value;
+                }
+                // No lane-dependent proof or branch-dependent descriptor is implied.
+                else if (value.Kind == ScalarValueKind.FirstLane) return false;
+                foreach (var operand in value.Operands) pending.Push(operand);
+            }
+            if (input is null) return false;
+            var replacements = new Dictionary<ScalarValue, ScalarValue> { [input] = plan.Graph.Constant(0u) };
+            var memo = new Dictionary<ScalarValue, ScalarValue>();
+            foreach (var word in handle.Operands)
+                if (!plan.ValidateRuntimeValue(plan.Graph.Substitute(word, replacements, memo))) return false;
+            if (key is not null && (key.Type != ScalarValueType.U32 ||
+                !plan.ValidateRuntimeValue(plan.Graph.Substitute(key, replacements, memo)))) return false;
+            result = new(handle, input, key);
+            return true;
+        }
+
+        internal bool TryEvaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+            out uint[] keys, out uint[][] descriptors)
+        {
+            keys = []; descriptors = [];
+            if (inputs.ReadCleanMemory is null || inputs.ComputeState is not { } dispatch) return false;
+            var count = Input.Payload switch
+            {
+                0 => dispatch.DispatchGroupsX, 1 => dispatch.DispatchGroupsY, 2 => dispatch.DispatchGroupsZ, _ => 0u,
+            };
+            if (count == 0 || count > MaximumCombinations || dispatch.DispatchGroupsX == 0 ||
+                dispatch.DispatchGroupsY == 0 || dispatch.DispatchGroupsZ == 0) return false;
+            var captured = new Dictionary<ulong, uint>();
+            bool Read(ulong address, out uint word)
+            {
+                if (captured.TryGetValue(address, out word)) return true;
+                if (address > (1ul << 48) - 4 || !inputs.ReadCleanMemory(address, out word)) return false;
+                captured.Add(address, word);
+                return true;
+            }
+            var clean = new ResourceRuntimeInputs { UserData = inputs.UserData, ShaderBase = inputs.ShaderBase,
+                ReadMemory = Read, ReadCleanMemory = Read, ReadsClean = true, ComputeState = inputs.ComputeState };
+            var candidates = new Dictionary<uint, uint[]>();
+            var writes = new HashSet<(ulong Base, ulong Size)>();
+            // Every possible shader write must be bounded. Unknown address spaces
+            // decline this proof instead of assuming they cannot touch the table.
+            var writeHandles = new Dictionary<ScalarValue, ulong>();
+            for (var index = 0; index < plan.Memory.Count; index++)
+            {
+                var memory = plan.Memory[index];
+                if (memory.Access is not (MemoryAccess.Write or MemoryAccess.Atomic)) continue;
+                // GDS has its own backing allocation, like LDS and scratch. Its
+                // offsets are not guest virtual addresses into descriptor memory.
+                if (memory.Kind is MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) continue;
+                if (memory.Kind is not (MemoryResourceKind.Buffer or MemoryResourceKind.ScalarBuffer) ||
+                    plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } output)
+                    return false;
+                var extra = (ulong)memory.Offset + Math.Max(16ul, (ulong)memory.DataBits * memory.DataDwords / 8);
+                writeHandles[output] = Math.Max(writeHandles.GetValueOrDefault(output), extra);
+            }
+            for (uint group = 0; group < count; group++)
+            {
+                var evaluator = new RuntimeValueEvaluator(plan, clean, Input, group);
+                var key = group;
+                if (Key is not null && !evaluator.Evaluate(Key, out key)) return false;
+                var words = new uint[Handle.Operands.Length];
+                for (var component = 0; component < words.Length; component++)
+                    if (!evaluator.Evaluate(Handle.Operands[component], out words[component])) return false;
+                if (candidates.TryGetValue(key, out var existing))
+                {
+                    if (!existing.AsSpan().SequenceEqual(words)) return false;
+                }
+                else if (candidates.Count >= MaximumValues) return false;
+                else candidates.Add(key, words);
+                foreach (var (output, extra) in writeHandles)
+                {
+                    if (!PackedPointerDescriptor.EvaluateHandle(output, evaluator, out var outputWords) ||
+                        !PackedPointerDescriptor.Range(outputWords, out var address, out var length) ||
+                        address + length + extra > 1ul << 48) return false;
+                    writes.Add((address, length + extra));
+                }
+            }
+            // Compare after evaluating *all* groups: a later group's output may
+            // alias an earlier group's descriptor or one of its pointer dependencies.
+            var reads = captured.Keys.Order().ToArray();
+            var orderedWrites = writes.OrderBy(range => range.Base).ToArray();
+            var readIndex = 0; var writeIndex = 0;
+            while (readIndex < reads.Length && writeIndex < orderedWrites.Length)
+            {
+                var write = orderedWrites[writeIndex];
+                if (write.Base + write.Size <= reads[readIndex]) writeIndex++;
+                else if (reads[readIndex] + 4 <= write.Base) readIndex++;
+                else return false;
+            }
+            keys = candidates.Keys.ToArray();
+            descriptors = candidates.Values.ToArray();
+            return descriptors.Length != 0;
+        }
+    }
+
     // An indexed raw buffer word supplies a finite data domain even when its
     // lane index is unknown. Runtime enumeration must validate the V# layout,
     // include the out-of-bounds value, and establish write disjointness.
@@ -284,7 +401,7 @@ public sealed class IndirectSelectorValues
             }
         }
 
-        private static bool EvaluateHandle(ScalarValue handle, RuntimeValueEvaluator evaluator, out uint[] words)
+        internal static bool EvaluateHandle(ScalarValue handle, RuntimeValueEvaluator evaluator, out uint[] words)
         {
             words = new uint[4];
             if (handle.Operands.Length != 4) return false;
@@ -293,7 +410,7 @@ public sealed class IndirectSelectorValues
             return true;
         }
 
-        private static bool Range(uint[] words, out ulong address, out ulong length)
+        internal static bool Range(uint[] words, out ulong address, out ulong length)
         {
             address = ((ulong)(words[1] & 0xFFFF) << 32) | words[0];
             var stride = (words[1] >> 16) & 0x3FFF;

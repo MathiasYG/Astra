@@ -5,6 +5,42 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 public sealed partial class ResourceTracker
 {
+    private bool TryMakeWorkgroupImage(ScalarValue handle, out IndirectImagePlan plan)
+    {
+        plan = null!;
+        if (handle.Kind != ScalarValueKind.ImageHandle || handle.Operands.Length != 8) return false;
+        var reads = handle.Operands.Select(value => value.Kind == ScalarValueKind.Phi
+            ? _graph.ResolveInvariantPhi(value) ?? value : value).ToArray();
+        var indices = new int[8];
+        for (var component = 0; component < reads.Length; component++)
+        {
+            var read = reads[component];
+            if (read.Kind != ScalarValueKind.ScalarBufferWord || read.Operands.Length != 2 ||
+                read.MemoryIndex < 0 || read.MemoryIndex >= _plan.Memory.Count) return false;
+            var memory = _plan.Memory[read.MemoryIndex];
+            if (memory.Kind != MemoryResourceKind.ScalarBuffer || memory.Access != MemoryAccess.Read ||
+                memory.DataBits != 32 || memory.DataDwords != 1 || memory.ComponentIndex != component) return false;
+            if (component != 0 && (memory.Pc != _plan.Memory[reads[0].MemoryIndex].Pc ||
+                (ulong)memory.Offset != (ulong)_plan.Memory[reads[0].MemoryIndex].Offset + (uint)component * 4 ||
+                !_graph.Equivalent(read.Operands[0], reads[0].Operands[0]) ||
+                !_graph.Equivalent(read.Operands[1], reads[0].Operands[1]))) return false;
+            indices[component] = read.MemoryIndex;
+        }
+        var instruction = _graph.Program.Instructions.FirstOrDefault(candidate => candidate.Pc == _plan.Memory[indices[0]].Pc);
+        if (instruction?.Control is not Gen5ScalarMemoryControl { DynamicOffsetRegister: not null } ||
+            !IndirectSelectorValues.WorkgroupDescriptor.TryCreate(_plan, handle, reads[0].Operands[1], out var workgroup)) return false;
+        plan = new IndirectImagePlan
+        {
+            Handle = handle,
+            Source = InternSource(new DescriptorSource { Dwords = handle.Operands,
+                IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0) { Workgroup = workgroup } }),
+            Key = reads[0], KeyIsAddressOffset = true,
+            // Retain the original reads even when only image instructions use them.
+            SuppressMemoryReads = false, Memory = indices, Reads = reads,
+        };
+        return true;
+    }
+
     private bool TryMakeFiniteSampler(ScalarValue handle, DescriptorSource original, out uint sourceIndex)
     {
         sourceIndex = 0;
