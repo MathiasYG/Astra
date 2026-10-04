@@ -9,6 +9,32 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5ExecFullAnalysisTests
 {
+    [Theory]
+    [InlineData("SMovB64", false)]
+    [InlineData("SOrB64", false)]
+    [InlineData("SWqmB64", false)]
+    [InlineData("SAndB64", true)]
+    [InlineData("SAndn2B64", true)]
+    public void InitializedLaneProofRejectsExpansionsButKeepsSubsets(string opcode, bool expected)
+    {
+        var initialization = VectorAdd();
+        if (opcode == "SMovB64") Scalar(opcode, Exec, Gen5Operand.Source(193));
+        else Scalar(opcode, Exec, Gen5Operand.Scalar(Exec), Gen5Operand.Source(193));
+        var use = VectorAdd();
+        var result = Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false);
+        Assert.Equal(expected, result.Contains(use));
+    }
+
+    [Fact]
+    public void InitializedLaneProofRejectsAJoinThatSkipsInitialization()
+    {
+        var branch = Branch("SCbranchScc0");
+        var initialization = VectorAdd();
+        var use = VectorAdd();
+        PointBranch(branch, use);
+        Assert.DoesNotContain(use, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false));
+    }
+
     private const uint Exec = 126;
 
     private readonly List<Gen5ShaderInstruction> _program = [];

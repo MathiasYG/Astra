@@ -31,7 +31,14 @@ public static class Gen5ExecFullAnalysis
     }
 
     // Pcs of the instructions that start with a full EXEC.
-    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32)
+    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32) => AnalyzeCore(program, wave32, null);
+
+    // Instructions whose EXEC can only contain lanes initialized by one vector
+    // write. Joins require this on every path; unknown expansions decline it.
+    public static IReadOnlySet<uint> AnalyzeInitializedLanes(Gen5ShaderProgram program, uint initializationPc, bool wave32) =>
+        AnalyzeCore(program, wave32, initializationPc);
+
+    private static IReadOnlySet<uint> AnalyzeCore(Gen5ShaderProgram program, bool wave32, uint? initializationPc)
     {
         var instructions = program.Instructions;
         var result = new HashSet<uint>();
@@ -52,7 +59,8 @@ public static class Gen5ExecFullAnalysis
         }
 
         var states = new State[instructions.Count];
-        states[0] = new State(true, true, 0);
+        if (initializationPc.HasValue && !indexByPc.ContainsKey(initializationPc.Value)) return result;
+        states[0] = new State(true, !initializationPc.HasValue, 0);
         var pending = new Queue<int>();
         var queued = new bool[instructions.Count];
         pending.Enqueue(0);
@@ -61,7 +69,8 @@ public static class Gen5ExecFullAnalysis
         {
             queued[index] = false;
             var instruction = instructions[index];
-            var output = Transfer(instruction, states[index], wave32);
+            var input = instruction.Pc == initializationPc ? new State(true, true, 0) : states[index];
+            var output = Transfer(instruction, input, wave32, initializationPc.HasValue);
             void Flow(int successor)
             {
                 var merged = State.Meet(states[successor], output);
@@ -104,7 +113,7 @@ public static class Gen5ExecFullAnalysis
 
         for (var index = 0; index < instructions.Count; index++)
         {
-            if (states[index].Reached && states[index].ExecFull)
+            if (states[index].Reached && (states[index].ExecFull || instructions[index].Pc == initializationPc))
             {
                 result.Add(instructions[index].Pc);
             }
@@ -113,7 +122,7 @@ public static class Gen5ExecFullAnalysis
         return result;
     }
 
-    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32)
+    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32, bool subset = false)
     {
         if (!input.Reached)
         {
@@ -218,6 +227,26 @@ public static class Gen5ExecFullAnalysis
             if (wide)
             {
                 nextCopies |= Bit(destinations[0].Value + 1);
+            }
+        }
+
+        if (subset && writesExec)
+        {
+            nextExecFull = opcode.StartsWith("VCmpx", StringComparison.Ordinal) || opcode is "SAndSaveexecB64" or "SAndSaveexecB32"
+                ? execFull : false;
+            var onlyExec = destinations.Count == 1 && destinations[0] == Gen5Operand.Scalar(ExecLow);
+            if (onlyExec && (wide || wave32) && scalarDestination is null)
+            {
+                bool Known(int index) => sources.Count > index && IsFullCopy(sources[index], copies, execFull, wide);
+                nextExecFull = opcode switch
+                {
+                    "SMovB64" or "SMovB32" => Known(0),
+                    "SAndB64" or "SAndB32" => Known(0) || Known(1),
+                    "SAndn2B64" or "SAndn2B32" => Known(0),
+                    "SAndn1B64" or "SAndn1B32" => Known(1),
+                    "SOrB64" or "SOrB32" => Known(0) && Known(1),
+                    _ => nextExecFull,
+                };
             }
         }
 
