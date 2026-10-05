@@ -110,8 +110,13 @@ public static class PixelStageInputResolver
 
         var control = shaderInterface.DepthShaderControl;
         var earlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
-            !control.MaskExportEnable && !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0;
-        if ((shaderSampleExclusionMask & 0xFFFFu) != 0 && control.DepthExportOrder == 1 && !earlyDepth)
+            !control.MaskExportEnable && !control.DepthBeforeShader && !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0;
+        // Shader coverage changes must affect depth updates unless depth-before-shader is forced.
+        var coverageRequiresLateDepth = control.DepthExportOrder == 1 && (control.MaskExportEnable || control.KillEnable) &&
+            !control.DepthBeforeShader && !control.DepthExportEnable &&
+            !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0;
+        if ((shaderSampleExclusionMask & 0xFFFFu) != 0 && control.DepthExportOrder == 1 &&
+            !earlyDepth && !coverageRequiresLateDepth)
             throw SubmissionScheduler.Fatal("Sample exclusion requires supported early depth/stencil processing.");
         return new PixelInputInfo
         {

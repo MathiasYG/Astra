@@ -32,6 +32,26 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal(expectedMask, info.ShaderSampleExclusionMask);
     }
 
+    [Theory]
+    [InlineData(0x110u, true)]
+    [InlineData(0x50u, false)]
+    public void ShaderCoverageChangesUseLateDepthWithoutForcedDepthBeforeShader(uint raw, bool maskExport)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var shaderInterface = new SharpEmu.Libs.Gpu.GpuCommands.Registers.ShaderInterfaceRegisters
+        {
+            DepthShaderControl = SharpEmu.Libs.Gpu.GpuCommands.Registers.DepthShaderControlRegisters.Decode(raw),
+        };
+        var info = PixelStageInputResolver.Resolve(_guest.Context, source.Registered, shaderInterface,
+            new byte[8], new SharpEmu.Libs.Gpu.Images.ColorComponentMap[8], 0,
+            maskExportSamples: 2, rasterizationSamples: 2, pixelShaderIterationSamples: 2,
+            shaderSampleExclusionMask: 0xFFFE);
+        Assert.False(info.EarlyDepth);
+        Assert.Equal(maskExport, info.SampleMaskExportEnable);
+        Assert.Equal(2u, info.MaskExportSamples);
+        Assert.Equal(0u, info.ShaderSampleExclusionMask);
+    }
     [Fact]
     public void SampleExclusionRequiresSupportAndSeparatesEarlyPixelPrograms()
     {
