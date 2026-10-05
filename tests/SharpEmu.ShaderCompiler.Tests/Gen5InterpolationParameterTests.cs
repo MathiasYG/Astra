@@ -325,6 +325,57 @@ public sealed class Gen5InterpolationParameterTests
         ValidateWhenAvailable(shader.Spirv);
     }
 
+    [Theory]
+    [InlineData(false, 1u, 1u)]
+    [InlineData(false, 2u, 2u)]
+    [InlineData(false, 1u, 2u)]
+    [InlineData(true, 2u, 2u)]
+    [InlineData(true, 1u, 2u)]
+    public void MrtzSampleMask_DeclaresAnIntegerOutput(bool compressed, uint exportSamples, uint rasterSamples)
+    {
+        var request = MaskExportRequest(compressed, exportSamples, rasterSamples);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        var output = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+            instruction.Operands[2] == (uint)SpirvBuiltIn.SampleMask).Operands[0];
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.Variable &&
+            instruction.Operands[1] == output && instruction.Operands[2] == (uint)SpirvStorageClass.Output);
+        var pointers = instructions.Where(instruction => instruction.Opcode == SpirvOp.AccessChain &&
+            instruction.Operands[2] == output).Select(instruction => instruction.Operands[1]).ToHashSet();
+        Assert.Equal(2, instructions.Count(instruction => instruction.Opcode == SpirvOp.Store &&
+            pointers.Contains(instruction.Operands[0])));
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.Select);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(0u, 2u)]
+    [InlineData(2u, 3u)]
+    [InlineData(2u, 4u)]
+    [InlineData(4u, 2u)]
+    public void MrtzSampleMask_RejectsUnverifiedCountMappings(uint exportSamples, uint rasterSamples)
+    {
+        Assert.False(Gen5SpirvTranslator.TryCompileProgram(
+            MaskExportRequest(false, exportSamples, rasterSamples), out _, out var error));
+        Assert.Contains("unsupported pixel sample-mask export counts", error);
+    }
+
+    private static ShaderCompileRequest MaskExportRequest(bool compressed, uint exportSamples, uint rasterSamples)
+    {
+        var export = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Exp, "Exp", [],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2), Gen5Operand.Vector(3)], [],
+            new Gen5ExportControl(8, compressed ? 12u : 4u, compressed, true, true));
+        var program = ResourceTestProgram.Program(export, ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        return new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelSampleMaskExportEnable = true,
+            PixelMaskExportSamples = exportSamples,
+            PixelRasterizationSamples = rasterSamples,
+        };
+    }
+
     private static ShaderCompileRequest Request(
         uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32",
         uint inputCntl = 0x401, bool supportsPerVertex = true, uint? fixedSample = null, bool earlyTests = false)

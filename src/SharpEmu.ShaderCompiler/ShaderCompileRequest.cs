@@ -180,6 +180,9 @@ public sealed class ShaderCompileRequest
     // The caller must select a sample valid for the pipeline's rasterization count.
     public uint? PixelInterpolationSample { get; init; }
     public bool EarlyFragmentTests { get; init; }
+    public bool PixelSampleMaskExportEnable { get; init; }
+    public uint PixelMaskExportSamples { get; init; } = 1;
+    public uint PixelRasterizationSamples { get; init; } = 1;
     public uint PixelCustomInterpolationMask { get; init; }
 
     // False when the device cannot read one vertex's value of a pixel input (PerVertexKHR).

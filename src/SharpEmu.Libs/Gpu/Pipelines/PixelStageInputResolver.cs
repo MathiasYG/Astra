@@ -63,7 +63,9 @@ public static class PixelStageInputResolver
         ShaderInterfaceRegisters shaderInterface,
         ReadOnlySpan<byte> targetOutputModes,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        uint inputCount)
+        uint inputCount,
+        uint maskExportSamples = 1,
+        uint rasterizationSamples = 1)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var customMask = 0u;
@@ -122,6 +124,8 @@ public static class PixelStageInputResolver
             KillEnable = control.KillEnable,
             DepthExportEnable = control.DepthExportEnable,
             SampleMaskExportEnable = control.MaskExportEnable,
+            MaskExportSamples = maskExportSamples,
+            RasterizationSamples = rasterizationSamples,
             EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
                 !control.MaskExportEnable && !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0,
             ExecuteOnNoop = control.ExecuteOnNoop,

@@ -127,6 +127,7 @@ public static partial class Gen5SpirvTranslator
         private readonly List<uint> _interfaces = [];
         private readonly Dictionary<uint, uint> _pixelInputs = [];
         private readonly Dictionary<uint, SpirvPixelOutput> _pixelOutputs = [];
+        private uint _pixelSampleMaskOutput;
         private readonly Dictionary<uint, uint> _vertexOutputs = [];
         private readonly Dictionary<uint, SpirvVertexInput> _vertexInputsByPc = [];
         private uint _voidType;
@@ -254,6 +255,18 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             try
             {
+                if (_stage == Gen5SpirvStage.Pixel && _request.PixelSampleMaskExportEnable)
+                {
+                    var exportSamples = _request.PixelMaskExportSamples;
+                    var rasterSamples = _request.PixelRasterizationSamples;
+                    if (exportSamples == 0 || rasterSamples == 0 || exportSamples > 16 || rasterSamples > 16 ||
+                        (exportSamples & (exportSamples - 1)) != 0 || (rasterSamples & (rasterSamples - 1)) != 0 ||
+                        (exportSamples != rasterSamples && !(exportSamples == 1 && rasterSamples == 2)))
+                    {
+                        error = $"unsupported pixel sample-mask export counts: export={exportSamples} raster={rasterSamples}";
+                        return false;
+                    }
+                }
                 if (Environment.GetEnvironmentVariable(
                         "SHARPEMU_TRACE_TITLE_INTERFACE") == "1" &&
                     _request.Program.Address is 0x0000000500780000ul or
@@ -1055,6 +1068,15 @@ public static partial class Gen5SpirvTranslator
                     (uint)SpirvBuiltIn.FragCoord);
                 _interfaces.Add(_fragCoordInput);
                 DeclarePixelSystemInputs();
+                if (_request.PixelSampleMaskExportEnable)
+                {
+                    var maskArray = _module.TypeArray(_intType, 1);
+                    _pixelSampleMaskOutput = _module.AddGlobalVariable(
+                        _module.TypePointer(SpirvStorageClass.Output, maskArray), SpirvStorageClass.Output);
+                    _module.AddDecoration(_pixelSampleMaskOutput, SpirvDecoration.BuiltIn,
+                        (uint)SpirvBuiltIn.SampleMask);
+                    _interfaces.Add(_pixelSampleMaskOutput);
+                }
 
                 var declaredPixelOutputs =
                     Environment.GetEnvironmentVariable(
@@ -1259,6 +1281,8 @@ public static partial class Gen5SpirvTranslator
                 {
                     Store(output.Variable, _module.ConstantNull(output.Type));
                 }
+                if (_pixelSampleMaskOutput != 0)
+                    Store(PixelSampleMaskOutputElement(), Bitcast(_intType, UInt(uint.MaxValue)));
             }
             else
             {
@@ -6422,6 +6446,10 @@ public static partial class Gen5SpirvTranslator
                 arrayOffset);
         }
 
+        private uint PixelSampleMaskOutputElement() => _module.AddInstruction(
+            SpirvOp.AccessChain, _module.TypePointer(SpirvStorageClass.Output, _intType),
+            _pixelSampleMaskOutput, UInt(0));
+
         private bool TryEmitExport(
             Gen5ShaderInstruction instruction,
             Gen5ExportControl export,
@@ -6442,6 +6470,26 @@ public static partial class Gen5SpirvTranslator
                 if (export.ValidMask && _pixelValidMaskActive != 0)
                 {
                     Store(_pixelValidMaskActive, Load(_boolType, _exec));
+                }
+
+                if (export.Target == 8 && _pixelSampleMaskOutput != 0 && (export.EnableMask & 4) != 0)
+                {
+                    // Compressed MRTZ packs the sample mask into Y[15:0]; it is
+                    // an integer mask, not a pair of half-precision colors.
+                    var mask = LoadV(instruction.Sources[export.Compressed ? 1 : 2].Value);
+                    if (export.Compressed)
+                        mask = BitwiseAnd(mask, UInt(0xFFFF));
+                    if (_request.PixelMaskExportSamples == 1 && _request.PixelRasterizationSamples == 2)
+                    {
+                        mask = _module.AddInstruction(SpirvOp.Select, _uintType,
+                            _module.AddInstruction(SpirvOp.INotEqual, _boolType,
+                                BitwiseAnd(mask, UInt(1)), UInt(0)), UInt(3), UInt(0));
+                    }
+                    var pointer = PixelSampleMaskOutputElement();
+                    var value = _module.AddInstruction(SpirvOp.Select, _intType,
+                        Load(_boolType, _exec), Bitcast(_intType, mask), Load(_intType, pointer));
+                    Store(pointer, value);
+                    return true;
                 }
 
                 if (!_pixelOutputs.TryGetValue(export.Target, out var output))

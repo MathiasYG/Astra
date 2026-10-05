@@ -72,6 +72,8 @@ public static class StageStaticKey
         key.Add(Bit(info.KillEnable));
         key.Add(Bit(info.DepthExportEnable));
         key.Add(Bit(info.SampleMaskExportEnable));
+        key.Add(info.SampleMaskExportEnable ? info.MaskExportSamples : 0u);
+        key.Add(info.SampleMaskExportEnable ? info.RasterizationSamples : 0u);
         key.Add(Bit(info.EarlyDepth));
         foreach (var mode in info.TargetOutputModes)
         {

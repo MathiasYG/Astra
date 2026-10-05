@@ -161,6 +161,8 @@ public sealed class PixelInputInfo
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }
     public bool SampleMaskExportEnable { get; init; }
+    public uint MaskExportSamples { get; init; } = 1;
+    public uint RasterizationSamples { get; init; } = 1;
     public bool SampleShading { get; init; }
     public bool EarlyDepth { get; init; }
     public bool ExecuteOnNoop { get; init; }

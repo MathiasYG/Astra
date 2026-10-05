@@ -41,6 +41,33 @@ public sealed class ShaderProgramCacheTests : IDisposable
     }
 
     [Fact]
+    public void SampleMaskExportCountsReachCompilerAndSeparateCachedPrograms()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        ShaderProgram CompilePixel(uint exportSamples, uint rasterSamples)
+        {
+            var cursor = 0u;
+            return _guest.Programs.GetOrCompile(source,
+                new StageCompileOptions { PixelInfo = new PixelInputInfo
+                {
+                    SampleMaskExportEnable = true,
+                    MaskExportSamples = exportSamples,
+                    RasterizationSamples = rasterSamples,
+                } }, ref cursor, out _);
+        }
+        var broadcast = CompilePixel(1, 2);
+        var independent = CompilePixel(2, 2);
+        var single = CompilePixel(1, 1);
+        Assert.NotEqual(broadcast, independent);
+        Assert.NotEqual(broadcast, single);
+        Assert.Equal(independent, CompilePixel(2, 2));
+        Assert.All(_guest.Compiler.Requests, request => Assert.True(request.PixelSampleMaskExportEnable));
+        Assert.Equal(new[] { (1u, 2u), (2u, 2u), (1u, 1u) }, _guest.Compiler.Requests
+            .Select(request => (request.PixelMaskExportSamples, request.PixelRasterizationSamples)));
+    }
+
+    [Fact]
     public void EmbeddedFetchIsReplacedBeforeTheProgramRequestsResourceTables()
     {
         _guest.RegisterProgram(CodeA, HeaderA,
