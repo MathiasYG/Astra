@@ -16,19 +16,21 @@ public sealed partial class ResourceTracker
         {
             var read = reads[component];
             if (read.Kind != ScalarValueKind.ScalarBufferWord || read.Operands.Length != 2 ||
-                read.MemoryIndex < 0 || read.MemoryIndex >= _plan.Memory.Count) return false;
+                read.MemoryIndex < 0 || read.MemoryIndex >= _plan.Memory.Count ||
+                !MemoryIndexBelongsTo(read.MemoryIndex, read)) return false;
             var memory = _plan.Memory[read.MemoryIndex];
             if (memory.Kind != MemoryResourceKind.ScalarBuffer || memory.Access != MemoryAccess.Read ||
-                memory.DataBits != 32 || memory.DataDwords != 1 || memory.ComponentIndex != component) return false;
-            if (component != 0 && (memory.Pc != _plan.Memory[reads[0].MemoryIndex].Pc ||
-                (ulong)memory.Offset != (ulong)_plan.Memory[reads[0].MemoryIndex].Offset + (uint)component * 4 ||
-                !_graph.Equivalent(read.Operands[0], reads[0].Operands[0]) ||
-                !_graph.Equivalent(read.Operands[1], reads[0].Operands[1]))) return false;
+                memory.DataBits != 32 || memory.DataDwords != 1) return false;
             indices[component] = read.MemoryIndex;
         }
         var instruction = _graph.Program.Instructions.FirstOrDefault(candidate => candidate.Pc == _plan.Memory[indices[0]].Pc);
         if (instruction?.Control is not Gen5ScalarMemoryControl { DynamicOffsetRegister: not null } ||
             !IndirectSelectorValues.WorkgroupDescriptor.TryCreate(_plan, handle, reads[0].Operands[1], out var workgroup)) return false;
+        // Evaluate every actual word across the bounded dispatch domain. Loads
+        // may split the descriptor, but must execute in the same basic block.
+        var firstPc = _plan.Memory[indices[0]].Pc;
+        var block = _graph.ControlFlow.Blocks.First(candidate => firstPc >= candidate.StartPc && firstPc < candidate.EndPc);
+        if (indices.Any(index => _plan.Memory[index].Pc < block.StartPc || _plan.Memory[index].Pc >= block.EndPc)) return false;
         plan = new IndirectImagePlan
         {
             Handle = handle,

@@ -29,13 +29,14 @@ public sealed class DirectImageTableTests
         if (valid) Assert.All(snapshot.Images, image => Assert.Equal(bit, image[2] & bit));
     }
 
-    internal static Gen5ShaderProgram WorkgroupImageProgram(bool unknownWrite = false) => Program([
+    internal static Gen5ShaderProgram WorkgroupImageProgram(bool unknownWrite = false, bool split = false) => Program([
         Sop2(0, "SLshrB32", 9, Gen5Operand.Scalar(8), Operand(1)),
         Sop2(4, "SMulI32", 9, Gen5Operand.Scalar(9), Operand(64)),
-        ScalarBufferLoad(8, 0, 16, 8, dynamicOffsetRegister: 9),
-        ScalarBufferLoad(16, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 9),
-        Image(24, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
-        unknownWrite ? GlobalAccess(32, "FlatStoreDword", 0) : BufferStore(32, 4), EndProgram(40),
+        ScalarBufferLoad(8, 0, 16, split ? 4u : 8u, dynamicOffsetRegister: 9),
+        .. split ? new[] { ScalarBufferLoad(16, 0, 20, 4, immediateOffset: 16, dynamicOffsetRegister: 9) } : Array.Empty<Gen5ShaderInstruction>(),
+        ScalarBufferLoad(split ? 24u : 16u, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 9),
+        Image(split ? 32u : 24u, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
+        unknownWrite ? GlobalAccess(split ? 40u : 32u, "FlatStoreDword", 0) : BufferStore(split ? 40u : 32u, 4), EndProgram(split ? 48u : 40u),
     ]);
 
     private static ShaderResourcePlan WorkgroupImagePlan(bool unknownWrite = false) =>
@@ -72,14 +73,14 @@ public sealed class DirectImageTableTests
     }
 
     public static (ResourceSnapshot Snapshot, ShaderCompileRequest Request, uint[] Registers, byte[] Table)
-        PrepareWorkgroupImages()
+        PrepareWorkgroupImages(bool split = false)
     {
-        var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 24),
-            Vop1(24, "VMovB32", 0, Operand(0x3F000000)),
-            Vop1(28, "VMovB32", 1, Operand(0x3F000000)),
-            Vop1(32, "VMovB32", 2, Gen5Operand.Scalar(8)),
-            Image(36, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
-            BufferAccess(44, "BufferStoreDword", 4, vectorData: 4, indexEnabled: true, vectorAddress: 2), EndProgram(52)]);
+        var program = Program([.. WorkgroupImageProgram(split: split).Instructions.Where(instruction => instruction.Pc < (split ? 32u : 24u)),
+            Vop1(32, "VMovB32", 0, Operand(0x3F000000)),
+            Vop1(36, "VMovB32", 1, Operand(0x3F000000)),
+            Vop1(40, "VMovB32", 2, Gen5Operand.Scalar(8)),
+            Image(44, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
+            BufferAccess(52, "BufferStoreDword", 4, vectorData: 4, indexEnabled: true, vectorAddress: 2), EndProgram(60)]);
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
             computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
         var inputs = WorkgroupImageInputs(imageFormat: 22);
@@ -184,10 +185,13 @@ public sealed class DirectImageTableTests
         Assert.Equal(new uint[] { 0, 8 }, plan.IndirectImages.Select(access => plan.Memory[access.Key.MemoryIndex].ComponentIndex));
     }
 
-    [Fact]
-    public void WorkgroupTablePreservesLoadsAndMapsRealOffsetsToDifferentImages()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WorkgroupTablePreservesLoadsAndMapsRealOffsetsToDifferentImages(bool split)
     {
-        var plan = WorkgroupImagePlan();
+        var plan = ShaderResourcePlan.Extract(WorkgroupImageProgram(split: split), ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
         Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup);
         Assert.All(plan.IndirectImages, access => Assert.True(access.KeyIsAddressOffset));
         Assert.All(plan.Memory.Entries.Where(memory => memory.Pc == 8), memory => Assert.False(memory.PlanningOnly));

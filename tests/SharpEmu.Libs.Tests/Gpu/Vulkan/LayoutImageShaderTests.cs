@@ -97,12 +97,14 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         output.WriteLine($"Finite sampler filter readback on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
-    [Fact]
-    public void WorkgroupSelectedImagesUseTheExecutedDescriptorOffset()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WorkgroupSelectedImagesUseTheExecutedDescriptorOffset(bool split)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan)) return;
-        var (snapshot, request, registers, tableBytes) = DirectImageTableTests.PrepareWorkgroupImages();
+        var (snapshot, request, registers, tableBytes) = DirectImageTableTests.PrepareWorkgroupImages(split);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);
         using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
