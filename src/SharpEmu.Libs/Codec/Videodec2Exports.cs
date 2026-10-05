@@ -131,8 +131,7 @@ public static class Videodec2Exports
             // Drain in order: report an already-finished frame before queuing a new drain request.
             if (decoder.TryConsumeProtocolReadySignal(out var width, out var height))
             {
-                if (ctx.TryWriteUInt64(outputInfoAddress + 0x10, width) &&
-                    ctx.TryWriteUInt64(outputInfoAddress + 0x18, height))
+                if (TryWritePictureDimensions(ctx, outputInfoAddress, width, height))
                 {
                     _ = ctx.Memory.TryWrite(outputInfoAddress + 0x08, PictureReady);
                 }
@@ -225,8 +224,7 @@ public static class Videodec2Exports
             return SetReturn(ctx, Ok);
         }
 
-        if (!ctx.TryWriteUInt64(outputInfoAddress + 0x10, width) ||
-            !ctx.TryWriteUInt64(outputInfoAddress + 0x18, height) ||
+        if (!TryWritePictureDimensions(ctx, outputInfoAddress, width, height) ||
             !ctx.Memory.TryWrite(outputInfoAddress + 0x08, PictureReady))
         {
             return SetReturn(ctx, Ok);
@@ -234,6 +232,9 @@ public static class Videodec2Exports
 
         return SetReturn(ctx, Ok);
     }
+
+    internal static bool TryWritePictureDimensions(CpuContext ctx, ulong address, uint width, uint height) =>
+        ctx.TryWriteUInt32(address + 0x10, width) && ctx.TryWriteUInt32(address + 0x18, height);
 
     private static readonly byte[] NoPicture = [0];
     private static readonly byte[] PictureReady = [1];
