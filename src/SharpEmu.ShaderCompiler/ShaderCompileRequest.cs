@@ -179,7 +179,8 @@ public sealed class ShaderCompileRequest
     // Explicit interpolation sample without requiring a fragment invocation per sample.
     // The caller must select a sample valid for the pipeline's rasterization count.
     public uint? PixelInterpolationSample { get; init; }
-    // Selected sample offsets relative to pixel center, row-major over a 2x2 pixel grid.
+    // Offsets relative to pixel center over a row-major 2x2 grid. A fixed sample uses
+    // four offsets; per-sample interpolation uses rasterizationSamples offsets per pixel.
     public IReadOnlyList<(float X, float Y)> PixelCustomSampleOffsets { get; init; } = [];
     public bool EarlyFragmentTests { get; init; }
     // Samples excluded from triggering guest fragment execution after early depth/stencil tests.

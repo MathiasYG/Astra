@@ -12,6 +12,38 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5InterpolationParameterTests
 {
     [Theory]
+    [InlineData(1u)]
+    [InlineData(16u)]
+    public void PerSampleCustomInterpolation_UsesSampleIdAndOffsets(uint inputs)
+    {
+        var instructions = new Gen5ShaderInstruction[]
+        {
+            new(0, Gen5ShaderEncoding.Vintrp, "VInterpMovF32", [0], [Gen5Operand.Vector(0)],
+                [Gen5Operand.Vector(6)], new Gen5InterpolationControl(1, 0)),
+            new(4, Gen5ShaderEncoding.Vintrp, "VInterpP2F32", [0], [Gen5Operand.Vector(1)],
+                [Gen5Operand.Vector(5)], new Gen5InterpolationControl(0, 0)),
+            ResourceTestProgram.EndProgram(8),
+        };
+        var program = ResourceTestProgram.Program(instructions);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = inputs, PixelInputEnable = inputs, PixelInputCntl = [0u, 0u],
+            PixelRasterizationSamples = 2,
+            PixelCustomSampleOffsets = [(-.25f, 0f), (.25f, 0f), (-.25f, 0f), (.25f, 0f),
+                (.25f, 0f), (-.25f, 0f), (.25f, 0f), (-.25f, 0f)],
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var spirv = Instructions(shader.Spirv);
+        Assert.Contains(spirv, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+            instruction.Operands[2] == (uint)SpirvBuiltIn.SampleId);
+        Assert.Contains(spirv, instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 78);
+        Assert.DoesNotContain(spirv, instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 77);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
     [InlineData(true, 0xFFFEu, true)]
     [InlineData(true, 0xFFFFu, true)]
     [InlineData(true, 0u, false)]
