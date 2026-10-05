@@ -14,6 +14,47 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 public sealed class ShaderProgramCacheTests : IDisposable
 {
     [Theory]
+    [InlineData(1u, 4)]
+    [InlineData(2u, 8)]
+    [InlineData(0x10u, 4)]
+    [InlineData(0x20u, 8)]
+    public void CustomSampleOffsetsAreUsedOnlyForSampleInterpolation(uint activeInput, int expectedCount)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var shaderInterface = new SharpEmu.Libs.Gpu.GpuCommands.Registers.ShaderInterfaceRegisters
+        {
+            PixelInputEnable = activeInput,
+            PixelInputAddress = activeInput,
+        };
+        var offsets = Enumerable.Repeat((X: -.25f, Y: 0f), expectedCount).ToArray();
+        var info = PixelStageInputResolver.Resolve(_guest.Context, source.Registered, shaderInterface,
+            new byte[8], new SharpEmu.Libs.Gpu.Images.ColorComponentMap[8], 0,
+            rasterizationSamples: 2, customSampleOffsets: offsets);
+        Assert.Equal((activeInput & 0x11u) != 0 ? expectedCount : 0, info.CustomSampleOffsets.Count);
+    }
+
+    [Fact]
+    public void CustomSamplePositionsReachCompilerAndSeparateCachedPrograms()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        ShaderProgram Compile(float x)
+        {
+            var cursor = 0u;
+            return _guest.Programs.GetOrCompile(source,
+                new StageCompileOptions { PixelInfo = new PixelInputInfo
+                    { InterpolationSample = 0, CustomSampleOffsets = Enumerable.Repeat((X: x, Y: 0f), 4).ToArray() } },
+                ref cursor, out _);
+        }
+        var left = Compile(-.25f);
+        var right = Compile(.25f);
+        Assert.NotEqual(left, right);
+        Assert.Equal(left, Compile(-.25f));
+        Assert.Equal(-.25f, _guest.Compiler.Requests[0].PixelCustomSampleOffsets[0].X);
+        Assert.Equal(.25f, _guest.Compiler.Requests[1].PixelCustomSampleOffsets[0].X);
+    }
+    [Theory]
     [InlineData(0u, 0u)]
     [InlineData(1u, 0xFFFEu)]
     [InlineData(2u, 0u)]

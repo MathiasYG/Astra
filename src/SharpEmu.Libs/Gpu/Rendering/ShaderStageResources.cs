@@ -164,6 +164,7 @@ public sealed class PixelInputInfo
     public uint MaskExportSamples { get; init; } = 1;
     public uint RasterizationSamples { get; init; } = 1;
     public uint? InterpolationSample { get; init; }
+    public IReadOnlyList<(float X, float Y)> CustomSampleOffsets { get; init; } = [];
     public bool SampleShading { get; init; }
     public bool EarlyDepth { get; init; }
     public uint ShaderSampleExclusionMask { get; init; }

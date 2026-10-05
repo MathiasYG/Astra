@@ -67,7 +67,8 @@ public static class PixelStageInputResolver
         uint maskExportSamples = 1,
         uint rasterizationSamples = 1,
         uint? pixelShaderIterationSamples = null,
-        uint shaderSampleExclusionMask = 0)
+        uint shaderSampleExclusionMask = 0,
+        IReadOnlyList<(float X, float Y)>? customSampleOffsets = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         if (pixelShaderIterationSamples is uint iterations &&
@@ -135,6 +136,8 @@ public static class PixelStageInputResolver
             PositionZ = (activeInputs & InputPositionZ) != 0,
             PositionW = (activeInputs & InputPositionW) != 0,
             FrontFace = (activeInputs & InputFrontFace) != 0,
+            CustomSampleOffsets = (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0
+                ? customSampleOffsets ?? [] : [],
             SampleShading = pixelShaderIterationSamples is uint iterationCount
                 ? iterationCount > 1 : (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
             InterpolationSample = pixelShaderIterationSamples == 1 && rasterizationSamples > 1 &&
