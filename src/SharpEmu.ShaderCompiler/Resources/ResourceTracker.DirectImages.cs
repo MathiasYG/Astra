@@ -144,6 +144,13 @@ public sealed partial class ResourceTracker
             return false;
 
         // Include the all-zero input result unless the scan's incoming edge proves it cannot occur.
+        if (TryGetGuardedSelector(reads[0].Operands[1], keyMemory.Pc, out var guarded, out var bound))
+        {
+            var made = MakeCandidates(guarded, bound, out var guardedPlan);
+            plan = guardedPlan;
+            return made;
+        }
+
         var pending = new Stack<ScalarValue>(reads.Select(read => read.Operands[1]));
         var visited = new HashSet<ScalarValue>();
         ScalarValue? selector = null;
@@ -170,45 +177,111 @@ public sealed partial class ResourceTracker
         }
         if (selector is null) return false;
 
-        var candidates = new List<DirectImageCandidate>();
-        var sources = new List<DescriptorSource>();
-        var keys = new HashSet<uint>();
-        IEnumerable<uint> results = finiteValues ?? Enumerable.Range(0, 32).Select(index => (uint)index).ToArray();
-        if (finiteValues is null && !_graph.HasNonZeroBitScanInput(selector)) results = results.Append(uint.MaxValue);
-        foreach (var result in results)
-        {
-            var replacements = new Dictionary<ScalarValue, ScalarValue> { [selector] = _graph.Constant(result) };
-            var memo = new Dictionary<ScalarValue, ScalarValue>();
-            var key = _graph.Substitute(keyRead.Operands[1], replacements, memo);
-            if (!key.IsConstant || key.Type != ScalarValueType.U32 || !keys.Add(key.ConstantU32)) return false;
-            var source = new DescriptorSource
-            {
-                Dwords = reads.Select(read => _graph.Substitute(read, replacements, memo)).ToArray(),
-            };
-            if (!ValidateSource(source, out _)) return false;
-            sources.Add(source);
-            candidates.Add(new DirectImageCandidate(key.ConstantU32, 0));
-        }
+        var madeCandidates = MakeCandidates(selector, finiteValues, out var selectedPlan);
+        plan = selectedPlan;
+        return madeCandidates;
 
-        for (var index = 0; index < candidates.Count; index++)
-            candidates[index] = candidates[index] with { Source = InternSource(sources[index]) };
-        var imageSource = new DescriptorSource
+        bool MakeCandidates(ScalarValue selected, uint[]? domain, out IndirectImagePlan candidatePlan)
         {
-            Dwords = sources[0].Dwords,
-            IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0) { DirectCandidates = candidates },
-        };
-        plan = new IndirectImagePlan
-        {
-            Handle = handle,
-            Source = InternSource(imageSource),
-            Key = keyRead,
-            KeyIsAddressOffset = true,
-            SuppressMemoryReads = canSuppressMemoryReads,
-            Memory = memoryIndices,
-            Reads = reads,
-        };
-        return true;
+            candidatePlan = null!;
+            var candidates = new List<DirectImageCandidate>();
+            var sources = new List<DescriptorSource>();
+            var keys = new HashSet<uint>();
+            IEnumerable<uint> results = domain ?? Enumerable.Range(0, 32).Select(index => (uint)index).ToArray();
+            if (domain is null && !_graph.HasNonZeroBitScanInput(selected)) results = results.Append(uint.MaxValue);
+            foreach (var result in results)
+            {
+                var replacements = new Dictionary<ScalarValue, ScalarValue> { [selected] = _graph.Constant(result) };
+                var memo = new Dictionary<ScalarValue, ScalarValue>();
+                var key = _graph.Substitute(keyRead.Operands[1], replacements, memo);
+                if (!key.IsConstant || key.Type != ScalarValueType.U32 || !keys.Add(key.ConstantU32)) return false;
+                var source = new DescriptorSource
+                {
+                    Dwords = reads.Select(read => _graph.Substitute(read, replacements, memo)).ToArray(),
+                };
+                if (!ValidateSource(source, out _)) return false;
+                sources.Add(source);
+                candidates.Add(new DirectImageCandidate(key.ConstantU32, 0));
+            }
+
+            for (var index = 0; index < candidates.Count; index++)
+                candidates[index] = candidates[index] with { Source = InternSource(sources[index]) };
+            var imageSource = new DescriptorSource
+            {
+                Dwords = sources[0].Dwords,
+                IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0) { DirectCandidates = candidates },
+            };
+            candidatePlan = new IndirectImagePlan
+            {
+                Handle = handle,
+                Source = InternSource(imageSource),
+                Key = keyRead,
+                KeyIsAddressOffset = true,
+                SuppressMemoryReads = canSuppressMemoryReads,
+                Memory = memoryIndices,
+                Reads = reads,
+            };
+            return true;
+        }
     }
+
+    private bool TryGetGuardedSelector(ScalarValue offset, uint loadPc, out ScalarValue selector, out uint[] values)
+    {
+        selector = null!;
+        values = [];
+        if (offset.Kind == ScalarValueKind.Operation && offset.Operation == ScalarOperation.IAdd32 &&
+            offset.Operands.Length == 2)
+        {
+            if (offset.Operands[1].IsConstant) offset = offset.Operands[0];
+            else if (offset.Operands[0].IsConstant) offset = offset.Operands[1];
+            else return false;
+        }
+        if (offset.Kind != ScalarValueKind.Operation || offset.Operation != ScalarOperation.IMul32 ||
+            offset.Operands.Length != 2) return false;
+        var key = offset.Operands[1].IsConstant ? offset.Operands[0] :
+            offset.Operands[0].IsConstant ? offset.Operands[1] : null;
+        if (key is null || key.Type != ScalarValueType.U32) return false;
+        var flow = _graph.ControlFlow;
+        var loadBlock = Enumerable.Range(0, flow.Blocks.Count).First(index =>
+            loadPc >= flow.Blocks[index].StartPc && loadPc < flow.Blocks[index].EndPc);
+        foreach (var (pc, condition) in _plan.FlattenedBranchConditions)
+        {
+            if (condition.Kind != ScalarValueKind.Operation || condition.Operation != ScalarOperation.UGreaterThanEqual32 ||
+                condition.Operands.Length != 2 || !_graph.Equivalent(condition.Operands[0], key) ||
+                !condition.Operands[1].IsConstant) continue;
+            var limit = condition.Operands[1].ConstantU32;
+            if (limit == 0 || limit > 4096) continue;
+            var branch = _graph.Program.Instructions.First(instruction => instruction.Pc == pc);
+            // Only SCC=1 takes the rejected (key >= limit) edge. Reversing
+            // the branch would admit precisely the values excluded here.
+            if (branch.Opcode != "SCbranchScc1") continue;
+            if (!SharpEmu.ShaderCompiler.Ir.Gen5IrBranchResolver.Instance.TryGetBranchTarget(branch, out var target) ||
+                !flow.BlockByStartPc.TryGetValue(target, out var rejected) ||
+                !flow.BlockByStartPc.TryGetValue(pc + (uint)branch.Words.Count * 4, out var admitted)) continue;
+            var guard = Enumerable.Range(0, flow.Blocks.Count).First(index =>
+                pc >= flow.Blocks[index].StartPc && pc < flow.Blocks[index].EndPc);
+            if (ReachesLoad(0) || ReachesLoad(rejected)) continue;
+            selector = key;
+            values = Enumerable.Range(0, (int)limit).Select(value => (uint)value).ToArray();
+            return true;
+
+            bool ReachesLoad(int start)
+            {
+                var pending = new Stack<int>(); pending.Push(start);
+                var visited = new HashSet<int>();
+                while (pending.TryPop(out var block))
+                {
+                    if (!visited.Add(block)) continue;
+                    if (block == loadBlock) return true;
+                    foreach (var next in flow.Successors[block])
+                        if (block != guard || next != admitted) pending.Push(next);
+                }
+                return false;
+            }
+        }
+        return false;
+    }
+
 
     // Resource-graph uses omit ordinary shader arithmetic; check those reads before removing a load.
     private bool HasOnlyImageConsumers(MemoryAccessInfo memory, ScalarValue handle)

@@ -36,6 +36,7 @@ public sealed class ShaderResourcePlan
     public IReadOnlyList<ResourceTableRead> TableReads { get; private set; } = [];
     public IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex { get; private set; } = new Dictionary<int, uint>();
     public IReadOnlyList<ScalarValue> DynamicReads { get; private set; } = [];
+    internal IReadOnlyDictionary<uint, ScalarValue> FlattenedBranchConditions { get; private set; } = new Dictionary<uint, ScalarValue>();
     public IReadOnlyList<byte> CleanFlatSlots { get; private set; } = [];
     public IReadOnlyList<IndirectImageAccess> IndirectImages { get; private set; } = [];
     public IReadOnlyList<BufferCandidateTablePlan> BufferCandidateTables { get; private set; } = [];
@@ -124,6 +125,9 @@ public sealed class ShaderResourcePlan
                 access.Offset is null ? null : Rewrite(access.Offset),
                 access.Active is null ? null : Rewrite(access.Active));
         }
+
+        // Guards and resource keys must use the same flattened memory-read identities.
+        plan.FlattenedBranchConditions = graph.BranchConditions.ToDictionary(pair => pair.Key, pair => Rewrite(pair.Value));
 
         // Diagnostics observe rewritten values before descriptor validation.
         beforeResourceTracking?.Invoke(plan);

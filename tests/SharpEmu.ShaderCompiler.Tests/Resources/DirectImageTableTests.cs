@@ -101,6 +101,89 @@ public sealed class DirectImageTableTests
         return (snapshot, request, inputs.UserData.ToArray(), table);
     }
 
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    public void GuardedDynamicImageRequiresTheAdmittedEdge(bool wrongKey, bool rejectedEdgeRejoins, bool inverted, bool accepted)
+    {
+        var prefix = FiniteBufferImageProgram(unknown: true).Instructions.Where(instruction => instruction.Pc < 36);
+        var program = Program(prefix.Concat(new Gen5ShaderInstruction[]
+        {
+            Sopc(36, "SCmpGeU32", Gen5Operand.Scalar(wrongKey ? 105u : 106u), Operand(3)),
+            Branch(40, inverted ? "SCbranchScc0" : "SCbranchScc1", (short)(rejectedEdgeRejoins ? 0 : 7)),
+            Sop2(44, "SMulI32", 106, Gen5Operand.Scalar(106), Operand(384)),
+            ScalarBufferLoad(48, 0, 16, 8, dynamicOffsetRegister: 106),
+            Image(56, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
+            Nop(64), Nop(68), EndProgram(72),
+        }).ToArray());
+        var plan = Extract(program, userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        if (accepted)
+        {
+            Assert.NotNull(source.IndirectImage?.DirectCandidates);
+            Assert.Equal(new uint[] { 0, 384, 768 }, source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset));
+            Assert.Null(source.ZeroExtentBufferSource);
+        }
+        else Assert.Null(source.IndirectImage);
+    }
+
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    public void GuardedDescriptorKeepsItsProofAfterScalarReadsAreFlattened(bool wrongKey, bool rejoins, bool inverted, bool accepted)
+    {
+        var program = Program([
+            ScalarLoad(0, 4, 10),
+            Vopc(8, "VCmpEqU32", Operand(0), 0),
+            Vop3(12, "VCndmaskB32", 1, Operand(0), Gen5Operand.Scalar(10), Gen5Operand.Scalar(106)),
+            ReadFirstLane(20, 106, 1),
+            Sopc(24, "SCmpGeU32", Gen5Operand.Scalar(wrongKey ? 10u : 106u), Operand(3)),
+            Branch(28, inverted ? "SCbranchScc0" : "SCbranchScc1", (short)(rejoins ? 0 : 5)),
+            Sop2(32, "SMulI32", 106, Gen5Operand.Scalar(106), Operand(64)),
+            ScalarBufferLoad(36, 0, 16, 8, dynamicOffsetRegister: 106),
+            Image(44, "ImageLoad", 16, dmask: 1), EndProgram(52),
+        ]);
+        var plan = Extract(program, userDataCount: 6);
+        Assert.NotEmpty(plan.TableReads);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Equal(accepted, source.IndirectImage?.DirectCandidates is not null);
+        if (accepted)
+        {
+            Assert.Null(source.ZeroExtentBufferSource);
+            Assert.Equal(new uint[] { 0, 64, 128 }, source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset));
+        }
+    }
+
+    [Fact]
+    public void GuardedWideScalarLoadPlansBothDescriptorsWithTheOriginalOffset()
+    {
+        var prefix = FiniteBufferImageProgram(unknown: true).Instructions.Where(instruction => instruction.Pc < 36);
+        var program = Program(prefix.Concat(new Gen5ShaderInstruction[]
+        {
+            Sopc(36, "SCmpGeU32", Gen5Operand.Scalar(106), Operand(3)),
+            Branch(40, "SCbranchScc1", 9),
+            Sop2(44, "SMulI32", 106, Gen5Operand.Scalar(106), Operand(384)),
+            ScalarBufferLoad(48, 0, 16, 16, dynamicOffsetRegister: 106),
+            Image(56, "ImageLoad", 16, dmask: 1, vectorAddress: 4),
+            Image(64, "ImageLoad", 24, dmask: 1, vectorAddress: 4),
+            Nop(72), Nop(76), EndProgram(80),
+        }).ToArray());
+        var plan = Extract(program, userDataCount: 4);
+        Assert.Equal(2, plan.Info.Images.Count);
+        foreach (var image in plan.Info.Images)
+        {
+            var source = plan.DescriptorSources[(int)image.Source];
+            Assert.NotNull(source.IndirectImage?.DirectCandidates);
+            Assert.Equal(new uint[] { 0, 384, 768 }, source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset));
+            Assert.Null(source.ZeroExtentBufferSource);
+        }
+        Assert.Equal(new uint[] { 0, 8 }, plan.IndirectImages.Select(access => plan.Memory[access.Key.MemoryIndex].ComponentIndex));
+    }
+
     [Fact]
     public void WorkgroupTablePreservesLoadsAndMapsRealOffsetsToDifferentImages()
     {
