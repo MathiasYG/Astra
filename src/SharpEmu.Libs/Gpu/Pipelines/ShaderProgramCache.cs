@@ -644,6 +644,7 @@ internal sealed class ShaderProgramCache
                     PixelSampleMaskExportEnable = info.SampleMaskExportEnable,
                     PixelMaskExportSamples = info.MaskExportSamples,
                     PixelRasterizationSamples = info.RasterizationSamples,
+                    PixelInterpolationSample = info.InterpolationSample,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
                     SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,

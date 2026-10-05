@@ -65,9 +65,15 @@ public static class PixelStageInputResolver
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         uint inputCount,
         uint maskExportSamples = 1,
-        uint rasterizationSamples = 1)
+        uint rasterizationSamples = 1,
+        uint? pixelShaderIterationSamples = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
+        if (pixelShaderIterationSamples is uint iterations &&
+            (iterations == 0 || rasterizationSamples == 0 || iterations > rasterizationSamples ||
+             (iterations != 1 && iterations != rasterizationSamples)))
+            throw SubmissionScheduler.Fatal($"Unsupported pixel-shader iteration counts: iterations={iterations} raster={rasterizationSamples}.");
+
         var customMask = 0u;
         var semanticCount = Math.Min(Math.Min(shader.InputSemanticsCount, inputCount), (uint)PixelInputInfo.InterpolatorCount);
         for (var index = 0u; index < semanticCount; index++)
@@ -119,7 +125,10 @@ public static class PixelStageInputResolver
             PositionZ = (activeInputs & InputPositionZ) != 0,
             PositionW = (activeInputs & InputPositionW) != 0,
             FrontFace = (activeInputs & InputFrontFace) != 0,
-            SampleShading = (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
+            SampleShading = pixelShaderIterationSamples is uint iterationCount
+                ? iterationCount > 1 : (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
+            InterpolationSample = pixelShaderIterationSamples == 1 && rasterizationSamples > 1 &&
+                (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0 ? 0u : null,
             NoPerspective = (activeInputs & InputLinearCenter) != 0,
             KillEnable = control.KillEnable,
             DepthExportEnable = control.DepthExportEnable,

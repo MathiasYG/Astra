@@ -59,6 +59,61 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal(new[] { false, true }, _guest.Compiler.Requests.Select(request => request.PixelDepthExportEnable));
     }
 
+    [Theory]
+    [InlineData(1u, 1u, 2u, false, 0u)]
+    [InlineData(16u, 1u, 2u, false, 0u)]
+    [InlineData(1u, 2u, 2u, true, uint.MaxValue)]
+    [InlineData(2u, 2u, 2u, true, uint.MaxValue)]
+    [InlineData(2u, 1u, 2u, false, uint.MaxValue)]
+    public void PixelIterationCountIsIndependentOfSampleQualifiedInputs(uint inputs, uint iterations,
+        uint raster, bool sampleShading, uint fixedSample)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var shaderInterface = new SharpEmu.Libs.Gpu.GpuCommands.Registers.ShaderInterfaceRegisters
+        { PixelInputEnable = inputs, PixelInputAddress = inputs };
+        var info = PixelStageInputResolver.Resolve(_guest.Context, source.Registered, shaderInterface,
+            new byte[8], new SharpEmu.Libs.Gpu.Images.ColorComponentMap[8], 0,
+            rasterizationSamples: raster, pixelShaderIterationSamples: iterations);
+        Assert.Equal(sampleShading, info.SampleShading);
+        Assert.Equal(fixedSample == uint.MaxValue ? null : (uint?)fixedSample, info.InterpolationSample);
+        var cursor = 0u;
+        _guest.Programs.GetOrCompile(source, new StageCompileOptions { PixelInfo = info }, ref cursor, out _);
+        Assert.Equal(info.InterpolationSample, Assert.Single(_guest.Compiler.Requests).PixelInterpolationSample);
+    }
+
+    [Theory]
+    [InlineData(0u, 2u)]
+    [InlineData(4u, 2u)]
+    [InlineData(2u, 4u)]
+    public void UnverifiedPixelIterationMappingsAreRejected(uint iterations, uint raster)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var failure = Assert.Throws<SchedulerFatalException>(() => PixelStageInputResolver.Resolve(
+            _guest.Context, source.Registered, new(), new byte[8],
+            new SharpEmu.Libs.Gpu.Images.ColorComponentMap[8], 0,
+            rasterizationSamples: raster, pixelShaderIterationSamples: iterations));
+        Assert.Contains("pixel-shader iteration counts", failure.Message);
+    }
+
+    [Fact]
+    public void ExplicitInterpolationSampleSeparatesCachedPixelPrograms()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        ShaderProgram Compile(uint? sample)
+        {
+            var cursor = 0u;
+            return _guest.Programs.GetOrCompile(source,
+                new StageCompileOptions { PixelInfo = new PixelInputInfo { InterpolationSample = sample } }, ref cursor, out _);
+        }
+        var pixel = Compile(null); var fixedSample = Compile(0);
+        Assert.NotEqual(pixel, fixedSample);
+        Assert.Equal(fixedSample, Compile(0));
+        Assert.Equal(new uint?[] { null, 0 }, _guest.Compiler.Requests.Select(request => request.PixelInterpolationSample));
+    }
+
     [Fact]
     public void SampleMaskExportCountsReachCompilerAndSeparateCachedPrograms()
     {
