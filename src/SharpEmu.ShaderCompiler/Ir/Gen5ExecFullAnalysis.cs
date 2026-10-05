@@ -38,7 +38,10 @@ public static class Gen5ExecFullAnalysis
     public static IReadOnlySet<uint> AnalyzeInitializedLanes(Gen5ShaderProgram program, uint initializationPc, bool wave32) =>
         AnalyzeCore(program, wave32, initializationPc);
 
-    private static IReadOnlySet<uint> AnalyzeCore(Gen5ShaderProgram program, bool wave32, uint? initializationPc)
+    public static IReadOnlySet<uint> AnalyzeMatchingExecutionLanes(Gen5ShaderProgram program, uint referencePc, bool wave32) =>
+        AnalyzeCore(program, wave32, referencePc, allowSubsets: false);
+
+    private static IReadOnlySet<uint> AnalyzeCore(Gen5ShaderProgram program, bool wave32, uint? initializationPc, bool allowSubsets = true)
     {
         var instructions = program.Instructions;
         var result = new HashSet<uint>();
@@ -70,7 +73,7 @@ public static class Gen5ExecFullAnalysis
             queued[index] = false;
             var instruction = instructions[index];
             var input = instruction.Pc == initializationPc ? new State(true, true, 0) : states[index];
-            var output = Transfer(instruction, input, wave32, initializationPc.HasValue);
+            var output = Transfer(instruction, input, wave32, initializationPc.HasValue && allowSubsets);
             void Flow(int successor)
             {
                 var merged = State.Meet(states[successor], output);

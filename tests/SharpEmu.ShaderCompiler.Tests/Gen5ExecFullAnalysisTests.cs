@@ -35,6 +35,20 @@ public sealed class Gen5ExecFullAnalysisTests
         Assert.DoesNotContain(use, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false));
     }
 
+    [Fact]
+    public void MatchingExecutionRequiresRestoringTheSavedMask()
+    {
+        var reference = VectorAdd();
+        Scalar("SMovB64", 8, Gen5Operand.Scalar(Exec));
+        Kill();
+        var restricted = VectorAdd();
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(8));
+        var restored = VectorAdd();
+        var result = Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(new Gen5ShaderProgram(0, _program), reference, false);
+        Assert.DoesNotContain(restricted, result);
+        Assert.Contains(restored, result);
+    }
+
     private const uint Exec = 126;
 
     private readonly List<Gen5ShaderInstruction> _program = [];
