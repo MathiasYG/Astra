@@ -640,6 +640,7 @@ internal sealed class ShaderProgramCache
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     PixelOutputs = options.PixelOutputs,
                     EarlyFragmentTests = info.EarlyDepth,
+                    PixelDepthExportEnable = info.DepthExportEnable,
                     PixelSampleMaskExportEnable = info.SampleMaskExportEnable,
                     PixelMaskExportSamples = info.MaskExportSamples,
                     PixelRasterizationSamples = info.RasterizationSamples,

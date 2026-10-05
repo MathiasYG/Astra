@@ -376,6 +376,54 @@ public sealed class Gen5InterpolationParameterTests
         };
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MrtzDepth_PreservesDepthAndAnOptionalSampleMask(bool sampleMask)
+    {
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(
+            DepthExportRequest(sampleMask), out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        var depth = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+            instruction.Operands[2] == (uint)SpirvBuiltIn.FragDepth).Operands[0];
+        Assert.Equal(2, instructions.Count(instruction => instruction.Opcode == SpirvOp.Store &&
+            instruction.Operands[0] == depth));
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.ExecutionMode &&
+            instruction.Operands[1] == (uint)SpirvExecutionMode.DepthReplacing);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.ExecutionMode &&
+            instruction.Operands[1] == (uint)SpirvExecutionMode.EarlyFragmentTests);
+        Assert.Equal(sampleMask, instructions.Any(instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+            instruction.Operands[2] == (uint)SpirvBuiltIn.SampleMask));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(true, false, "late fragment tests")]
+    [InlineData(false, true, "compressed MRTZ")]
+    public void MrtzDepth_RejectsIncompatibleState(bool early, bool compressed, string reason)
+    {
+        Assert.False(Gen5SpirvTranslator.TryCompileProgram(
+            DepthExportRequest(false, early, compressed), out _, out var error));
+        Assert.Contains(reason, error);
+    }
+
+    private static ShaderCompileRequest DepthExportRequest(bool sampleMask, bool early = false, bool compressed = false)
+    {
+        var export = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Exp, "Exp", [],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2), Gen5Operand.Vector(3)], [],
+            new Gen5ExportControl(8, sampleMask ? 5u : 1u, compressed, true, true));
+        var program = ResourceTestProgram.Program(export, ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        return new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelDepthExportEnable = true,
+            PixelSampleMaskExportEnable = sampleMask,
+            EarlyFragmentTests = early,
+        };
+    }
+
     private static ShaderCompileRequest Request(
         uint selector, bool custom, uint inputs = 2, string opcode = "VInterpMovF32",
         uint inputCntl = 0x401, bool supportsPerVertex = true, uint? fixedSample = null, bool earlyTests = false)

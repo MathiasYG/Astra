@@ -41,6 +41,25 @@ public sealed class ShaderProgramCacheTests : IDisposable
     }
 
     [Fact]
+    public void DepthExportEnableReachesCompilerAndSeparatesCachedPrograms()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        ShaderProgram CompilePixel(bool depthExport)
+        {
+            var cursor = 0u;
+            return _guest.Programs.GetOrCompile(source,
+                new StageCompileOptions { PixelInfo = new PixelInputInfo { DepthExportEnable = depthExport } },
+                ref cursor, out _);
+        }
+        var disabled = CompilePixel(false);
+        var enabled = CompilePixel(true);
+        Assert.NotEqual(disabled, enabled);
+        Assert.Equal(enabled, CompilePixel(true));
+        Assert.Equal(new[] { false, true }, _guest.Compiler.Requests.Select(request => request.PixelDepthExportEnable));
+    }
+
+    [Fact]
     public void SampleMaskExportCountsReachCompilerAndSeparateCachedPrograms()
     {
         _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
