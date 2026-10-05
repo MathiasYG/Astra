@@ -12,6 +12,31 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5InterpolationParameterTests
 {
     [Theory]
+    [InlineData(true, 0xFFFEu, true)]
+    [InlineData(true, 0xFFFFu, true)]
+    [InlineData(true, 0u, false)]
+    [InlineData(false, 0xFFFEu, false)]
+    public void SampleExclusion_UsesPostDepthCoverageOnlyWithEarlyTests(bool early, uint mask, bool gated)
+    {
+        var program = ResourceTestProgram.Program(ResourceTestProgram.EndProgram(0));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            EarlyFragmentTests = early,
+            PixelShaderSampleExclusionMask = mask,
+            PixelRasterizationSamples = 2,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        Assert.Equal(gated, instructions.Any(instruction => instruction.Opcode == SpirvOp.ExecutionMode &&
+            instruction.Operands[1] == (uint)SpirvExecutionMode.PostDepthCoverage));
+        Assert.Equal(gated, instructions.Any(instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+            instruction.Operands[2] == (uint)SpirvBuiltIn.SampleMask));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void FixedCustomSampleInterpolation_UsesOffsetsInsteadOfSampleLookup(bool linear)

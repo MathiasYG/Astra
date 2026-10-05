@@ -128,6 +128,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<uint, uint> _pixelInputs = [];
         private readonly Dictionary<uint, SpirvPixelOutput> _pixelOutputs = [];
         private uint _pixelSampleMaskOutput;
+        private uint _pixelInvocationCoverageInput;
         private uint _pixelDepthOutput;
         private readonly Dictionary<uint, uint> _vertexOutputs = [];
         private readonly Dictionary<uint, SpirvVertexInput> _vertexInputsByPc = [];
@@ -321,6 +322,22 @@ public static partial class Gen5SpirvTranslator
                 var main = _module.BeginFunction(_voidType, functionType);
                 _module.AddName(main, "main");
                 _module.AddLabel();
+                if (_pixelInvocationCoverageInput != 0)
+                {
+                    var coveragePointer = _module.AddInstruction(SpirvOp.AccessChain,
+                        _module.TypePointer(SpirvStorageClass.Input, _intType),
+                        _pixelInvocationCoverageInput, UInt(0));
+                    var coverage = Bitcast(_uintType, Load(_intType, coveragePointer));
+                    var eligible = BitwiseAnd(coverage, UInt(~_request.PixelShaderSampleExclusionMask));
+                    var executeLabel = _module.AllocateId();
+                    var excludedLabel = _module.AllocateId();
+                    var execute = _module.AddInstruction(SpirvOp.INotEqual, _boolType, eligible, UInt(0));
+                    _module.AddStatement(SpirvOp.SelectionMerge, executeLabel, 0);
+                    _module.AddStatement(SpirvOp.BranchConditional, execute, executeLabel, excludedLabel);
+                    _module.AddLabel(excludedLabel);
+                    _module.AddStatement(SpirvOp.Kill);
+                    _module.AddLabel(executeLabel);
+                }
                 if (_stage == Gen5SpirvStage.Pixel &&
                     Environment.GetEnvironmentVariable(
                         "SHARPEMU_FORCE_TITLE_EARLY_COLOR") == "1" &&
@@ -542,6 +559,8 @@ public static partial class Gen5SpirvTranslator
                     _module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
                     if (_request.EarlyFragmentTests)
                         _module.AddExecutionMode(main, SpirvExecutionMode.EarlyFragmentTests);
+                    if (_pixelInvocationCoverageInput != 0)
+                        _module.AddExecutionMode(main, SpirvExecutionMode.PostDepthCoverage);
                     if (_pixelDepthOutput != 0)
                         _module.AddExecutionMode(main, SpirvExecutionMode.DepthReplacing);
                 }
@@ -1076,6 +1095,18 @@ public static partial class Gen5SpirvTranslator
                     (uint)SpirvBuiltIn.FragCoord);
                 _interfaces.Add(_fragCoordInput);
                 DeclarePixelSystemInputs();
+                if (_request.EarlyFragmentTests && (_request.PixelShaderSampleExclusionMask & 0xFFFFu) != 0)
+                {
+                    _module.AddExtension("SPV_KHR_post_depth_coverage");
+                    _module.AddCapability(SpirvCapability.SampleMaskPostDepthCoverage);
+                    _module.AddCapability(SpirvCapability.SampleRateShading);
+                    _pixelInvocationCoverageInput = _module.AddGlobalVariable(
+                        _module.TypePointer(SpirvStorageClass.Input, _module.TypeArray(_intType, 1)),
+                        SpirvStorageClass.Input);
+                    _module.AddDecoration(_pixelInvocationCoverageInput, SpirvDecoration.BuiltIn,
+                        (uint)SpirvBuiltIn.SampleMask);
+                    _interfaces.Add(_pixelInvocationCoverageInput);
+                }
                 if (_request.PixelDepthExportEnable)
                 {
                     _pixelDepthOutput = _module.AddGlobalVariable(

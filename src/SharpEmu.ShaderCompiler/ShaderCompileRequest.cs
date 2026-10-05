@@ -182,6 +182,8 @@ public sealed class ShaderCompileRequest
     // Selected sample offsets relative to pixel center, row-major over a 2x2 pixel grid.
     public IReadOnlyList<(float X, float Y)> PixelCustomSampleOffsets { get; init; } = [];
     public bool EarlyFragmentTests { get; init; }
+    // Samples excluded from triggering guest fragment execution after early depth/stencil tests.
+    public uint PixelShaderSampleExclusionMask { get; init; }
     public bool PixelDepthExportEnable { get; init; }
     public bool PixelSampleMaskExportEnable { get; init; }
     public uint PixelMaskExportSamples { get; init; } = 1;
