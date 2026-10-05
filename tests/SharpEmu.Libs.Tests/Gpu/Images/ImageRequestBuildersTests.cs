@@ -361,6 +361,21 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void DepthTarget_ResolvesHtileBeyondTheFirst32Slices()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        var words = RegisterWords.Depth(Base, 64, 64);
+        words = words with { ZInfo = words.ZInfo | (1u << 29), HtileBase = Base + 0x800000,
+            DepthView = 80u | (80u << 13) };
+        var resolution = ImageRequestBuilders.DepthTarget(words, _vulkan.DeviceInfo);
+        Assert.NotNull(resolution);
+        Assert.True(resolution.Value.HasHtile);
+        Assert.Equal(80u, resolution.Value.Request.View.BaseLayer);
+        Assert.Equal(1u, resolution.Value.Request.View.LayerCount);
+        Assert.Equal(81u, resolution.Value.Request.Description.Resources.Layers);
+    }
+
+    [Fact]
     public void DepthTarget_WithStencilSelectsACombinedFormat()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
