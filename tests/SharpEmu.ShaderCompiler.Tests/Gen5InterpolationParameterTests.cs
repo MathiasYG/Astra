@@ -12,6 +12,46 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5InterpolationParameterTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FixedCustomSampleInterpolation_UsesOffsetsInsteadOfSampleLookup(bool linear)
+    {
+        var instruction = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp, "VInterpP2F32",
+            [0], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(5)], new Gen5InterpolationControl(0, 0));
+        var program = ResourceTestProgram.Program(instruction, ResourceTestProgram.EndProgram(4));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = linear ? 16u : 1u, PixelInputEnable = linear ? 16u : 1u,
+            PixelInputCntl = [0u], PixelInterpolationSample = 0,
+            PixelCustomSampleOffsets = [(-.25f, 0f), (-.25f, 0f), (.25f, 0f), (.25f, 0f)],
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 78);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 77);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(3, 0f, true)]
+    [InlineData(4, float.NaN, true)]
+    [InlineData(4, .75f, true)]
+    [InlineData(4, 0f, false)]
+    public void FixedCustomSampleInterpolation_RejectsUnsupportedGrid(int count, float x, bool fixedSample)
+    {
+        var program = ResourceTestProgram.Program(ResourceTestProgram.EndProgram(0));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInterpolationSample = fixedSample ? 0u : null,
+            PixelCustomSampleOffsets = Enumerable.Repeat((x, 0f), count).ToArray(),
+        };
+        Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("four finite offsets", error);
+    }
+
+    [Theory]
     [InlineData(0u, false, 1u, true)]
     [InlineData(1u, false, 2u, true)]
     [InlineData(2u, false, 0u, false)]

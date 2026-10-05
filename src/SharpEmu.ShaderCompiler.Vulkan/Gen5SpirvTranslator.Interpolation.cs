@@ -44,6 +44,12 @@ public static partial class Gen5SpirvTranslator
 
         private void DeclareInterpolationParameters()
         {
+            if (_request.PixelCustomSampleOffsets.Count != 0 &&
+                (_request.PixelCustomSampleOffsets.Count != 4 || !_request.PixelInterpolationSample.HasValue ||
+                 _request.PixelCustomSampleOffsets.Any(offset => !float.IsFinite(offset.X) || !float.IsFinite(offset.Y) ||
+                     offset.X < -.5f || offset.X > .5f || offset.Y < -.5f || offset.Y > .5f)))
+                throw new NotSupportedException("Fixed custom-sample interpolation requires four finite offsets within the pixel.");
+
             foreach (var instruction in _request.Program.Instructions)
             {
                 if (instruction.Opcode == "VInterpMovF32" &&
@@ -256,15 +262,39 @@ public static partial class Gen5SpirvTranslator
             ? _module.Constant(_intType, sample)
             : Load(_intType, _interpolationSampleId);
 
+        private uint ExplicitSampleInterpolation(uint type, uint variable)
+        {
+            if (_request.PixelCustomSampleOffsets.Count == 0)
+                return _module.AddInstruction(SpirvOp.ExtInst, type, _glsl, InterpolateAtSample, variable, InterpolationSampleIndex());
+            if (_request.PixelCustomSampleOffsets.Count != 4 || !_request.PixelInterpolationSample.HasValue)
+                throw new NotSupportedException("Fixed custom-sample interpolation requires a sample index and a 2x2 offset grid.");
+            var coord = Load(_vec4Type, _fragCoordInput);
+            uint Odd(int component)
+            {
+                var integer = _module.AddInstruction(SpirvOp.ConvertFToU, _uintType,
+                    _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, coord, (uint)component));
+                return _module.AddInstruction(SpirvOp.INotEqual, _boolType,
+                    _module.AddInstruction(SpirvOp.BitwiseAnd, _uintType, integer, UInt(1)), UInt(0));
+            }
+            uint Offset(int index)
+            {
+                var value = _request.PixelCustomSampleOffsets[index];
+                return _module.ConstantComposite(_vec2Type, Float(value.X), Float(value.Y));
+            }
+            var xOdd = Odd(0);
+            var row0 = _module.AddInstruction(SpirvOp.Select, _vec2Type, xOdd, Offset(1), Offset(0));
+            var row1 = _module.AddInstruction(SpirvOp.Select, _vec2Type, xOdd, Offset(3), Offset(2));
+            var offset = _module.AddInstruction(SpirvOp.Select, _vec2Type, Odd(1), row1, row0);
+            return _module.AddInstruction(SpirvOp.ExtInst, type, _glsl, InterpolateAtOffset, variable, offset);
+        }
+
         private uint LoadOrdinaryInterpolant(uint variable) => _fixedSampleInterpolants.Contains(variable)
-            ? _module.AddInstruction(SpirvOp.ExtInst, _vec4Type, _glsl, InterpolateAtSample,
-                variable, InterpolationSampleIndex())
+            ? ExplicitSampleInterpolation(_vec4Type, variable)
             : Load(_vec4Type, variable);
 
         private uint LoadBarycentricCoordinates(int bit, uint variable) => bit switch
         {
-            0 or 4 => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtSample,
-                variable, InterpolationSampleIndex()),
+            0 or 4 => ExplicitSampleInterpolation(_vec3Type, variable),
             2 or 6 => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtCentroid, variable),
             _ => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtOffset,
                 variable, _module.ConstantNull(_vec2Type)),
