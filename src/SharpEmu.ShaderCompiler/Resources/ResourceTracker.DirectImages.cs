@@ -132,13 +132,8 @@ public sealed partial class ResourceTracker
         var keyInstruction = _graph.Program.Instructions.First(instruction => instruction.Pc == keyMemory.Pc);
         if (keyInstruction.Control is not Gen5ScalarMemoryControl { DynamicOffsetRegister: not null })
             return false;
-        // A wide scalar load can contain several descriptors. The selector is the
-        // original dynamic offset; each component retains its own byte offset.
-        if (keyMemory.ComponentIndex != 0 &&
-            (keyMemory.ComponentIndex % 8 != 0 ||
-             memoryIndices.Select((index, component) => _plan.Memory[index].Pc == keyMemory.Pc &&
-                 _plan.Memory[index].ComponentIndex == keyMemory.ComponentIndex + component).Any(valid => !valid)))
-            return false;
+        // Reconstruct every component for each proven selector, including words
+        // that start inside a wide load or continue in a separate scalar load.
         var block = _graph.ControlFlow.Blocks.First(candidate => keyMemory.Pc >= candidate.StartPc && keyMemory.Pc < candidate.EndPc);
         if (memoryIndices.Any(index => _plan.Memory[index].Pc < block.StartPc || _plan.Memory[index].Pc >= block.EndPc))
             return false;

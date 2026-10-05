@@ -599,6 +599,57 @@ public sealed class DirectImageTableTests
         return (snapshot, new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 }, registers);
     }
 
+    [Theory]
+    [InlineData(160)]
+    [InlineData(164)]
+    public void FiniteBufferDescriptorMayStartInsideAndSpanScalarLoads(int secondOffset)
+    {
+        var original = FiniteBufferImageProgram();
+        var program = original with { Instructions = original.Instructions.Where(instruction => instruction.Pc < 40)
+            .Concat([
+                ScalarBufferLoad(40, 0, 12, 8, immediateOffset: 128, dynamicOffsetRegister: 106),
+                ScalarBufferLoad(48, 0, 20, 4, immediateOffset: secondOffset, dynamicOffsetRegister: 106),
+                Image(56, "ImageLoad", 16, dmask: 1, vectorAddress: 4), EndProgram(64),
+            ]).ToArray() };
+        var plan = Extract(program, userDataCount: 4);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Null(source.ZeroExtentBufferSource);
+        Assert.Equal(new uint[] { 0, 768, 1152, 1920 },
+            source.IndirectImage!.DirectCandidates!.Select(candidate => candidate.Offset).Order().ToArray());
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x2000) return false;
+            var relative = address - 0x1000;
+            var offset = relative % 384;
+            word = offset switch
+            {
+                144 => 0x2000u + (uint)(relative / 384) * 0x100u,
+                148 => 20u << 20,
+                156 => 0xFACu | (9u << 28),
+                _ => 0,
+            };
+            return true;
+        }
+        var snapshot = new ResourceSnapshot(); var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0, 4096, 0], readCleanMemory: Read),
+            ref snapshot, ref specialization));
+        Assert.Equal(new uint[] { 0x2000, 0x2200, 0x2300, 0x2500 }, snapshot.Images.Select(image => image[0]).Order());
+        var prior = snapshot;
+        bool Missing(ulong address, out uint word)
+        {
+            if (address == 0x1000ul + (uint)secondOffset) { word = 0; return false; }
+            return Read(address, out word);
+        }
+        Assert.False(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0, 4096, 0], readCleanMemory: Missing),
+            ref snapshot, ref specialization));
+        Assert.Same(prior, snapshot);
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 4),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout)
+            { LocalSizeX = 64, ThreadCountX = 64 }, out _, out var error), error);
+    }
     [Fact]
     public void PackedUpperWordPreservesTheFiniteSelectorDomain()
     {
