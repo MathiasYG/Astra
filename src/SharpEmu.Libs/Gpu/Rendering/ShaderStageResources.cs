@@ -166,6 +166,7 @@ public sealed class PixelInputInfo
     public uint? InterpolationSample { get; init; }
     public bool SampleShading { get; init; }
     public bool EarlyDepth { get; init; }
+    public uint ShaderSampleExclusionMask { get; init; }
     public bool ExecuteOnNoop { get; init; }
     public ShaderStageResources Stage { get; set; }
 

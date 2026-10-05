@@ -981,12 +981,16 @@ internal static unsafe partial class VulkanVideoPresenter
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
+            var postDepthCoverageExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_post_depth_coverage");
             try
             {
-                var extensions = stackalloc byte*[15];
+                var extensions = stackalloc byte*[16];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
+                _postDepthCoverageEnabled = IsDeviceExtensionAvailable("VK_EXT_post_depth_coverage");
+                if (_postDepthCoverageEnabled)
+                    extensions[extensionCount++] = postDepthCoverageExtension;
                 if (IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer"))
                 {
                     extensions[extensionCount++] = viewportIndexLayerExtension;
@@ -1174,6 +1178,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
                 SilkMarshal.Free((nint)fillRectangleExtension);
+                SilkMarshal.Free((nint)postDepthCoverageExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);

@@ -66,7 +66,8 @@ public static class PixelStageInputResolver
         uint inputCount,
         uint maskExportSamples = 1,
         uint rasterizationSamples = 1,
-        uint? pixelShaderIterationSamples = null)
+        uint? pixelShaderIterationSamples = null,
+        uint shaderSampleExclusionMask = 0)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         if (pixelShaderIterationSamples is uint iterations &&
@@ -108,6 +109,10 @@ public static class PixelStageInputResolver
         }
 
         var control = shaderInterface.DepthShaderControl;
+        var earlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
+            !control.MaskExportEnable && !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0;
+        if ((shaderSampleExclusionMask & 0xFFFFu) != 0 && control.DepthExportOrder == 1 && !earlyDepth)
+            throw SubmissionScheduler.Fatal("Sample exclusion requires supported early depth/stencil processing.");
         return new PixelInputInfo
         {
             InputCount = inputCount,
@@ -135,8 +140,8 @@ public static class PixelStageInputResolver
             SampleMaskExportEnable = control.MaskExportEnable,
             MaskExportSamples = maskExportSamples,
             RasterizationSamples = rasterizationSamples,
-            EarlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
-                !control.MaskExportEnable && !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0,
+            EarlyDepth = earlyDepth,
+            ShaderSampleExclusionMask = earlyDepth ? shaderSampleExclusionMask & 0xFFFFu : 0u,
             ExecuteOnNoop = control.ExecuteOnNoop,
         };
     }

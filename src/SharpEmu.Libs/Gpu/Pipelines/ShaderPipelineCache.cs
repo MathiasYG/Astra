@@ -117,7 +117,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 1u << context.EnhancedQualityAntialiasing.MaskExportSamples,
                 1u << context.AntialiasingConfig.SampleCountLog2,
                 (context.ScanModeControl1 & (1u << 16)) != 0
-                    ? 1u << context.EnhancedQualityAntialiasing.PixelShaderIterationSamples : 1u);
+                    ? 1u << context.EnhancedQualityAntialiasing.PixelShaderIterationSamples : 1u,
+                context.ShaderSampleExclusionMask);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));

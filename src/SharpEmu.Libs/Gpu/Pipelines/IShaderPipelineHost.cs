@@ -45,6 +45,7 @@ internal interface IShaderPipelineHost
     ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
+    bool PostDepthCoverageSupported => false;
 
     RenderHostLimits Limits { get; }
 

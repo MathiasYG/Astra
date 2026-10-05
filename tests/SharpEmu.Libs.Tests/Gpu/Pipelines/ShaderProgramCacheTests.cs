@@ -13,6 +13,45 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class ShaderProgramCacheTests : IDisposable
 {
+    [Theory]
+    [InlineData(0u, 0u)]
+    [InlineData(1u, 0xFFFEu)]
+    [InlineData(2u, 0u)]
+    [InlineData(3u, 0u)]
+    public void SampleExclusionIsInactiveOutsideEarlyDepthOrder(uint order, uint expectedMask)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var shaderInterface = new SharpEmu.Libs.Gpu.GpuCommands.Registers.ShaderInterfaceRegisters
+        {
+            DepthShaderControl = SharpEmu.Libs.Gpu.GpuCommands.Registers.DepthShaderControlRegisters.Decode(order << 4),
+        };
+        var info = PixelStageInputResolver.Resolve(_guest.Context, source.Registered, shaderInterface,
+            new byte[8], new SharpEmu.Libs.Gpu.Images.ColorComponentMap[8], 0,
+            rasterizationSamples: 2, pixelShaderIterationSamples: 1, shaderSampleExclusionMask: 0xABCDFFFE);
+        Assert.Equal(expectedMask, info.ShaderSampleExclusionMask);
+    }
+
+    [Fact]
+    public void SampleExclusionRequiresSupportAndSeparatesEarlyPixelPrograms()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        ShaderProgram Compile(uint mask)
+        {
+            var cursor = 0u;
+            return _guest.Programs.GetOrCompile(source,
+                new StageCompileOptions { PixelInfo = new PixelInputInfo
+                { EarlyDepth = true, ShaderSampleExclusionMask = mask } }, ref cursor, out _);
+        }
+        Assert.Throws<SchedulerFatalException>(() => Compile(0xFFFE));
+        _guest.Host.PostDepthCoverageSupported = true;
+        var enabled = Compile(0xFFFE);
+        Assert.NotEqual(enabled, Compile(0));
+        Assert.Equal(enabled, Compile(0xFFFE));
+        Assert.Contains(_guest.Compiler.Requests, request => request.PixelShaderSampleExclusionMask == 0xFFFE);
+    }
+
     private const ulong CodeA = PipelineTestGuest.MemoryBase + 0x1000;
     private const ulong CodeB = PipelineTestGuest.MemoryBase + 0x2000;
     private const ulong HeaderA = PipelineTestGuest.MemoryBase + 0x8000;
