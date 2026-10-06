@@ -833,6 +833,15 @@ public sealed class DirectImageTableTests
         }
     }
 
+    [Theory]
+    [InlineData("fourth-result")]
+    [InlineData("narrowing")]
+    public void GatheredByteProofUsesAllFourResultsAfterExecutionNarrows(string variation)
+    {
+        var plan = ShaderResourcePlan.Extract(GatheredSelectorProgram(variation), ShaderStage.Pixel, Hash, 0, 6);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images.Last().Source].IndirectImage?.GatheredByteSelectorProof);
+    }
+
     private static Gen5ShaderProgram GatheredSelectorProgram(string variation = "valid")
     {
         var instructions = new List<Gen5ShaderInstruction>
@@ -880,6 +889,8 @@ public sealed class DirectImageTableTests
             var instruction = instructions[index];
             instructions[index] = variation switch
             {
+                "fourth-result" when instruction.Pc == 16 => MoveVector(16, 7, 256),
+                "narrowing" when instruction.Pc == 28 => Vopc(28, "VCmpxEqU32", Operand(0), 0),
                 "unknown-arm" when instruction.Pc == 28 => instruction with
                     { Sources = [Gen5Operand.Vector(42), Gen5Operand.Vector(7)] },
                 "missing-guard" when instruction.Pc == 32 => Sop1(32, "SMovB32", 10, Operand(0)),

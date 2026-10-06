@@ -1366,7 +1366,8 @@ public sealed class IndirectSelectorValues
                             break;
                         }
                         // A later active lane must also have been active at the defining write.
-                        if (operand.Kind == Gen5OperandKind.VectorRegister && MayExpandExecution(instruction))
+                        if (operand.Kind == Gen5OperandKind.VectorRegister && MayExpandExecution(instruction) &&
+                            !(allowGather && instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal)))
                         {
                             var restored = ReadBeforeSavedExecRestore(operand, instruction);
                             if (restored is null) return null;
@@ -1670,6 +1671,9 @@ public sealed class IndirectSelectorValues
 
         internal static bool WritesRegister(Gen5ShaderInstruction instruction, Gen5Operand register)
         {
+            if (instruction.Control is Gen5ImageControl gather && instruction.Opcode.StartsWith("ImageGather4", StringComparison.Ordinal) &&
+                register.Kind == Gen5OperandKind.VectorRegister && register.Value >= gather.VectorData &&
+                register.Value - gather.VectorData < (gather.D16 ? 2u : 4u)) return true;
             if (register.Kind == Gen5OperandKind.ScalarRegister && register.Value is 106 or 107 &&
                 instruction.Opcode.StartsWith('V')) return true;
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
