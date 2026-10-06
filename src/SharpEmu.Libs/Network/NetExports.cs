@@ -190,7 +190,9 @@ public static class NetExports
                                 ready |= 0x10;
                         }
                         if ((watch.Events & 2) != 0 && socket.Poll(0, SelectMode.SelectWrite)) ready |= 2;
-                        if (socket.Poll(0, SelectMode.SelectError)) ready |= 8;
+                        if (socket.Poll(0, SelectMode.SelectError) &&
+                            (int)socket.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error)! != 0)
+                            ready |= 8;
                     }
                     catch (ObjectDisposedException) { continue; }
                     catch (SocketException) { ready |= 8; }
