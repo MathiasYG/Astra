@@ -118,14 +118,14 @@ public sealed partial class ResourceTracker
             var read = reads[component];
             if (read.Kind is not (ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord) ||
                 read.Kind != reads[0].Kind || read.MemoryIndex < 0 ||
-                read.MemoryIndex >= _plan.Memory.Count || !MemoryIndexBelongsTo(read.MemoryIndex, read) ||
-                !UsesOnlyThroughInvariantPhis(read, handle)) return false;
+                read.MemoryIndex >= _plan.Memory.Count || !MemoryIndexBelongsTo(read.MemoryIndex, read)) return false;
             var memory = _plan.Memory[read.MemoryIndex];
             if (memory.Kind != (read.Kind == ScalarValueKind.ScalarBufferWord
                     ? MemoryResourceKind.ScalarBuffer : MemoryResourceKind.ScalarAddress) ||
                 memory.DataBits != 32 || memory.DataDwords != 1)
                 return false;
-            canSuppressMemoryReads &= ReferenceEquals(handle.Operands[component], read) && HasOnlyImageConsumers(memory, handle);
+            canSuppressMemoryReads &= ReferenceEquals(handle.Operands[component], read) &&
+                UsesOnlyThroughInvariantPhis(read, handle) && HasOnlyImageConsumers(memory, handle);
             memoryIndices[component] = read.MemoryIndex;
         }
 
