@@ -14,6 +14,17 @@ public sealed class IndirectSelectorValues
     {
         internal bool IsConstant => MemoryIndex < 0;
         internal ScalarValue? InitializedMask { get; init; }
+        internal uint[] InitializationPcs { get; init; } = [];
+        public bool Equals(PackedByteOrigin other) => MemoryIndex == other.MemoryIndex && Channel == other.Channel &&
+            Constant == other.Constant && ReferenceEquals(InitializedMask, other.InitializedMask) &&
+            InitializationPcs.AsSpan().SequenceEqual(other.InitializationPcs);
+        public override int GetHashCode()
+        {
+            var hash = new HashCode();
+            hash.Add(MemoryIndex); hash.Add(Channel); hash.Add(Constant); hash.Add(InitializedMask);
+            foreach (var pc in InitializationPcs ?? []) hash.Add(pc);
+            return hash.ToHashCode();
+        }
     }
 
     internal sealed record PackedTextureDomain(PackedByteOrigin[] Origins)
@@ -149,8 +160,20 @@ public sealed class IndirectSelectorValues
         if (!ReadMinimum(input, before) || !TryGetPackedLoopByteOrigins(plan, registers.ToArray(), loopStart, loopEnd, out origins)) return false;
         var initialize = plan.Graph.Program.Instructions.First(instruction => instruction.Pc == before + 4);
         if (!plan.Graph.LaneSelectionMasks.TryGetValue(initialize.Pc, out var selectedMask)) return false;
+        var capture = plan.Graph.Program.Instructions.Last(instruction => instruction.Pc < before &&
+            Builder.WritesSavedMask(instruction, initialize.Sources[2]));
+        var laneProofs = new Dictionary<uint, IReadOnlySet<uint>>();
         foreach (var origin in origins)
-            if (origin.InitializedMask is { } initializedMask && !MaskSubset(selectedMask, initializedMask)) return false;
+            if (origin.InitializedMask is { } initializedMask && !MaskSubset(selectedMask, initializedMask))
+            {
+                if (origin.InitializationPcs.Length == 0) return false;
+                foreach (var pc in origin.InitializationPcs)
+                {
+                    if (!laneProofs.TryGetValue(pc, out var lanes))
+                        laneProofs.Add(pc, lanes = Gen5ExecFullAnalysis.AnalyzeInitializedLanes(plan.Graph.Program, pc, true));
+                    if (!lanes.Contains(capture.Pc)) return false;
+                }
+            }
         origins = origins.Append(new PackedByteOrigin(-1, 0, uint.MaxValue)).Distinct().ToArray();
         return true;
     }
@@ -432,7 +455,8 @@ public sealed class IndirectSelectorValues
             {
                 if (writePc is { } definition && plan.Graph.InstructionExecutionMasks.TryGetValue(definition, out var mask))
                     result = result with { InitializedMask = result.InitializedMask is { } prior
-                        ? plan.Graph.Operation(ScalarOperation.LogicalAnd, ScalarValueType.Bool, prior, mask) : mask };
+                        ? plan.Graph.Operation(ScalarOperation.LogicalAnd, ScalarValueType.Bool, prior, mask) : mask,
+                        InitializationPcs = [.. result.InitializationPcs ?? [], definition] };
                 active.Remove((value, component, pc));
             }
         }

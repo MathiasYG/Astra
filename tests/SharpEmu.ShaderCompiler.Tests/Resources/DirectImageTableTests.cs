@@ -578,11 +578,13 @@ public sealed class DirectImageTableTests
     }
 
     [Theory]
-    [InlineData(false, false, true)]
-    [InlineData(true, false, false)]
-    [InlineData(false, true, true)]
-    [InlineData(true, true, false)]
-    public void PackedTextureReductionRejectsReactivatedUninitializedLanes(bool reactivate, bool constant, bool accepted)
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, true)]
+    [InlineData(true, true, false, false)]
+    [InlineData(false, false, true, true)]
+    [InlineData(true, false, true, false)]
+    public void PackedTextureReductionRejectsReactivatedUninitializedLanes(bool reactivate, bool constant, bool unknownSymbolicMask, bool accepted)
     {
         var plan = Extract(Program([
             Sop1(0, "SAndSaveexecB64", 16, Gen5Operand.Scalar(12)),
@@ -603,6 +605,7 @@ public sealed class DirectImageTableTests
             Vop2(60, "VLshrrevB32", 0, Operand(8), Gen5Operand.Vector(0)),
             Branch(64, "SBranch", -12), EndProgram(68),
         ]), userDataCount: 14);
+        if (unknownSymbolicMask) plan.Graph.LaneSelectionMasks[36] = ScalarValue.Undefined(ScalarValueType.Bool);
         Assert.Equal(accepted, IndirectSelectorValues.TryGetPackedReductionOrigins(plan, 52, 20, 68, out _));
     }
 
