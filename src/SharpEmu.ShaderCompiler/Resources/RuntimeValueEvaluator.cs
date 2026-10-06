@@ -497,6 +497,7 @@ public sealed class RuntimeValueEvaluator
                 if (source.Workgroup is { } workgroup)
                 {
                     if (!workgroup.TryEvaluate(plan, inputs, out _, out var descriptors) || descriptors.Length == 0 ||
+                        workgroup.LoopCounter is null &&
                         descriptors.Any(words => !words.AsSpan().SequenceEqual(descriptors[0]))) return false;
                     words = descriptors[0];
                 }

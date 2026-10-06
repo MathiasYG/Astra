@@ -663,6 +663,13 @@ public sealed class IndirectSelectorValues
                 if (!plan.ValidateRuntimeValue(plan.Graph.Substitute(initial, replacements, boundsMemo)) ||
                     !plan.ValidateRuntimeValue(plan.Graph.Substitute(limit, replacements, boundsMemo))) return false;
                 replacements[counter] = plan.Graph.Constant(0u);
+                if (handle.Kind == ScalarValueKind.SamplerHandle && key is null)
+                {
+                    var first = handle.Operands[0];
+                    if (first.Kind != ScalarValueKind.ScalarBufferWord || first.Operands.Length != 2 ||
+                        first.MemoryIndex < 0 || first.MemoryIndex >= plan.Memory.Count) return false;
+                    key = first.Operands[1];
+                }
             }
             var memo = new Dictionary<ScalarValue, ScalarValue>();
             foreach (var word in handle.Operands)

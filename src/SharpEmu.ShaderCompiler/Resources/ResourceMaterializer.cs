@@ -40,6 +40,7 @@ public static class ResourceMaterializer
         public uint[] UserData = [];
         public List<IndirectImageTable> IndirectImages = [];
         public List<BufferCandidateTable> BufferCandidateTables = [];
+        public List<RuntimeSamplerCandidate> RuntimeSamplers = [];
     }
 
     // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
@@ -316,10 +317,47 @@ public static class ResourceMaterializer
         }
 
         snapshot.Samplers = new uint[plan.Info.Samplers.Count][];
+        var extraSamplers = new List<uint[]>();
+        var additionalSampledPairs = 0;
         for (var index = 0; index < snapshot.Samplers.Length; index++)
         {
             var sampler = plan.Info.Samplers[index];
             snapshot.Samplers[index] = values[cursor++].Dwords;
+            if (plan.DescriptorSources[(int)sampler.Source].Workgroup is { LoopCounter: not null } workgroup &&
+                (activeSources.Length == 0 || activeSources[sampler.Source]))
+            {
+                // These instructions use the native sampler's complete state.
+                // Gather and comparison paths need additional specialization proofs.
+                if (plan.Memory.Entries.Any(memory => memory.NeedsSampler && memory.Sampler == index &&
+                    memory.Opcode is not ("ImageSampleD" or "ImageSampleLz")) ||
+                    !workgroup.TryEvaluate(plan, inputs, out var keys, out var records) || records.Length == 0)
+                    return false;
+                var distinct = new List<(uint[] Words, uint Sampler)>();
+                var mappingStart = snapshot.RuntimeSamplers.Count;
+                for (var record = 0; record < records.Length; record++)
+                {
+                    var found = distinct.FindIndex(candidate => candidate.Words.AsSpan().SequenceEqual(records[record]));
+                    uint target;
+                    if (found >= 0) target = distinct[found].Sampler;
+                    else
+                    {
+                        target = distinct.Count == 0 ? (uint)index : (uint)(snapshot.Samplers.Length + extraSamplers.Count);
+                        if (target >= ShaderResourceInfo.MaxSamplers) return false;
+                        if (distinct.Count != 0)
+                        {
+                            additionalSampledPairs += plan.Info.SampledPairs.Count(pair => pair.Sampler == index);
+                            if (plan.Info.SampledPairs.Count + additionalSampledPairs > ShaderResourceInfo.MaxSampledPairs) return false;
+                            extraSamplers.Add(records[record]);
+                        }
+                        distinct.Add((records[record], target));
+                    }
+                    snapshot.RuntimeSamplers.Add(new((uint)index, workgroup.Handle.Operands[0].MemoryIndex, keys[record], target));
+                }
+                snapshot.Samplers[index] = records[0];
+                if (distinct.Count == 1)
+                    snapshot.RuntimeSamplers.RemoveRange(mappingStart, snapshot.RuntimeSamplers.Count - mappingStart);
+                continue;
+            }
             if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not { } candidates ||
                 activeSources.Length != 0 && !activeSources[sampler.Source]) continue;
             var samplerSource = plan.DescriptorSources[(int)sampler.Source];
@@ -345,6 +383,7 @@ public static class ResourceMaterializer
             }
             snapshot.Samplers[index] = descriptors[0].Dwords;
         }
+        snapshot.Samplers = [.. snapshot.Samplers, .. extraSamplers];
 
         foreach (var (memoryIndex, _) in plan.Info.DeviceStoreValidationSources)
         {
@@ -1119,7 +1158,7 @@ public static class ResourceMaterializer
         failure = ResourceMaterializationFailure.Other;
         specializedSnapshot = snapshot;
         specialization = new ResourceSpecialization();
-        var info = plan.Info;
+        var info = WithRuntimeSamplers(plan.Info, snapshot.RuntimeSamplers);
         // Core Vulkan gather always addresses the view's base level. Explicit-LOD
         // gathers instead bind one view per accessible mip and select it in the shader.
         // Linear mip filtering and unnormalized gathers need separate semantics.
@@ -1585,6 +1624,7 @@ public static class ResourceMaterializer
             Images = images,
             IndirectImageCandidates = sharedCandidates,
             BufferCandidateTables = candidateTables,
+            RuntimeSamplers = snapshot.RuntimeSamplers,
         };
         specializedSnapshot = snapshot;
         return true;
@@ -1597,6 +1637,31 @@ public static class ResourceMaterializer
         left.MipCount == right.MipCount && left.ConversionFormat == right.ConversionFormat &&
         left.ShaderSwizzle == right.ShaderSwizzle && left.Cube == right.Cube && left.R128 == right.R128 &&
         left.EmulatedCompareFunction == right.EmulatedCompareFunction;
+
+    private static ShaderResourceInfo WithRuntimeSamplers(ShaderResourceInfo original,
+        IReadOnlyList<RuntimeSamplerCandidate> candidates)
+    {
+        if (candidates.Count == 0) return original;
+        var info = original.Clone();
+        foreach (var group in candidates.GroupBy(candidate => candidate.Root))
+        {
+            var root = info.Samplers[(int)group.Key];
+            root.SelectorMemoryIndex = group.First().SelectorMemoryIndex;
+            root.Candidates = group.Select(candidate => new FiniteSamplerCandidate(candidate.Offset, candidate.Sampler)).ToArray();
+            foreach (var target in group.Select(candidate => candidate.Sampler).Distinct().Where(target => target != group.Key))
+            {
+                if (target != info.Samplers.Count)
+                    throw new ResourcePlanException("runtime sampler candidates are not contiguous");
+                var sampler = original.Samplers[(int)group.Key].Clone();
+                sampler.Candidates = null;
+                sampler.SelectorMemoryIndex = -1;
+                info.Samplers.Add(sampler);
+                foreach (var pair in original.SampledPairs.Where(pair => pair.Sampler == group.Key))
+                    info.SampledPairs.Add(new SampledImagePair { Image = pair.Image, Sampler = target, FirstUsePc = pair.FirstUsePc });
+            }
+        }
+        return info;
+    }
 
     private sealed class SamplerPlan
     {
@@ -1676,7 +1741,7 @@ public static class ResourceMaterializer
     // classes and indirect candidates, point samplers and the sampler each access uses.
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {
-        var source = plan.Info;
+        var source = WithRuntimeSamplers(plan.Info, specialization.RuntimeSamplers);
         if (source.Buffers.Count != specialization.BaseBufferCount || source.Images.Count > specialization.Images.Count)
         {
             throw new ResourcePlanException(

@@ -1569,6 +1569,88 @@ public sealed class DirectImageTableTests
         Assert.Equal(1, cache.Hits);
     }
 
+    private static (ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs) WorkgroupLoopSamplers(
+        string opcode = "ImageSampleLz", ulong unreadable = 0, uint firstSampler = 2, uint firstRecord = 3)
+    {
+        var prefix = WorkgroupLoopImagePlan().Graph.Program.Instructions.Where(instruction => instruction.Pc < 44)
+            .Select(instruction => instruction.Pc == 16 ? Branch(16, "SCbranchScc0", 12) : instruction);
+        var program = Program([.. prefix,
+            ScalarBufferLoad(44, 8, 24, 4, immediateOffset: 512, dynamicOffsetRegister: 15),
+            Image(52, opcode, 16, samplerRegister: 24, dmask: 1),
+            Sop2(60, "SAddI32", 13, Gen5Operand.Scalar(13), Operand(1)),
+            Branch(64, "SBranch", -14), EndProgram(68)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 12,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(12, null, null, null));
+        var original = WorkgroupLoopImageInputs(firstRecord: firstRecord);
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address == unreadable) return false;
+            if (address is >= 0x3200 and < 0x3400)
+            {
+                word = ((address - 0x3200) % 32) switch
+                {
+                    0 => (address - 0x3200) / 32 == firstRecord ? firstSampler : 1u,
+                    4 => 0xFFF000, _ => 0,
+                };
+                return true;
+            }
+            return original.ReadCleanMemory!(address, out word);
+        }
+        var userData = original.UserData.ToArray(); userData[10] = 1024;
+        return (plan, new() { UserData = userData, ReadMemory = Read, ReadCleanMemory = Read,
+            ComputeState = original.ComputeState });
+    }
+
+    [Fact]
+    public void WorkgroupLoopPreservesDifferentSamplersAndCompilesBothBackends()
+    {
+        var (plan, inputs) = WorkgroupLoopSamplers();
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failure), failure.ToString());
+        Assert.Equal(new uint[] { 2, 1 }, snapshot.Samplers.Select(words => words[0]));
+        Assert.Equal(new uint[] { 96, 32 }, specialization.RuntimeSamplers.Select(candidate => candidate.Offset));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(2, resources.Info.Samplers.Count);
+        Assert.Equal(new uint[] { 0, 1 }, resources.FiniteSamplersByMemoryIndex.Values.Single().Candidates!.Select(candidate => candidate.Sampler));
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 12),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+            { LocalSizeX = 1, ThreadCountX = 2, ComputeSystemRegisters = new(12, null, null, null) };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out error), error);
+        Assert.Contains(resources.FiniteSamplersByMemoryIndex.Values.Single().SelectorMemoryIndex, request.IndirectOffsetKeyMemoryIndices);
+        Assert.Contains(plan.Memory.Entries, memory => memory.Pc == 44 && !memory.PlanningOnly);
+    }
+
+    [Theory]
+    [InlineData("ImageSampleLz", 0x3260UL, false)]
+    [InlineData("ImageSampleLz", 0UL, true)]
+    [InlineData("ImageSampleD", 0UL, true)]
+    [InlineData("ImageSampleC", 0UL, false)]
+    public void WorkgroupLoopSamplerSelectionRejectsUnreadableOrUnsupportedPaths(string opcode, ulong unreadable, bool accepted)
+    {
+        var (plan, inputs) = WorkgroupLoopSamplers(opcode, unreadable);
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.Equal(accepted, ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+    }
+
+    [Fact]
+    public void WorkgroupLoopSamplerKeysParticipateInSpecializationIdentity()
+    {
+        ResourceSnapshot snapshot = new(); ResourceSpecialization first = new(), changedPayload = new(), changedKey = new();
+        var (plan, inputs) = WorkgroupLoopSamplers();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref first));
+        Assert.Equal(first, first.Clone());
+        var (_, payloadInputs) = WorkgroupLoopSamplers(firstSampler: 3);
+        Assert.True(ResourceMaterializer.Materialize(plan, payloadInputs, ref snapshot, ref changedPayload));
+        Assert.Equal(first, changedPayload);
+        Assert.Equal(3u, snapshot.Samplers[0][0]);
+        var (_, keyInputs) = WorkgroupLoopSamplers(firstRecord: 4);
+        Assert.True(ResourceMaterializer.Materialize(plan, keyInputs, ref snapshot, ref changedKey));
+        Assert.NotEqual(first, changedKey);
+    }
+
     [Fact]
     public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
     {
