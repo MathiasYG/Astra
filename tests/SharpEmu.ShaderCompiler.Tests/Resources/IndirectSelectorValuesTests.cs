@@ -188,6 +188,7 @@ public sealed class IndirectSelectorValuesTests
     [InlineData(3, false)]
     [InlineData(4, false)]
     [InlineData(5, false)]
+    [InlineData(6, false)]
     public void PackedPointerBindingRequiresIdenticalCandidatesAndDisjointWrites(int change, bool expected)
     {
         var program = Program(
@@ -226,7 +227,11 @@ public sealed class IndirectSelectorValuesTests
         if (change == 2) memory.FailAddress = 0x600C;
         var source = plan.Info.Images[0].Source;
         Assert.Equal(expected, RuntimeValueEvaluator.EvaluateDescriptorSource(plan, source,
-            Inputs(registers, readCleanMemory: memory.Read), out var result));
+            new ResourceRuntimeInputs
+            {
+                UserData = registers, ReadMemory = memory.Read, ReadCleanMemory = memory.Read,
+                OtherStageMayWriteMemory = change == 6,
+            }, out var result));
         if (expected) Assert.Equal(first, result.Dwords);
     }
 

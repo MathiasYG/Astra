@@ -1062,7 +1062,7 @@ public sealed class IndirectSelectorValues
         internal bool TryEvaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] words)
         {
             words = [];
-            if (inputs.ReadCleanMemory is null) return false;
+            if (inputs.OtherStageMayWriteMemory || inputs.ReadCleanMemory is null) return false;
             var dependencies = new List<(ulong Base, ulong Size)>();
             var capturedWords = new Dictionary<ulong, uint>();
             bool Read(ulong address, out uint word)
