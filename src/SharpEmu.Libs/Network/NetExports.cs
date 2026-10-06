@@ -342,7 +342,6 @@ public static class NetExports
         }
         if (!ctx.Memory.TryWrite(outputAddress, text))
             return SetNetError(ctx, NetErrorFault, NetErrnoFault);
-        TraceNet("ether_ntostr", 0, address, outputAddress, 18);
         return ctx.SetReturn(0);
     }
 

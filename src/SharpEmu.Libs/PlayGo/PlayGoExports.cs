@@ -131,7 +131,6 @@ public static class PlayGoExports
 
             if (!_metadata.Available)
             {
-                TracePlayGo("open not_supported; no usable chunk map");
                 return OrbisPlayGoErrorNotSupportPlayGo;
             }
 
