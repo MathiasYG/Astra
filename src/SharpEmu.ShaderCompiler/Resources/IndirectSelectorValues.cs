@@ -618,7 +618,8 @@ public sealed class IndirectSelectorValues
     // Enumerate the actual dispatch domain, never a guessed workgroup ID. The
     // original scalar loads and their run-time image selector remain in the shader.
     internal sealed record WorkgroupDescriptor(ScalarValue Handle, ScalarValue Input, ScalarValue? Key,
-        uint? FlatAttribute = null, uint FlatChannel = 0, IndexedBufferDomain? BufferDomain = null)
+        uint? FlatAttribute = null, uint FlatChannel = 0, IndexedBufferDomain? BufferDomain = null,
+        ScalarValue? LoopCounter = null, ScalarValue? LoopInitial = null, ScalarValue? LoopLimit = null)
     {
         internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue handle, ScalarValue? key,
             out WorkgroupDescriptor result)
@@ -650,6 +651,19 @@ public sealed class IndirectSelectorValues
             }
             if (input is null) return false;
             var replacements = new Dictionary<ScalarValue, ScalarValue> { [input] = plan.Graph.Constant(0u) };
+            ScalarValue? counter = null, initial = null, limit = null;
+            var loops = visited.Where(value => value.Kind == ScalarValueKind.Phi &&
+                plan.Graph.ResolveInvariantPhi(value) is null).ToArray();
+            if (loops.Length != 0)
+            {
+                if (plan.Stage != ShaderStage.Compute || loops.Length != 1 ||
+                    !TryGetLoop(plan, loops[0], visited, out initial, out limit)) return false;
+                counter = loops[0];
+                var boundsMemo = new Dictionary<ScalarValue, ScalarValue>();
+                if (!plan.ValidateRuntimeValue(plan.Graph.Substitute(initial, replacements, boundsMemo)) ||
+                    !plan.ValidateRuntimeValue(plan.Graph.Substitute(limit, replacements, boundsMemo))) return false;
+                replacements[counter] = plan.Graph.Constant(0u);
+            }
             var memo = new Dictionary<ScalarValue, ScalarValue>();
             foreach (var word in handle.Operands)
                 if (!plan.ValidateRuntimeValue(plan.Graph.Substitute(word, replacements, memo))) return false;
@@ -717,8 +731,80 @@ public sealed class IndirectSelectorValues
                 }
                 attribute = interpolation.Attribute; channel = interpolation.Channel;
             }
-            result = new(handle, input, key, attribute, channel);
+            result = new(handle, input, key, attribute, channel, LoopCounter: counter, LoopInitial: initial, LoopLimit: limit);
             return true;
+        }
+
+        private static bool TryGetLoop(ShaderResourcePlan plan, ScalarValue counter,
+            HashSet<ScalarValue> dependencies, out ScalarValue initial, out ScalarValue limit)
+        {
+            // A signed, unit-step scalar loop is finite only after its actual
+            // nonnegative bounds are checked. Every dependent load must pass
+            // through the loop's admission edge; a matching compare alone is insufficient.
+            initial = limit = null!;
+            if (counter.Type != ScalarValueType.U32 || counter.Operands.Length != 2 || counter.PhiPredecessors.Length != 2)
+                return false;
+            var increment = Array.FindIndex(counter.Operands, value => value.Kind == ScalarValueKind.Operation &&
+                value.Operation == ScalarOperation.IAdd32 && value.Operands.Length == 2 &&
+                ReferenceEquals(value.Operands[0], counter) && value.Operands[1].IsConstant && value.Operands[1].Payload == 1);
+            if (increment < 0) return false;
+            initial = counter.Operands[1 - increment];
+            var flow = plan.Graph.ControlFlow;
+            if (flow.Predecessors[counter.PhiBlock].Count != 2 ||
+                !flow.Successors[counter.PhiPredecessors[increment]].Contains(counter.PhiBlock)) return false;
+            foreach (var (pc, condition) in plan.FlattenedBranchConditions)
+            {
+                if (flow.BlockOf(pc) != counter.PhiBlock || condition.Kind != ScalarValueKind.Operation ||
+                    condition.Operation != ScalarOperation.LogicalNot || condition.Operands.Length != 1) continue;
+                var comparison = condition.Operands[0];
+                if (comparison.Kind != ScalarValueKind.Operation || comparison.Operation != ScalarOperation.SLessThan32 ||
+                    comparison.Operands.Length != 2 || !ReferenceEquals(comparison.Operands[0], counter)) continue;
+                var branch = plan.Graph.Program.Instructions.First(instruction => instruction.Pc == pc);
+                if (branch.Opcode != "SCbranchScc0" ||
+                    !Gen5IrBranchResolver.Instance.TryGetBranchTarget(branch, out var target) ||
+                    !flow.BlockByStartPc.TryGetValue(target, out var rejected) ||
+                    !flow.BlockByStartPc.TryGetValue(pc + (uint)branch.Words.Count * 4, out var admitted)) continue;
+                var loads = dependencies.Where(value => value.Kind is ScalarValueKind.ScalarBufferWord or ScalarValueKind.ScalarAddressWord &&
+                    DependsOn(value, counter)).ToArray();
+                if (loads.Length == 0 || loads.Any(value => value.MemoryIndex < 0 || value.MemoryIndex >= plan.Memory.Count)) continue;
+                var blocks = loads.Select(value => flow.BlockOf(plan.Memory[value.MemoryIndex].Pc)).ToHashSet();
+                // A counter-dependent output after the loop observes the exit
+                // value, not one of the admitted iterations. Do not substitute
+                // an iteration value for that output's descriptor.
+                for (var index = 0; index < plan.Memory.Count; index++)
+                    if (plan.Memory[index].Access is MemoryAccess.Write or MemoryAccess.Atomic &&
+                        plan.Accesses[index]?.Handle is { } output && DependsOn(output, counter))
+                        blocks.Add(flow.BlockOf(plan.Memory[index].Pc));
+                if (ReachesLoads(0) || ReachesLoads(rejected)) continue;
+                limit = comparison.Operands[1];
+                return true;
+
+                bool ReachesLoads(int start)
+                {
+                    var pending = new Stack<int>(); pending.Push(start); var seen = new HashSet<int>();
+                    while (pending.TryPop(out var block))
+                    {
+                        if (!seen.Add(block)) continue;
+                        if (blocks.Contains(block)) return true;
+                        foreach (var next in flow.Successors[block])
+                            if (block != counter.PhiBlock || next != admitted) pending.Push(next);
+                    }
+                    return false;
+                }
+            }
+            return false;
+
+            static bool DependsOn(ScalarValue root, ScalarValue target)
+            {
+                var pending = new Stack<ScalarValue>(); pending.Push(root); var seen = new HashSet<ScalarValue>();
+                while (pending.TryPop(out var value))
+                {
+                    if (ReferenceEquals(value, target)) return true;
+                    if (!seen.Add(value)) continue;
+                    foreach (var operand in value.Operands) pending.Push(operand);
+                }
+                return false;
+            }
         }
 
         internal bool TryEvaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
@@ -764,6 +850,7 @@ public sealed class IndirectSelectorValues
                 ReadMemory = Read, ReadCleanMemory = Read, ReadsClean = true, ComputeState = inputs.ComputeState };
             var candidates = new Dictionary<uint, uint[]>();
             var writes = new HashSet<(ulong Base, ulong Size)>();
+            var evaluations = 0;
             // Every possible shader write must be bounded. Unknown address spaces
             // decline this proof instead of assuming they cannot touch the table.
             var writeHandles = new Dictionary<ScalarValue, ulong>();
@@ -791,33 +878,47 @@ public sealed class IndirectSelectorValues
             }
             foreach (var group in inputValues)
             {
-                var evaluator = new RuntimeValueEvaluator(plan, clean, Input, group);
-                var key = group;
-                if (Key is not null && !evaluator.Evaluate(Key, out key)) return false;
-                var words = new uint[Handle.Operands.Length];
-                for (var component = 0; component < words.Length; component++)
-                    if (!evaluator.Evaluate(Handle.Operands[component], out words[component])) return false;
-                if (candidates.TryGetValue(key, out var existing))
+                uint first = 0, end = 1;
+                if (LoopCounter is not null)
                 {
-                    if (!existing.AsSpan().SequenceEqual(words)) return false;
+                    var bounds = new RuntimeValueEvaluator(plan, clean, Input, group);
+                    // Empty groups need a separate proof for writes outside the
+                    // loop. Decline them here rather than omit those writes.
+                    if (!bounds.Evaluate(LoopInitial!, out first) || !bounds.Evaluate(LoopLimit!, out end) ||
+                        first > int.MaxValue || end > int.MaxValue || first >= end || end - first > MaximumValues)
+                        return false;
                 }
-                else if (candidates.Count >= MaximumValues) return false;
-                else candidates.Add(key, words);
-                foreach (var (output, extra) in writeHandles)
+                for (var iteration = first; iteration < end; iteration++)
                 {
-                    if (!PackedPointerDescriptor.EvaluateHandle(output, evaluator, out var outputWords) ||
-                        !PackedPointerDescriptor.Range(outputWords, out var address, out var length) ||
-                        address + length + extra > 1ul << 48) return false;
-                    writes.Add((address, length + extra));
-                }
-                foreach (var output in imageWrites)
-                {
-                    var outputWords = new uint[8];
-                    for (var component = 0; component < outputWords.Length; component++)
-                        if (!evaluator.Evaluate(output.Operands[component], out outputWords[component])) return false;
-                    if (!inputs.ReadImageWriteRange!(outputWords, out var address, out var size) || size == 0 ||
-                        address >= 1ul << 48 || size > (1ul << 48) - address) return false;
-                    writes.Add((address, size));
+                    if (++evaluations > MaximumCombinations) return false;
+                    var evaluator = new RuntimeValueEvaluator(plan, clean, Input, group, LoopCounter, iteration);
+                    var key = group;
+                    if (Key is not null && !evaluator.Evaluate(Key, out key)) return false;
+                    var words = new uint[Handle.Operands.Length];
+                    for (var component = 0; component < words.Length; component++)
+                        if (!evaluator.Evaluate(Handle.Operands[component], out words[component])) return false;
+                    if (candidates.TryGetValue(key, out var existing))
+                    {
+                        if (!existing.AsSpan().SequenceEqual(words)) return false;
+                    }
+                    else if (candidates.Count >= MaximumValues) return false;
+                    else candidates.Add(key, words);
+                    foreach (var (output, extra) in writeHandles)
+                    {
+                        if (!PackedPointerDescriptor.EvaluateHandle(output, evaluator, out var outputWords) ||
+                            !PackedPointerDescriptor.Range(outputWords, out var address, out var length) ||
+                            address + length + extra > 1ul << 48) return false;
+                        writes.Add((address, length + extra));
+                    }
+                    foreach (var output in imageWrites)
+                    {
+                        var outputWords = new uint[8];
+                        for (var component = 0; component < outputWords.Length; component++)
+                            if (!evaluator.Evaluate(output.Operands[component], out outputWords[component])) return false;
+                        if (!inputs.ReadImageWriteRange!(outputWords, out var address, out var size) || size == 0 ||
+                            address >= 1ul << 48 || size > (1ul << 48) - address) return false;
+                        writes.Add((address, size));
+                    }
                 }
             }
             // Compare after evaluating *all* groups: a later group's output may

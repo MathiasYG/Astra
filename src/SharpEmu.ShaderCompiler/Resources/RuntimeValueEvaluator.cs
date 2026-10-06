@@ -22,14 +22,18 @@ public sealed class RuntimeValueEvaluator
     private readonly CompiledValueCache _compiledValues;
     private readonly ScalarValue? _workgroupInput;
     private readonly uint _workgroupId;
+    private readonly ScalarValue? _loopCounter;
+    private readonly uint _loopValue;
 
     // Only bounded descriptor proofs supply a workgroup value. Ordinary host
     // evaluation continues to reject this GPU input.
     internal RuntimeValueEvaluator(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
-        ScalarValue workgroupInput, uint workgroupId) : this(plan, inputs)
+        ScalarValue workgroupInput, uint workgroupId, ScalarValue? loopCounter = null, uint loopValue = 0) : this(plan, inputs)
     {
         _workgroupInput = workgroupInput;
         _workgroupId = workgroupId;
+        _loopCounter = loopCounter;
+        _loopValue = loopValue;
         // Proof evaluation substitutes one GPU workgroup input and must use the
         // interpreter's bounded-read checks rather than the ordinary compiled path.
         _compiled = null;
@@ -95,6 +99,11 @@ public sealed class RuntimeValueEvaluator
     public bool EvaluateWide(ScalarValue value, out ulong result)
     {
         result = 0;
+        if (ReferenceEquals(value, _loopCounter))
+        {
+            result = _loopValue;
+            return true;
+        }
         if (value.Kind is ScalarValueKind.WorkgroupId or ScalarValueKind.FirstLane && ReferenceEquals(value, _workgroupInput))
         {
             result = _workgroupId;

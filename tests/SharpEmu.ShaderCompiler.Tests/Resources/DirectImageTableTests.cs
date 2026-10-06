@@ -1429,6 +1429,146 @@ public sealed class DirectImageTableTests
         Assert.Single(plan.Info.Images);
     }
 
+    private static ShaderResourcePlan WorkgroupLoopImagePlan(uint increment = 1, bool inverted = false,
+        uint? writeRegister = null, bool exitImageWrite = false) =>
+        ShaderResourcePlan.Extract(Program([
+            Sop2(0, "SMulI32", 15, Gen5Operand.Scalar(12), Operand(8)),
+            ScalarBufferLoad(4, 0, 13, 2, dynamicOffsetRegister: 15),
+            Sopc(12, "SCmpLtI32", Gen5Operand.Scalar(13), Gen5Operand.Scalar(14)),
+            Branch(16, inverted ? "SCbranchScc1" : "SCbranchScc0", 10),
+            Sop2(20, "SMulI32", 15, Gen5Operand.Scalar(13), Operand(4)),
+            ScalarBufferLoad(24, 4, 24, dynamicOffsetRegister: 15),
+            Sop2(32, "SMulI32", 15, Gen5Operand.Scalar(24), Operand(32)),
+            ScalarBufferLoad(36, 8, 16, 8, dynamicOffsetRegister: 15),
+            Image(44, "ImageLoad", 16, dmask: 1),
+            Sop2(52, "SAddI32", 13, Gen5Operand.Scalar(13), Operand(increment)),
+            Branch(56, "SBranch", -12),
+            .. exitImageWrite ? new[] {
+                Sop2(60, "SMulI32", 15, Gen5Operand.Scalar(13), Operand(32)),
+                ScalarBufferLoad(64, 8, 16, 8, dynamicOffsetRegister: 15),
+                Image(72, "ImageStore", 16, dmask: 1), EndProgram(80),
+            } : writeRegister is { } output ? new[] { BufferStore(60, output), EndProgram(68) } : new[] { EndProgram(60) },
+        ]), ShaderStage.Compute, Hash, 0, 12,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(12, null, null, null));
+
+    private static ResourceRuntimeInputs WorkgroupLoopImageInputs(uint first = 1, uint end = 3,
+        ulong unreadable = 0, uint firstRecord = 3)
+    {
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address == unreadable) return false;
+            if (address is >= 0x1000 and < 0x1010)
+            {
+                word = address % 8 == 0 ? first : end; return true;
+            }
+            if (address is >= 0x2000 and < 0x2040)
+            {
+                word = address == 0x2004 ? firstRecord : 1; return true;
+            }
+            if (address is >= 0x3000 and < 0x3200)
+            {
+                word = ((address - 0x3000) % 32) switch
+                {
+                    0 => 0x6000u + (uint)(address - 0x3000) / 32 * 0x100,
+                    4 => 20u << 20, 12 => 0xFACu | (9u << 28), _ => 0,
+                };
+                return true;
+            }
+            return false;
+        }
+        return new() { UserData = [0x1000, 0, 16, (20u << 12) | 0xFAC,
+            0x2000, 0, 64, (20u << 12) | 0xFAC, 0x3000, 0, 512, (20u << 12) | 0xFAC],
+            ReadMemory = Read, ReadCleanMemory = Read,
+            ComputeState = new(64, 64, 1, 1, false, 0, 1, 2, 1, 1) };
+    }
+
+    [Theory]
+    [InlineData(1u, 3u, 0UL, 3u, true)]
+    [InlineData(2u, 3u, 0UL, 3u, true)]
+    [InlineData(1u, 3u, 0x1004UL, 3u, false)]
+    [InlineData(1u, 3u, 0x2004UL, 3u, false)]
+    [InlineData(1u, 3u, 0x3060UL, 3u, false)]
+    [InlineData(1u, 3u, 0UL, 16u, false)]
+    [InlineData(3u, 3u, 0UL, 3u, false)]
+    [InlineData(4u, 3u, 0UL, 3u, false)]
+    [InlineData(uint.MaxValue, 3u, 0UL, 3u, false)]
+    [InlineData(1u, uint.MaxValue, 0UL, 3u, false)]
+    [InlineData(1u, 258u, 0UL, 3u, false)]
+    public void WorkgroupLoopsUseActualBoundsAndFollowReadableIndexTables(
+        uint first, uint end, ulong unreadable, uint firstRecord, bool accepted)
+    {
+        var plan = WorkgroupLoopImagePlan();
+        var proof = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!;
+        Assert.NotNull(proof.LoopCounter);
+        Assert.Equal(accepted, proof.TryEvaluate(plan, WorkgroupLoopImageInputs(first, end, unreadable, firstRecord),
+            out var keys, out var descriptors));
+        if (accepted)
+        {
+            Assert.Equal(first == 1 ? new uint[] { 96, 32 } : new uint[] { 32 }, keys);
+            Assert.Equal(first == 1 ? new uint[] { 0x6300, 0x6100 } : new uint[] { 0x6100 },
+                descriptors.Select(words => words[0]));
+        }
+    }
+
+    [Theory]
+    [InlineData(2u, false)]
+    [InlineData(1u, true)]
+    public void WorkgroupLoopDeclinesUnsupportedIncrementOrInvertedGuard(uint increment, bool inverted)
+    {
+        var plan = WorkgroupLoopImagePlan(increment, inverted);
+        Assert.Null(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage?.Workgroup);
+    }
+
+    [Fact]
+    public void WorkgroupLoopDoesNotSubstituteIterationValuesForAnExitImageWrite()
+    {
+        var plan = WorkgroupLoopImagePlan(exitImageWrite: true);
+        Assert.Null(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage?.Workgroup);
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(4u)]
+    [InlineData(8u)]
+    public void WorkgroupLoopsRejectWritesToBoundsIndexOrDescriptorMemory(uint writeRegister)
+    {
+        var plan = WorkgroupLoopImagePlan(writeRegister: writeRegister);
+        var proof = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!;
+        Assert.False(proof.TryEvaluate(plan, WorkgroupLoopImageInputs(), out _, out _));
+    }
+
+    [Fact]
+    public void WorkgroupLoopCacheTracksBoundsIndexRecordsAndUnreadableDependencies()
+    {
+        var plan = WorkgroupLoopImagePlan();
+        var inputs = WorkgroupLoopImageInputs();
+        bool Resident(ulong address, Span<byte> bytes, bool clean)
+        {
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+            {
+                if (!inputs.ReadCleanMemory!(address + (uint)offset, out var word)) return false;
+                BitConverter.TryWriteBytes(bytes[offset..], word);
+            }
+            return true;
+        }
+        var cache = new ResourceMaterializationCache();
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(1, cache.Hits);
+        inputs = WorkgroupLoopImageInputs(end: 2);
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Single(snapshot.Images);
+        inputs = WorkgroupLoopImageInputs(end: 2, firstRecord: 4);
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(0x6400u, snapshot.Images[0][0]);
+        inputs = WorkgroupLoopImageInputs(end: 2, firstRecord: 4, unreadable: 0x3080);
+        Assert.False(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(1, cache.Hits);
+    }
+
     [Fact]
     public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
     {
