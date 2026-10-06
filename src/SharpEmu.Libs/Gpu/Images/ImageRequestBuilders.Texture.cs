@@ -13,6 +13,33 @@ public readonly record struct TextureRequestResolution(ImageRequest Request, boo
 
 public static partial class ImageRequestBuilders
 {
+    internal static bool TryGetStorageAllocationRange(ReadOnlySpan<uint> words, out ulong address, out ulong size)
+    {
+        address = size = 0;
+        if (words.Length != 8) return false;
+        var descriptor = new TextureDescriptorWords(words);
+        if (descriptor.IsNull || descriptor.Type != GuestImageType.Color2D ||
+            descriptor.WriteCompress || descriptor.MetadataCompress) return false;
+        var numeric = SharpEmu.ShaderCompiler.Resources.GuestImageFormat.SampledNumericClass(
+            SharpEmu.ShaderCompiler.Resources.GuestImageFormat.FormatOf(words));
+        if (numeric == SharpEmu.ShaderCompiler.Resources.ImageNumericClass.Unsupported) return false;
+        var storageClass = numeric switch
+        {
+            SharpEmu.ShaderCompiler.Resources.ImageNumericClass.Uint => TextureNumericClass.Uint,
+            SharpEmu.ShaderCompiler.Resources.ImageNumericClass.Sint => TextureNumericClass.Sint,
+            _ => TextureNumericClass.Float,
+        };
+        var resolved = Texture(words, new ShaderImageShape(false, false, true, true, storageClass));
+        var data = resolved.Request.Description.Data;
+        if (resolved.Request.Description.PixelFormat == Format.Undefined ||
+            resolved.Request.Description.GuestFormat != descriptor.Format ||
+            data.Address != descriptor.BaseAddress || data.Size == 0 ||
+            data.Address >= 1ul << 48 || data.Size > (1ul << 48) - data.Address) return false;
+        address = data.Address;
+        size = data.Size;
+        return true;
+    }
+
     // A null descriptor binds a one-texel image of the numeric class the shader expects.
     public static ImageRequest NullTexture(in ShaderImageShape shape)
     {

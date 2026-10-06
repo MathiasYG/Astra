@@ -127,13 +127,25 @@ public static class ResourceMaterializer
         snapshot = new MaterializedSnapshot();
         // A clean host read does not cover writes made during this draw. These
         // proofs require stable descriptor inputs throughout shader execution.
-        if (plan.DescriptorSources.Any(source => source.RuntimeSamplerCountSource is not null ||
-                source.IndirectImage is { } indirect &&
-                (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null)) &&
-            (inputs.OtherStageMayWriteMemory || plan.Memory.Entries.Any(memory =>
-                memory.Kind != MemoryResourceKind.LocalDataShare &&
-                memory.Access is MemoryAccess.Write or MemoryAccess.Atomic)))
-            return false;
+        DescriptorWriteProof? writeProof = null;
+        if (RequiresStableDescriptorInputs(plan))
+        {
+            if (inputs.OtherStageMayWriteMemory) return false;
+            if (RequiresDescriptorWriteProof(plan))
+            {
+                if (inputs.ReadCleanMemory is null) return false;
+                writeProof = new DescriptorWriteProof(inputs.ReadCleanMemory);
+                inputs = new ResourceRuntimeInputs
+                {
+                    UserData = inputs.UserData, ShaderBase = inputs.ShaderBase,
+                    ReadMemory = inputs.ReadMemory, ReadCleanMemory = writeProof.Read,
+                    ReadResidentMemory = inputs.ReadResidentMemory, ReadsClean = inputs.ReadsClean,
+                    ComputeState = inputs.ComputeState, TablePhase = inputs.TablePhase,
+                    OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
+                    ReadImageWriteRange = inputs.ReadImageWriteRange,
+                };
+            }
+        }
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
         {
             return false;
@@ -358,7 +370,57 @@ public static class ResourceMaterializer
         }
 
         snapshot.UserData = inputs.UserData.ToArray();
+        if (writeProof is not null && !writeProof.Validate(plan, inputs)) return false;
         return true;
+    }
+
+    private static bool RequiresStableDescriptorInputs(ShaderResourcePlan plan) =>
+        plan.DescriptorSources.Any(source => source.RuntimeSamplerCountSource is not null ||
+            source.IndirectImage is { } indirect &&
+            (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null));
+
+    internal static bool RequiresDescriptorWriteProof(ShaderResourcePlan plan) =>
+        RequiresStableDescriptorInputs(plan) && plan.Memory.Entries.Any(memory =>
+            memory.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) &&
+            memory.Access is MemoryAccess.Write or MemoryAccess.Atomic);
+
+    private sealed class DescriptorWriteProof(GuestWordReader reader)
+    {
+        private readonly HashSet<ulong> _reads = [];
+
+        public bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address > (1ul << 48) - sizeof(uint) || !reader(address, out word)) return false;
+            _reads.Add(address);
+            return true;
+        }
+
+        public bool Validate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+        {
+            var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(inputs.ReadCleanMemory));
+            var writes = new List<(ulong Address, ulong Size)>();
+            for (var index = 0; index < plan.Memory.Count; index++)
+            {
+                var memory = plan.Memory[index];
+                if (memory.Access is not (MemoryAccess.Write or MemoryAccess.Atomic) ||
+                    memory.Kind is MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) continue;
+                if (memory.Kind != MemoryResourceKind.Image || inputs.ReadImageWriteRange is null ||
+                    plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.ImageHandle, Operands.Length: 8 } handle)
+                    return false;
+                var words = new uint[8];
+                for (var component = 0; component < words.Length; component++)
+                    if (!plan.ValidateRuntimeValue(handle.Operands[component]) ||
+                        !evaluator.Evaluate(handle.Operands[component], out words[component])) return false;
+                if (!inputs.ReadImageWriteRange(words, out var address, out var size) || size == 0 ||
+                    address >= 1ul << 48 || size > (1ul << 48) - address) return false;
+                writes.Add((address, size));
+            }
+            // Include dependencies read while evaluating output descriptors before
+            // comparing any ranges; outputs can alias each other's dependencies.
+            return !writes.Any(write => _reads.Any(read =>
+                read < write.Address + write.Size && write.Address < read + sizeof(uint)));
+        }
     }
 
     // Reads every candidate the loop guard can select from the guest SRT, validates it and

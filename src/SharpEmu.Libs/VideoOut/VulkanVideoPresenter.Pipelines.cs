@@ -162,6 +162,9 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Refused while a GPU buffer or image write may still own the range.
+        public bool TryGetImageWriteRange(ReadOnlySpan<uint> image, out ulong address, out ulong size) =>
+            ImageRequestBuilders.TryGetStorageAllocationRange(image, out address, out size);
+
         public bool TryReadCleanGuestWord(ulong address, out uint word)
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);

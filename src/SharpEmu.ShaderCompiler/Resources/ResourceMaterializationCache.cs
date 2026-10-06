@@ -74,6 +74,10 @@ public sealed class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        // Allocation ranges must be proved again for each dispatch. These plans
+        // are not reusable until that proof is represented in the cache key.
+        if (ResourceMaterializer.RequiresDescriptorWriteProof(plan))
+            return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
         var key = KeyOf(plan, inputs);
         var found = TryFind(key, plan, inputs, out var cached);
         if (found)
@@ -134,6 +138,7 @@ public sealed class ResourceMaterializationCache
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
                 OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
+                ReadImageWriteRange = inputs.ReadImageWriteRange,
                 TablePhase = recorder.TablePhase,
             };
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
@@ -216,6 +221,7 @@ public sealed class ResourceMaterializationCache
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
                 OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
+                ReadImageWriteRange = inputs.ReadImageWriteRange,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;

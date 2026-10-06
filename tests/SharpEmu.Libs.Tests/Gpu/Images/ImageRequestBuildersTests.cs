@@ -19,6 +19,24 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     private const ulong Base = 0x1_0000_0000;
 
     [Theory]
+    [InlineData(0u, true)]
+    [InlineData(1u << 20, false)]
+    [InlineData(1u << 21, false)]
+    public void StorageWriteRangeIncludesTheTiledAllocationAndRejectsCompression(uint compression, bool accepted)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits16_16_16_16Float,
+            16, 16, tile: GuestTileMode.Standard4KB);
+        words[6] |= compression;
+        Assert.Equal(accepted, ImageRequestBuilders.TryGetStorageAllocationRange(words, out var address, out var size));
+        Assert.Equal(accepted ? Base : 0UL, address);
+        Assert.Equal(accepted ? 4096UL : 0UL, size);
+        words[0] = 0;
+        words[1] &= 0xFFFFFF00;
+        Assert.False(ImageRequestBuilders.TryGetStorageAllocationRange(words, out _, out _));
+        Assert.False(ImageRequestBuilders.TryGetStorageAllocationRange(words.AsSpan(0, 7), out _, out _));
+    }
+
+    [Theory]
     [InlineData(0x100u)]
     [InlineData(0x800u)]
     public void TiledTextureViewPreservesItsDescriptorAddress(uint offset)

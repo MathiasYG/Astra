@@ -290,6 +290,77 @@ public sealed class DirectImageTableTests
         Assert.Equal(0xFFF000u, snapshot.Samplers[0][1]);
     }
 
+    [Theory]
+    [InlineData(0x9000UL, false, false, true)]
+    [InlineData(0x9000UL, true, false, true)]
+    [InlineData(0x1001UL, false, false, false)]
+    [InlineData(0x1001UL, true, false, false)]
+    [InlineData(0x8001UL, false, false, false)]
+    [InlineData(0x8041UL, false, false, false)]
+    [InlineData(0x9000UL, false, true, false)]
+    public void RuntimeDescriptorsRequireDisjointReadableImageWrites(
+        ulong outputAddress, bool cached, bool unreadableOutput, bool accepted)
+    {
+        var instructions = RuntimeMemoryBoundProgram().Instructions;
+        var program = Program([
+            .. instructions.Take(instructions.Count - 1),
+            ScalarLoad(60, 4, 32, 8, immediateOffset: 64),
+            Image(68, "ImageStore", 32, dmask: 1), EndProgram(76),
+        ]);
+        var plan = Extract(program, userDataCount: 6);
+        bool Read(ulong address, out uint word)
+        {
+            if (address >= 0x8040 && address < 0x8060)
+            {
+                word = (address - 0x8040) switch
+                {
+                    0 => 0x90, 4 => 20u << 20, 12 => 0xFACu | (9u << 28), _ => 0,
+                };
+                return !unreadableOutput;
+            }
+            return ReadRuntimeBoundMemory(address, 2, out word);
+        }
+        bool Range(ReadOnlySpan<uint> words, out ulong address, out ulong size)
+        {
+            Assert.Equal(0x90u, words[0]);
+            address = outputAddress;
+            size = 32;
+            return true;
+        }
+        bool Resident(ulong address, Span<byte> bytes, bool clean)
+        {
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+            {
+                if (!Read(address + (uint)offset, out var word)) return false;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes[offset..], word);
+            }
+            return true;
+        }
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [0x1000, 0, 0, 0, 0x8000, 0], ReadMemory = Read, ReadCleanMemory = Read,
+            ReadImageWriteRange = Range,
+        };
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        var original = snapshot;
+        var cache = new ResourceMaterializationCache();
+        var result = cached
+            ? cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _)
+            : ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization);
+        Assert.Equal(accepted, result);
+        if (!accepted) Assert.Same(original, snapshot);
+        else if (cached)
+        {
+            // A changed allocation result must be checked even when words match.
+            outputAddress = 0x1001;
+            original = snapshot;
+            Assert.False(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+            Assert.Same(original, snapshot);
+            Assert.Equal(0, cache.Hits);
+        }
+    }
+
     private static Gen5ShaderProgram RuntimeMemoryBoundProgram(bool writes = false) => Program([
         ScalarLoad(0, 4, 2), MoveScalar(8, 8, 0),
         Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),
