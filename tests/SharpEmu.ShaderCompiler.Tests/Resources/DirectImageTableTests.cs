@@ -1768,6 +1768,34 @@ public sealed class DirectImageTableTests
     }
 
     [Fact]
+    public void RuntimeSamplerSelectorUsesTheLoadBehindInvariantJoins()
+    {
+        var (original, inputs) = WorkgroupLoopSamplers();
+        int selectorMemory = -1;
+        var plan = ShaderResourcePlan.Extract(original.Graph.Program, ShaderStage.Compute, Hash, 0, 12,
+            beforeResourceTracking: candidate =>
+            {
+                var index = Enumerable.Range(0, candidate.Memory.Count).Single(index => candidate.Memory[index].Pc == 52);
+                var access = candidate.Graph.Accesses[index]!;
+                selectorMemory = access.SamplerHandle!.Operands[0].MemoryIndex;
+                var joined = access.SamplerHandle.Operands.Select(word =>
+                {
+                    var phi = ScalarValue.Phi(1, ScalarValueType.U32);
+                    phi.SetPhiOperands([0, 1], [word, phi]);
+                    return phi;
+                }).ToArray();
+                candidate.Graph.Accesses[index] = access with {
+                    SamplerHandle = ScalarValue.Handle(ScalarValueKind.SamplerHandle, joined) };
+            }, computeSystemRegisters: new Gen5ComputeSystemRegisters(12, null, null, null));
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.All(specialization.RuntimeSamplers, candidate => Assert.Equal(selectorMemory, candidate.SelectorMemoryIndex));
+        Assert.Equal(new uint[] { 2, 1 }, snapshot.Samplers.Select(words => words[0]));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(selectorMemory, resources.FiniteSamplersByMemoryIndex.Values.Single().SelectorMemoryIndex);
+    }
+
+    [Fact]
     public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
     {
         var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 40),

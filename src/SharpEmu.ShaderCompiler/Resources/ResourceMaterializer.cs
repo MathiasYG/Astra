@@ -351,7 +351,8 @@ public static class ResourceMaterializer
                         }
                         distinct.Add((records[record], target));
                     }
-                    snapshot.RuntimeSamplers.Add(new((uint)index, workgroup.Handle.Operands[0].MemoryIndex, keys[record], target));
+                    var selectorRead = plan.Graph.ResolveInvariantPhi(workgroup.Handle.Operands[0]) ?? workgroup.Handle.Operands[0];
+                    snapshot.RuntimeSamplers.Add(new((uint)index, selectorRead.MemoryIndex, keys[record], target));
                 }
                 snapshot.Samplers[index] = records[0];
                 if (distinct.Count == 1)

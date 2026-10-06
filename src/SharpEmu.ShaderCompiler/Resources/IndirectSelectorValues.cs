@@ -687,7 +687,7 @@ public sealed class IndirectSelectorValues
                 foreach (var alias in loops) replacements[alias] = plan.Graph.Constant(0u);
                 if (handle.Kind == ScalarValueKind.SamplerHandle && key is null)
                 {
-                    var first = handle.Operands[0];
+                    var first = plan.Graph.ResolveInvariantPhi(handle.Operands[0]) ?? handle.Operands[0];
                     if (first.Kind != ScalarValueKind.ScalarBufferWord || first.Operands.Length != 2 ||
                         first.MemoryIndex < 0 || first.MemoryIndex >= plan.Memory.Count) return false;
                     key = first.Operands[1];
