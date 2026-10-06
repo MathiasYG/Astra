@@ -196,7 +196,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (data.Size != 0 && output.Size != 0 && data.Address < output.Address + output.Size &&
                     output.Address < data.Address + data.Size) return false;
             }
-            return ImageRequestBuilders.TryReadPointSampledByteDomain(image, sampler, channels, cleanReader, out values, gathered);
+            // Recording readers must observe every word for dependency validation.
+            // Only the unwrapped host reader can use the equivalent range check.
+            SharpEmu.ShaderCompiler.Resources.GuestWordReader hostReader = TryReadCleanGuestWord;
+            var rangeReader = cleanReader == hostReader ? TryReadResidentGuestBytes :
+                (SharpEmu.ShaderCompiler.Resources.ResidentGuestBytesReader?)null;
+            return ImageRequestBuilders.TryReadPointSampledByteDomain(image, sampler, channels, cleanReader, out values, gathered, rangeReader);
         }
 
         public bool TryReadCleanGuestWord(ulong address, out uint word)

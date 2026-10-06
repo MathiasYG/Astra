@@ -63,6 +63,40 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     private const ulong Base = 0x1_0000_0000;
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PointSampledByteDomainRangeReadsMatchWordsAndRejectAnUnreadableTail(bool unreadableTail)
+    {
+        var image = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UInt, 512, 3,
+            tile: GuestTileMode.Linear);
+        var size = ImageRequestBuilders.Texture(image,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description.Data.Size;
+        Assert.True(size > 4096);
+        uint Word(ulong address) => address == Base + size - 4 ? 0xFA090807u : 0xFA040302u;
+        bool Reference(ulong address, out uint word) { word = Word(address); return true; }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(image, new uint[4], 7, Reference, out var expected));
+        var wordCalls = 0; var rangeCalls = 0;
+        bool ReadWord(ulong address, out uint word) { wordCalls++; word = Word(address); return true; }
+        bool ReadRange(ulong address, Span<byte> bytes, bool clean)
+        {
+            Assert.True(clean);
+            Assert.InRange(bytes.Length, 4, 4096);
+            Assert.Equal(0, bytes.Length % 4);
+            rangeCalls++;
+            if (unreadableTail && address + (ulong)bytes.Length == Base + size) return false;
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes[offset..], Word(address + (uint)offset));
+            return true;
+        }
+        Assert.Equal(!unreadableTail, ImageRequestBuilders.TryReadPointSampledByteDomain(image, new uint[4], 7,
+            ReadWord, out var actual, readCleanRange: ReadRange));
+        Assert.Equal(0, wordCalls);
+        Assert.Equal((int)((size + 4095) / 4096), rangeCalls);
+        if (unreadableTail) Assert.Empty(actual);
+        else Assert.Equal(expected, actual);
+    }
+
+    [Theory]
     [InlineData(GuestTileMode.Linear)]
     [InlineData(GuestTileMode.Standard4KB)]
     public void R8DomainReadsLogicalTexelsWithoutTreatingPaddingAsSampledValues(GuestTileMode tile)

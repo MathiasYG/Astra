@@ -18,7 +18,8 @@ public static partial class ImageRequestBuilders
     // padding overestimates the domain; every byte must still be readable.
     internal static bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> imageWords,
         ReadOnlySpan<uint> samplerWords, uint channels,
-        SharpEmu.ShaderCompiler.Resources.GuestWordReader readCleanWord, out uint[] values, bool gathered = false)
+        SharpEmu.ShaderCompiler.Resources.GuestWordReader readCleanWord, out uint[] values, bool gathered = false,
+        SharpEmu.ShaderCompiler.Resources.ResidentGuestBytesReader? readCleanRange = null)
     {
         values = [];
         if (imageWords.Length != 8 || samplerWords.Length != 4 || channels is 0 or > 15) return false;
@@ -53,11 +54,23 @@ public static partial class ImageRequestBuilders
         if (request.Request.Description.PixelFormat != Format.R8G8B8A8Uint) return false;
         var data = request.Request.Description.Data;
         if (data.Size is 0 or > 16 * 1024 * 1024 || (data.Size & 3) != 0) return false;
-        for (ulong offset = 0; offset < data.Size; offset += 4)
+        Span<byte> block = stackalloc byte[4096];
+        for (ulong offset = 0; offset < data.Size;)
         {
-            if (!readCleanWord(data.Address + offset, out var word)) return false;
-            for (var channel = 0; channel < 4; channel++)
-                if ((storedChannels & (1u << channel)) != 0) found[(word >> (channel * 8)) & 255] = true;
+            var bytes = readCleanRange is null ? sizeof(uint) : (int)Math.Min((ulong)block.Length, data.Size - offset);
+            if (readCleanRange is not null && !readCleanRange(data.Address + offset, block[..bytes], true)) return false;
+            for (var within = 0; within < bytes; within += 4)
+            {
+                uint word;
+                if (readCleanRange is null)
+                {
+                    if (!readCleanWord(data.Address + offset, out word)) return false;
+                }
+                else word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(block[within..]);
+                for (var channel = 0; channel < 4; channel++)
+                    if ((storedChannels & (1u << channel)) != 0) found[(word >> (channel * 8)) & 255] = true;
+            }
+            offset += (uint)bytes;
         }
         values = Enumerable.Range(0, 256).Where(value => found[value]).Select(value => (uint)value).ToArray();
         return true;
