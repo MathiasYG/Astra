@@ -54,6 +54,55 @@ public sealed class Gen5ExecFullAnalysisTests
     [Theory]
     [InlineData(true, true)]
     [InlineData(false, false)]
+    public void QuadExpansionRequiresAQuadClosedInitializationMask(bool initializeWholeQuads, bool expected)
+    {
+        Kill();
+        if (initializeWholeQuads) Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        var initialization = VectorAdd();
+        Kill();
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        var use = VectorAdd();
+        var program = new Gen5ShaderProgram(0, _program);
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(program, initialization, false).Contains(use));
+        Assert.DoesNotContain(use, Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(program, initialization, false));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void QuadInitializationProofRejectsSkippedOrNarrowedWqm(bool skip)
+    {
+        var branch = skip ? Branch("SCbranchScc0") : uint.MaxValue;
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        if (!skip) Kill();
+        var initialization = VectorAdd();
+        if (skip) PointBranch(branch, initialization);
+        Kill();
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        var use = VectorAdd();
+        Assert.DoesNotContain(use, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false));
+    }
+
+    [Theory]
+    [InlineData(false, "SAndn2B64", true)]
+    [InlineData(true, "SAndn2B64", false)]
+    [InlineData(false, "SOrB64", false)]
+    public void QuadClosureRetainsOnlySurvivingSubsetMasks(bool overwrite, string operation, bool expected)
+    {
+        Kill();
+        Scalar("SMovB64", 8, Gen5Operand.Scalar(Exec));
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        if (overwrite) Scalar("SMovB32", 9, Gen5Operand.Scalar(20));
+        var initialization = VectorAdd();
+        Scalar(operation, 8, Gen5Operand.Scalar(8), Gen5Operand.Scalar(20));
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(8));
+        var use = VectorAdd();
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false).Contains(use));
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
     public void CompareExecutionOnlyPreservesTheSavedScalarMask(bool executionOnly, bool expected)
     {
         var initialization = VectorAdd();
