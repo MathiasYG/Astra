@@ -49,6 +49,78 @@ public sealed class NetExportsTests
     }
 
     [Fact]
+    public void EpollReadiness_DistinguishesPendingAcceptFromPeerShutdown()
+    {
+        _ctx[CpuRegister.Rsi] = 2;
+        _ctx[CpuRegister.Rdx] = 1;
+        _ctx[CpuRegister.Rcx] = 6;
+        Assert.Equal(0, NetExports.NetSocket(_ctx));
+        var socketId = _ctx[CpuRegister.Rax];
+        var sockets = (System.Collections.Concurrent.ConcurrentDictionary<int, System.Net.Sockets.Socket>)
+            typeof(NetExports).GetField("_sockets", System.Reflection.BindingFlags.Static |
+                System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+        var listener = sockets[(int)socketId];
+        listener.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0));
+        _ctx[CpuRegister.Rdi] = socketId;
+        _ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(0, NetExports.NetListen(_ctx));
+        _ctx[CpuRegister.Rdi] = 0;
+        _ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, NetExports.NetEpollCreate(_ctx));
+        var poll = _ctx[CpuRegister.Rax];
+        ulong acceptedId = 0;
+        using var client = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+        const ulong input = 0x1_0000_0100, output = 0x1_0000_0200;
+        try
+        {
+            var record = new byte[24];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(record, 1);
+            Assert.True(_ctx.Memory.TryWrite(input, record));
+            void Watch(ulong id)
+            {
+                _ctx[CpuRegister.Rdi] = poll;
+                _ctx[CpuRegister.Rsi] = 1;
+                _ctx[CpuRegister.Rdx] = id;
+                _ctx[CpuRegister.Rcx] = input;
+                Assert.Equal(0, NetExports.NetEpollControl(_ctx));
+            }
+            uint ReadEvents()
+            {
+                _ctx[CpuRegister.Rdi] = poll;
+                _ctx[CpuRegister.Rsi] = output;
+                _ctx[CpuRegister.Rdx] = 1;
+                _ctx[CpuRegister.Rcx] = 1_000_000;
+                Assert.Equal(0, NetExports.NetEpollWait(_ctx));
+                Assert.Equal(1UL, _ctx[CpuRegister.Rax]);
+                Assert.True(_ctx.Memory.TryRead(output, record));
+                return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(record);
+            }
+            Watch(socketId);
+            client.Connect(listener.LocalEndPoint!);
+            Assert.Equal(1u, ReadEvents());
+            _ctx[CpuRegister.Rdi] = socketId;
+            Assert.Equal(0, NetExports.NetAccept(_ctx));
+            acceptedId = _ctx[CpuRegister.Rax];
+            Watch(acceptedId);
+            client.Shutdown(System.Net.Sockets.SocketShutdown.Send);
+            Assert.Equal(0x11u, ReadEvents());
+        }
+        finally
+        {
+            if (acceptedId != 0)
+            {
+                _ctx[CpuRegister.Rdi] = acceptedId;
+                NetExports.NetSocketClose(_ctx);
+            }
+            _ctx[CpuRegister.Rdi] = socketId;
+            NetExports.NetSocketClose(_ctx);
+            _ctx[CpuRegister.Rdi] = poll;
+            NetExports.NetEpollDestroy(_ctx);
+        }
+    }
+
+    [Fact]
     public void EpollDestroy_WakesAnInfiniteWaitWithBadDescriptor()
     {
         Assert.Equal(0, NetExports.NetEpollCreate(_ctx));

@@ -183,7 +183,10 @@ public static class NetExports
                         if (socket.Poll(0, SelectMode.SelectRead))
                         {
                             ready |= watch.Events & 1;
-                            if (socket.SocketType == SocketType.Stream && socket.Available == 0)
+                            // A pending accept also signals readability without payload bytes.
+                            if (socket.SocketType == SocketType.Stream && socket.Available == 0 &&
+                                (int)socket.GetSocketOption(SocketOptionLevel.Socket,
+                                    SocketOptionName.AcceptConnection)! == 0)
                                 ready |= 0x10;
                         }
                         if ((watch.Events & 2) != 0 && socket.Poll(0, SelectMode.SelectWrite)) ready |= 2;
