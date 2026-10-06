@@ -183,6 +183,8 @@ public sealed class ShaderResourcePlan
             }
             else if (indirect.DirectCandidates is { } directCandidates)
             {
+                if (indirect.CandidateCountSource is { } countSource)
+                    plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)countSource], cleanSlots);
                 foreach (var candidate in directCandidates)
                     plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate.Source], cleanSlots);
             }

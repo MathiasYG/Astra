@@ -211,6 +211,7 @@ public sealed record IndirectImageSelector(
 {
     public IndirectSelectorValues? SelectorValues { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
+    public uint? CandidateCountSource { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }
     public uint DynamicOffsetBase { get; init; }

@@ -142,6 +142,13 @@ public sealed partial class ResourceTracker
 
         if (TryGetPostTestedLoopSelector(reads[0].Operands[1], keyMemory.Pc, out var loopKey, out var loopValues))
             return MakeCandidates(loopKey, loopValues, out plan);
+        if (TryGetBoundedRuntimeSelector(reads[0].Operands[1], keyMemory.Pc, out var runtimeKey, out var runtimeLimit))
+        {
+            var countSource = InternSource(new DescriptorSource { Dwords = [runtimeLimit] });
+            return MakeCandidates(runtimeKey,
+                Enumerable.Range(0, ShaderResourceInfo.MaxImages).Select(index => (uint)index).ToArray(),
+                out plan, countSource);
+        }
         // Include the all-zero input result unless the scan's incoming edge proves it cannot occur.
         if (TryGetGuardedSelector(reads[0].Operands[1], keyMemory.Pc, out var guarded, out var bound))
         {
@@ -180,7 +187,7 @@ public sealed partial class ResourceTracker
         plan = selectedPlan;
         return madeCandidates;
 
-        bool MakeCandidates(ScalarValue selected, uint[]? domain, out IndirectImagePlan candidatePlan)
+        bool MakeCandidates(ScalarValue selected, uint[]? domain, out IndirectImagePlan candidatePlan, uint? countSource = null)
         {
             candidatePlan = null!;
             var candidates = new List<DirectImageCandidate>();
@@ -208,7 +215,8 @@ public sealed partial class ResourceTracker
             var imageSource = new DescriptorSource
             {
                 Dwords = sources[0].Dwords,
-                IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0) { DirectCandidates = candidates },
+                IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0)
+                    { DirectCandidates = candidates, CandidateCountSource = countSource },
             };
             candidatePlan = new IndirectImagePlan
             {
@@ -222,6 +230,70 @@ public sealed partial class ResourceTracker
             };
             return true;
         }
+    }
+
+    private bool TryGetBoundedRuntimeSelector(ScalarValue offset, uint loadPc, out ScalarValue selector, out ScalarValue limit)
+    {
+        selector = limit = null!;
+        if (offset.Kind != ScalarValueKind.Operation ||
+            offset.Operation is not (ScalarOperation.IMul32 or ScalarOperation.ShiftLeft32) ||
+            offset.Operands.Length != 2) return false;
+        var key = offset.Operands[1].IsConstant ? offset.Operands[0] :
+            offset.Operands[0].IsConstant ? offset.Operands[1] : null;
+        if (key is null || key.Type != ScalarValueType.U32) return false;
+
+        var flow = _graph.ControlFlow;
+        var loadBlock = Enumerable.Range(0, flow.Blocks.Count).First(index =>
+            loadPc >= flow.Blocks[index].StartPc && loadPc < flow.Blocks[index].EndPc);
+        foreach (var (pc, condition) in _plan.FlattenedBranchConditions)
+        {
+            if (condition.Kind != ScalarValueKind.Operation || condition.Operation != ScalarOperation.LogicalNot ||
+                condition.Operands.Length != 1) continue;
+            var gated = condition.Operands[0];
+            var direct = gated.Kind == ScalarValueKind.Operation;
+            if (!direct && (gated.Kind != ScalarValueKind.Select || gated.Operands.Length != 3 ||
+                !gated.Operands[2].IsConstant || gated.Operands[2].Payload != 0)) continue;
+            var comparison = direct ? gated : gated.Operands[0];
+            if (comparison.Kind != ScalarValueKind.Operation ||
+                comparison.Operation is not (ScalarOperation.ULessThan32 or ScalarOperation.SLessThan32) ||
+                comparison.Operands.Length != 2 || !_graph.Equivalent(comparison.Operands[0], key)) continue;
+            if (comparison.Operation == ScalarOperation.SLessThan32 &&
+                (key.Kind != ScalarValueKind.Phi || key.Operands.Length != 2 ||
+                 !key.Operands.Any(value => value.IsConstant && value.Payload == 0) ||
+                 !key.Operands.Any(value => value.Kind == ScalarValueKind.Operation &&
+                     value.Operation == ScalarOperation.IAdd32 && value.Operands.Length == 2 &&
+                     ReferenceEquals(value.Operands[0], key) && value.Operands[1].IsConstant && value.Operands[1].Payload == 1)))
+                continue;
+            var bound = _graph.ResolveInvariantPhi(comparison.Operands[1]);
+            if (bound is null || bound.Type != ScalarValueType.U32 || !_plan.ValidateRuntimeValue(bound, out _)) continue;
+            var branch = _graph.Program.Instructions.First(instruction => instruction.Pc == pc);
+            if (branch.Opcode != (direct ? "SCbranchScc0" : "SCbranchVccz") ||
+                !SharpEmu.ShaderCompiler.Ir.Gen5IrBranchResolver.Instance.TryGetBranchTarget(branch, out var target) ||
+                !flow.BlockByStartPc.TryGetValue(target, out var rejected) ||
+                !flow.BlockByStartPc.TryGetValue(pc + (uint)branch.Words.Count * sizeof(uint), out var admitted)) continue;
+            var guard = Enumerable.Range(0, flow.Blocks.Count).First(index =>
+                pc >= flow.Blocks[index].StartPc && pc < flow.Blocks[index].EndPc);
+            if (ReachesLoad(0) || ReachesLoad(rejected)) continue;
+            selector = key;
+            limit = bound;
+            return true;
+
+            bool ReachesLoad(int start)
+            {
+                var pending = new Stack<int>();
+                pending.Push(start);
+                var visited = new HashSet<int>();
+                while (pending.TryPop(out var current))
+                {
+                    if (!visited.Add(current)) continue;
+                    if (current == loadBlock) return true;
+                    foreach (var next in flow.Successors[current])
+                        if (current != guard || next != admitted) pending.Push(next);
+                }
+                return false;
+            }
+        }
+        return false;
     }
 
     private bool UsesOnlyThroughInvariantPhis(ScalarValue value, ScalarValue handle)

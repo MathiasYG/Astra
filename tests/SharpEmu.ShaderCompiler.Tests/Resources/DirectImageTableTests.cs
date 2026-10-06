@@ -12,6 +12,150 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class DirectImageTableTests
 {
     [Theory]
+    [InlineData(0u, false, false, 0)]
+    [InlineData(1u, false, true, 1)]
+    [InlineData(6u, false, true, 6)]
+    [InlineData(256u, false, true, 256)]
+    [InlineData(257u, false, false, 0)]
+    [InlineData(uint.MaxValue, false, false, 0)]
+    [InlineData(1u, true, false, 0)]
+    public void RuntimeGuardUsesItsCurrentBoundAndRejectsUnreadableOrOversizedTables(
+        uint count, bool unreadable, bool accepted, int expectedCandidates)
+    {
+        var program = Program([
+            MoveScalar(0, 8, 0),
+            Sopc(4, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),
+            Sop2(8, "SCselectB64", 106, Gen5Operand.Scalar(126), Operand(0)),
+            Branch(12, "SCbranchVccz", 10),
+            Sop2(16, "SMulI32", 10, Gen5Operand.Scalar(8), Operand(64)),
+            ScalarLoad(20, 0, 16, 8, dynamicOffsetRegister: 10),
+            ScalarLoad(28, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 10),
+            Image(36, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
+            Sop2(44, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+            Branch(48, "SBranch", -12), EndProgram(56),
+        ]);
+        var plan = Extract(program, userDataCount: 3);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.NotNull(source.IndirectImage?.CandidateCountSource);
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (unreadable || address < 0x1000 || address >= 0x1000 + count * 64UL) return false;
+            var record = (uint)(address - 0x1000) / 64;
+            var component = (uint)(address - 0x1000) % 64 / 4;
+            word = component switch
+            {
+                0 => 0x2000u + record * 0x100,
+                1 => 20u << 20,
+                3 => 0xFACu | (9u << 28),
+                9 => 0xFFF000,
+                _ => 0,
+            };
+            return true;
+        }
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        var prior = snapshot;
+        var succeeded = ResourceMaterializer.Materialize(plan,
+            Inputs([0x1000, 0, count], readCleanMemory: Read), ref snapshot, ref specialization);
+        Assert.Equal(accepted, succeeded);
+        if (!accepted)
+        {
+            Assert.Same(prior, snapshot);
+            return;
+        }
+        Assert.Equal(expectedCandidates > 1, specialization.Images[0].IndirectSearchIterations != 0);
+        if (expectedCandidates == 1) Assert.Equal(0x2000u, snapshot.Images[0][0]);
+    }
+
+    [Theory]
+    [InlineData(false, false, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    public void RuntimeBoundRequiresTheDescriptorLoadOnOnlyTheAdmittedGuardPath(
+        bool wrongKey, bool rejectedEdgeRejoins, bool inverted, bool accepted)
+    {
+        var program = Program([
+            MoveScalar(0, 8, 0),
+            Sopc(4, "SCmpLtU32", Gen5Operand.Scalar(wrongKey ? 9u : 8u), Gen5Operand.Scalar(2)),
+            Sop2(8, "SCselectB64", 106, Gen5Operand.Scalar(126), Operand(0)),
+            Branch(12, inverted ? "SCbranchVccnz" : "SCbranchVccz", (short)(rejectedEdgeRejoins ? 0 : 10)),
+            Sop2(16, "SMulI32", 10, Gen5Operand.Scalar(8), Operand(64)),
+            ScalarLoad(20, 0, 16, 8, dynamicOffsetRegister: 10),
+            ScalarLoad(28, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 10),
+            Image(36, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
+            Sop2(44, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+            Branch(48, "SBranch", -12), EndProgram(56),
+        ]);
+        var plan = Extract(program, userDataCount: 3);
+        var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
+        Assert.Equal(accepted, source.IndirectImage?.CandidateCountSource is not null);
+    }
+
+    [Fact]
+    public void RuntimeBoundCacheRechecksChangedDescriptorWords()
+    {
+        var program = Program([
+            MoveScalar(0, 8, 0),
+            Sopc(4, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),
+            Sop2(8, "SCselectB64", 106, Gen5Operand.Scalar(126), Operand(0)),
+            Branch(12, "SCbranchVccz", 10),
+            Sop2(16, "SMulI32", 10, Gen5Operand.Scalar(8), Operand(64)),
+            ScalarLoad(20, 0, 16, 8, dynamicOffsetRegister: 10),
+            ScalarLoad(28, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 10),
+            Image(36, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1),
+            Sop2(44, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+            Branch(48, "SBranch", -12), EndProgram(56),
+        ]);
+        var plan = Extract(program, userDataCount: 3);
+        var cache = new ResourceMaterializationCache();
+        var firstDescriptorBase = 0x2000u;
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x1080) return false;
+            var record = (uint)(address - 0x1000) / 64;
+            var component = (uint)(address - 0x1000) % 64 / 4;
+            word = component switch
+            {
+                0 => record == 0 ? firstDescriptorBase : 0x2100u,
+                1 => 20u << 20,
+                3 => 0xFACu | (9u << 28),
+                9 => 0xFFF000,
+                _ => 0,
+            };
+            return true;
+        }
+        bool ReadResident(ulong address, Span<byte> destination, bool clean)
+        {
+            for (var offset = 0; offset < destination.Length; offset += sizeof(uint))
+            {
+                if (!Read(address + (uint)offset, out var word)) return false;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], word);
+            }
+            return true;
+        }
+        ResourceSnapshot Materialize()
+        {
+            var snapshot = new ResourceSnapshot();
+            var specialization = new ResourceSpecialization();
+            Assert.True(cache.Materialize(plan, Inputs([0x1000, 0, 2], readCleanMemory: Read), ReadResident,
+                ref snapshot, ref specialization, out _));
+            return snapshot;
+        }
+
+        var first = Materialize();
+        Assert.Equal(0x2000u, first.Images[0][0]);
+        Assert.Same(first, Materialize());
+        firstDescriptorBase = 0x2200;
+        var changed = Materialize();
+        Assert.NotSame(first, changed);
+        Assert.Equal(0x2200u, changed.Images[0][0]);
+        Assert.Equal((1, 2), (cache.Hits, cache.Misses));
+    }
+
+    [Theory]
     [InlineData(6u, 0u, 1u, true)]
     [InlineData(1u, 0u, 1u, true)]
     [InlineData(256u, 0u, 1u, true)]

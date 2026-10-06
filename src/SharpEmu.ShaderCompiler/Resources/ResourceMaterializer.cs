@@ -183,6 +183,13 @@ public static class ResourceMaterializer
                 }
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
+                    if (!TryCandidateCount(plan, indirect.CandidateCountSource, directCandidates.Count, cleanInputs, out var candidateCount))
+                        return false;
+                    directCandidates = directCandidates.Take(candidateCount).ToArray();
+                    if (candidateCount == 0)
+                    {
+                        return false;
+                    }
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
                         cleanInputs, [], evaluateTable: false, out var descriptors, out _))
                     {
@@ -937,6 +944,18 @@ public static class ResourceMaterializer
     {
         SpecializationFailed(message);
         return false;
+    }
+
+    private static bool TryCandidateCount(ShaderResourcePlan plan, uint? countSource, int maximum,
+        ResourceRuntimeInputs inputs, out int count)
+    {
+        count = maximum;
+        if (countSource is not { } source) return true;
+        if (!RuntimeValueEvaluator.EvaluateSources(plan, [source], inputs, [], evaluateTable: false,
+                out var descriptors, out _) || descriptors.Count != 1 || descriptors[0].DwordCount != 1 ||
+            descriptors[0].Dwords[0] > maximum) return false;
+        count = (int)descriptors[0].Dwords[0];
+        return true;
     }
 
     private static bool BuildSpecialization(
