@@ -5134,6 +5134,13 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            if (resource.Multisampled &&
+                (instruction.Opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
+                 instruction.Opcode.StartsWith("ImageGather", StringComparison.Ordinal)))
+            {
+                error = $"{instruction.Opcode} requires multisample sampling semantics that are not supported";
+                return false;
+            }
             if (instruction.Opcode == "ImageGetResinfo")
             {
                 var sizeComponentCount = ImageCoordinateComponentCount(resource);

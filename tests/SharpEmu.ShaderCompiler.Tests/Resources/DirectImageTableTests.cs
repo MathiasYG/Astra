@@ -1799,6 +1799,29 @@ public sealed class DirectImageTableTests
         Assert.Equal(selectorMemory, resources.FiniteSamplersByMemoryIndex.Values.Single().SelectorMemoryIndex);
     }
 
+    [Theory]
+    [InlineData("ImageSampleA", false)]
+    [InlineData("ImageSampleLz", false)]
+    [InlineData("ImageGather4Lz", false)]
+    [InlineData("ImageLoad", true)]
+    public void MultisampleDescriptorsRequireLoadsInsteadOfInvalidSamplingModules(string opcode, bool accepted)
+    {
+        var sampled = opcode != "ImageLoad";
+        var program = Program([Image(0, opcode, 0, samplerRegister: 8, dmask: 1), EndProgram(8)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, Hash, 0, 12);
+        var inputs = new ResourceRuntimeInputs { UserData = [0x1000, GuestImageFormat.Format32Float << 20, 0,
+            0xFAC | (1u << 16) | (GuestImageFormat.ImageType2DMsaa << 28), 0, 0x10, 0, 0,
+            0, 0xFFF000, 0, 0] };
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(ImageDimension.Dim2DMsaa, resources.Info.Images[0].Dimension);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 12),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        Assert.Equal(accepted, Gen5SpirvTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout), out _, out var error));
+        if (sampled) Assert.Contains("multisample sampling semantics", error);
+    }
+
     [Fact]
     public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
     {
