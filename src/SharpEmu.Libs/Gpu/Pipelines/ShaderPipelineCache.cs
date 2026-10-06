@@ -84,6 +84,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertex.ExportAddress, ShaderStage.Vertex, "vertex", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
             probeWrittenRegisters: true, VertexUserDataBase);
         var vertexInfo = PrepareVertexInput(vertexSource, shaderInterface, context);
+        var vertexMayWriteMemory = MemoryAccessTable.Build(_programs.Decode(vertexSource)).Entries.Any(access =>
+            access.Kind != MemoryResourceKind.LocalDataShare &&
+            access.Access is MemoryAccess.Write or MemoryAccess.Atomic);
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
@@ -147,6 +150,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     new StageCompileOptions
                     {
                         PixelInfo = pixelInfo,
+                        OtherStageMayWriteMemory = vertexMayWriteMemory,
                         PixelOutputs = pixelOutputs,
                         PixelInputEnable = shaderInterface.PixelInputEnable,
                         PixelInputAddress = shaderInterface.PixelInputAddress,

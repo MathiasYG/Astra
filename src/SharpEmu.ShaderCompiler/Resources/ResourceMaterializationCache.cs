@@ -133,6 +133,7 @@ public sealed class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
                 TablePhase = recorder.TablePhase,
             };
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
@@ -179,7 +180,7 @@ public sealed class ResourceMaterializationCache
         ResidentGuestBytesReader residentReader, out Entry refreshed)
     {
         refreshed = null!;
-        if (!cached.TableRefreshable)
+        if (!cached.TableRefreshable || cached.OtherStageMayWriteMemory != inputs.OtherStageMayWriteMemory)
             return false;
 
         var current = new byte[cached.Bytes.Length];
@@ -214,6 +215,7 @@ public sealed class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;
@@ -249,6 +251,7 @@ public sealed class ResourceMaterializationCache
                 UserData = cached.UserData,
                 ShaderBase = cached.ShaderBase,
                 ComputeState = cached.ComputeState,
+                OtherStageMayWriteMemory = cached.OtherStageMayWriteMemory,
                 RangeAddresses = cached.RangeAddresses,
                 RangeOffsets = cached.RangeOffsets,
                 RangeLengths = cached.RangeLengths,
@@ -387,6 +390,7 @@ public sealed class ResourceMaterializationCache
         public required uint[] UserData { get; init; }
         public required ulong ShaderBase { get; init; }
         public required ComputeSelectorState? ComputeState { get; init; }
+        public required bool OtherStageMayWriteMemory { get; init; }
         public required ulong[] RangeAddresses { get; init; }
         public required int[] RangeOffsets { get; init; }
         public required int[] RangeLengths { get; init; }
@@ -403,7 +407,8 @@ public sealed class ResourceMaterializationCache
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
         {
             if (!ReferenceEquals(Plan, plan) || ShaderBase != inputs.ShaderBase ||
-                !Nullable.Equals(ComputeState, inputs.ComputeState) || UserData.Length != inputs.UserData.Count)
+                !Nullable.Equals(ComputeState, inputs.ComputeState) ||
+                OtherStageMayWriteMemory != inputs.OtherStageMayWriteMemory || UserData.Length != inputs.UserData.Count)
                 return false;
             for (var index = 0; index < UserData.Length; index++)
                 if (UserData[index] != inputs.UserData[index])
@@ -580,6 +585,7 @@ public sealed class ResourceMaterializationCache
                 UserData = userData,
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
+                OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
                 RangeAddresses = addresses,
                 RangeOffsets = offsets,
                 RangeLengths = lengths,

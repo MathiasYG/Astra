@@ -125,6 +125,14 @@ public static class ResourceMaterializer
         using var snapshotProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Snapshot);
         failure = ResourceMaterializationFailure.Other;
         snapshot = new MaterializedSnapshot();
+        // A clean host read does not cover writes made during this draw. These
+        // proofs require stable descriptor inputs throughout shader execution.
+        if (plan.DescriptorSources.Any(source => source.IndirectImage is { } indirect &&
+                (indirect.CandidateCountSource is not null)) &&
+            (inputs.OtherStageMayWriteMemory || plan.Memory.Entries.Any(memory =>
+                memory.Kind != MemoryResourceKind.LocalDataShare &&
+                memory.Access is MemoryAccess.Write or MemoryAccess.Atomic)))
+            return false;
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
         {
             return false;
@@ -200,7 +208,11 @@ public static class ResourceMaterializer
                     {
                         var descriptor = descriptors[candidateIndex];
                         if (!UsableImageCandidate(descriptor.Dwords, image.R128))
+                        {
+                            if (indirect.CandidateCountSource is not null)
+                                return false;
                             descriptor = DescriptorWords.Empty(8);
+                        }
                         var existing = directTable.Descriptors.FindIndex(candidate => candidate.SameAs(descriptor));
                         if (existing < 0)
                         {

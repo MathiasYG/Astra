@@ -156,6 +156,119 @@ public sealed class DirectImageTableTests
     }
 
     [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    public void RuntimeBoundsRejectPotentialDescriptorWrites(bool shaderWrites, bool otherStageWrites, bool accepted)
+    {
+        var plan = ShaderResourcePlan.Extract(RuntimeMemoryBoundProgram(shaderWrites), ShaderStage.Pixel, Hash, 0, 6);
+        Assert.Contains(plan.DescriptorSources, source => source.IndirectImage?.CandidateCountSource is not null);
+        bool Read(ulong address, out uint word) => ReadRuntimeBoundMemory(address, 2, out word);
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [0x1000, 0, 0, 0, 0x8000, 0], ReadMemory = Read, ReadCleanMemory = Read,
+            OtherStageMayWriteMemory = otherStageWrites,
+        };
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        var previous = snapshot;
+        Assert.Equal(accepted, ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        if (!accepted) Assert.Same(previous, snapshot);
+    }
+
+    [Fact]
+    public void RuntimeCountCacheRechecksMemoryBoundsAndWriterContext()
+    {
+        var plan = ShaderResourcePlan.Extract(RuntimeMemoryBoundProgram(), ShaderStage.Pixel, Hash, 0, 6);
+        var count = 1u;
+        var unreadable = false;
+        bool Read(ulong address, out uint word)
+        {
+            if (unreadable && address == 0x8000) { word = 0; return false; }
+            return ReadRuntimeBoundMemory(address, count, out word);
+        }
+        ResourceRuntimeInputs Inputs(bool writes = false) => new()
+        {
+            UserData = [0x1000, 0, 0, 0, 0x8000, 0], ReadMemory = Read, ReadCleanMemory = Read,
+            OtherStageMayWriteMemory = writes,
+        };
+        bool Resident(ulong address, Span<byte> bytes, bool clean)
+        {
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+            {
+                if (!Read(address + (uint)offset, out var word)) return false;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes[offset..], word);
+            }
+            return true;
+        }
+        var cache = new ResourceMaterializationCache();
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        Assert.True(cache.Materialize(plan, Inputs(), Resident, ref snapshot, ref specialization, out _));
+        Assert.Single(snapshot.Images);
+        Assert.True(cache.Materialize(plan, Inputs(), Resident, ref snapshot, ref specialization, out _));
+        count = 2;
+        Assert.True(cache.Materialize(plan, Inputs(), Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(2, snapshot.Images.Length);
+        var verified = snapshot;
+        Assert.False(cache.Materialize(plan, Inputs(true), Resident, ref snapshot, ref specialization, out _));
+        Assert.Same(verified, snapshot);
+        unreadable = true;
+        Assert.False(cache.Materialize(plan, Inputs(), Resident, ref snapshot, ref specialization, out _));
+        Assert.Same(verified, snapshot);
+        Assert.Equal(1, cache.Hits);
+    }
+
+    [Fact]
+    public void RuntimeBoundsRejectInvalidDescriptorsInsteadOfSubstitutingNull()
+    {
+        var plan = ShaderResourcePlan.Extract(RuntimeMemoryBoundProgram(), ShaderStage.Pixel, Hash, 0, 6);
+        bool Read(ulong address, out uint word)
+        {
+            if (!ReadRuntimeBoundMemory(address, 2, out word)) return false;
+            if (address == 0x1044) word = 0;
+            return true;
+        }
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        Assert.False(ResourceMaterializer.Materialize(plan,
+            Inputs([0x1000, 0, 0, 0, 0x8000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        Assert.Empty(snapshot.Images);
+    }
+
+    private static Gen5ShaderProgram RuntimeMemoryBoundProgram(bool writes = false) => Program([
+        ScalarLoad(0, 4, 2), MoveScalar(8, 8, 0),
+        Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),
+        Sop2(16, "SCselectB64", 106, Gen5Operand.Scalar(126), Operand(0)),
+        Branch(20, "SCbranchVccz", writes ? (short)12 : (short)9),
+        Sop2(24, "SMulI32", 10, Gen5Operand.Scalar(8), Operand(64)),
+        ScalarLoad(28, 0, 16, 8, dynamicOffsetRegister: 10),
+        ScalarLoad(36, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 10),
+        Image(44, "ImageSampleLz", 16, 24, dmask: 1),
+        .. writes ? new[] { MoveVector(52, 0, 0), GlobalAccess(56, "GlobalStoreDword", 0) } : [],
+        Sop2(writes ? 64u : 52u, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+        Branch(writes ? 68u : 56u, "SBranch", writes ? (short)-15 : (short)-12),
+        EndProgram(writes ? 72u : 60u),
+    ]);
+
+    private static bool ReadRuntimeBoundMemory(ulong address, uint count, out uint word)
+    {
+        word = 0;
+        if (address == 0x8000) { word = count; return true; }
+        if (address < 0x1000 || address >= 0x1000 + count * 64UL) return false;
+        var record = (uint)(address - 0x1000) / 64;
+        word = ((uint)(address - 0x1000) % 64 / 4) switch
+        {
+            0 => 0x2000 + record * 0x100,
+            1 => 20u << 20,
+            3 => 0xFACu | (9u << 28),
+            9 => 0xFFF000,
+            _ => 0,
+        };
+        return true;
+    }
+
+    [Theory]
     [InlineData(6u, 0u, 1u, true)]
     [InlineData(1u, 0u, 1u, true)]
     [InlineData(256u, 0u, 1u, true)]
