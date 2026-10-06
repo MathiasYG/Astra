@@ -435,6 +435,9 @@ public sealed partial class ScalarValueGraph
 
         private void Apply(Gen5ShaderInstruction instruction, RegisterState state)
         {
+            if (_recording) _graph.InstructionExecutionMasks[instruction.Pc] = state.Exec;
+            if (_recording && instruction.Opcode == "VCndmaskB32" && instruction.Sources.Count == 3)
+                _graph.LaneSelectionMasks[instruction.Pc] = MaskOf(instruction.Sources[2], state);
             // Lets ScalarValueGraph.Undefined record which instruction gave up.
             _graph.BuilderInstruction = (instruction.Pc, instruction.Opcode);
             switch (instruction.Encoding)

@@ -21,6 +21,8 @@ public sealed partial class ScalarValueGraph
     private readonly List<InternedValue> _internedValues = [];
     private readonly record struct InternedValue(ScalarValue Value, ulong Payload, ulong Identity, int Next);
     private readonly List<ScalarValue> _values = [];
+    internal Dictionary<uint, ScalarValue> LaneSelectionMasks { get; } = [];
+    internal Dictionary<uint, ScalarValue> InstructionExecutionMasks { get; } = [];
 
     private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount,
         uint waveSize)

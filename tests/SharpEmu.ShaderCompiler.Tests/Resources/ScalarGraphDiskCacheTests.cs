@@ -45,6 +45,8 @@ public sealed class ScalarGraphDiskCacheTests
         var scan = graph.FindLowestSetBit(graph.UserData(1), 12);
         graph.BranchConditions[4] = undefined;
         graph.BranchConditions[12] = scan;
+        graph.LaneSelectionMasks[12] = phi;
+        graph.InstructionExecutionMasks[12] = phi;
         using var stream = new MemoryStream();
         using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, true)) graph.WriteSnapshot(writer);
         stream.Position = 0;
@@ -58,6 +60,8 @@ public sealed class ScalarGraphDiskCacheTests
         Assert.True(restored.TryGetUndefinedOrigin(restored.BranchConditions[4], out var origin));
         Assert.Equal((4u, "unsupported"), origin);
         Assert.Same(restored.BranchConditions[12], restored.FindLowestSetBit(restored.UserData(1), 12));
+        Assert.Same(loop, restored.LaneSelectionMasks[12]);
+        Assert.Same(loop, restored.InstructionExecutionMasks[12]);
         Assert.Equal(graph.Accesses.Length, restored.Accesses.Length);
         Assert.NotSame(graph.Accesses[0]!.Read, restored.Accesses[0]!.Read);
         Assert.True(restored.Equivalent(graph.Accesses[0]!.Read!, restored.Accesses[0]!.Read!));
