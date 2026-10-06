@@ -18,7 +18,7 @@ public static partial class ImageRequestBuilders
         address = size = 0;
         if (words.Length != 8) return false;
         var descriptor = new TextureDescriptorWords(words);
-        if (descriptor.IsNull || descriptor.Type != GuestImageType.Color2D ||
+        if (descriptor.IsNull || descriptor.Type is not (GuestImageType.Color2D or GuestImageType.Color3D) ||
             descriptor.WriteCompress || descriptor.MetadataCompress) return false;
         var numeric = SharpEmu.ShaderCompiler.Resources.GuestImageFormat.SampledNumericClass(
             SharpEmu.ShaderCompiler.Resources.GuestImageFormat.FormatOf(words));
@@ -29,7 +29,11 @@ public static partial class ImageRequestBuilders
             SharpEmu.ShaderCompiler.Resources.ImageNumericClass.Sint => TextureNumericClass.Sint,
             _ => TextureNumericClass.Float,
         };
-        var resolved = Texture(words, new ShaderImageShape(false, false, true, true, storageClass));
+        var shape = new ShaderImageShape(false, false, true, true, storageClass)
+        {
+            Volume = descriptor.Type == GuestImageType.Color3D,
+        };
+        var resolved = Texture(words, shape);
         var data = resolved.Request.Description.Data;
         if (resolved.Request.Description.PixelFormat == Format.Undefined ||
             resolved.Request.Description.GuestFormat != descriptor.Format ||

@@ -19,6 +19,29 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     private const ulong Base = 0x1_0000_0000;
 
     [Theory]
+    [InlineData(GuestTileMode.Linear)]
+    [InlineData(GuestTileMode.Standard4KB)]
+    public void StorageVolumeWriteRangeIncludesEverySliceAndMip(GuestTileMode tile)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32Float, 16, 16,
+            GuestImageType.Color3D, tile, lastLevel: 2, maxMip: 2, layers: 64);
+        var shape = new ShaderImageShape(false, false, true, true, TextureNumericClass.Float) { Volume = true };
+        var request = ImageRequestBuilders.Texture(words, shape).Request;
+        Assert.Equal(64u, request.Description.Extent.Depth);
+        Assert.Equal(ImageViewType.Type3D, request.View.Type);
+        Assert.True(ImageRequestBuilders.TryGetStorageAllocationRange(words, out var address, out var size));
+        Assert.Equal(Base, address);
+        Assert.Equal(request.Description.Data.Size, size);
+        Assert.True(size >= 16UL * 16 * 64 * sizeof(float));
+        var lastMip = request.Description.MipLayout[2];
+        Assert.True(lastMip.Offset + lastMip.Size <= size);
+        Assert.True(lastMip.Size > 0);
+
+        words[6] |= 1u << 20;
+        Assert.False(ImageRequestBuilders.TryGetStorageAllocationRange(words, out _, out _));
+    }
+
+    [Theory]
     [InlineData(0u, true)]
     [InlineData(1u << 20, false)]
     [InlineData(1u << 21, false)]
