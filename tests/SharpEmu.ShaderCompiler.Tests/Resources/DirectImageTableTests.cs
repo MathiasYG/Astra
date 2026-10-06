@@ -438,6 +438,174 @@ public sealed class DirectImageTableTests
         Assert.Same(original, snapshot);
     }
 
+    [Theory]
+    [InlineData(255u, 31u, true)]
+    [InlineData(uint.MaxValue, 31u, true)]
+    [InlineData(254u, 31u, false)]
+    [InlineData(255u, 64u, true)]
+    [InlineData(255u, uint.MaxValue, true)]
+    public void ReductionInputRequiresFullWaveInitializationAndAValidLane(uint neutral, uint lane, bool accepted)
+    {
+        var plan = Extract(Program([
+            Sop2(0, "SAndB64", 12, Gen5Operand.Scalar(126), Gen5Operand.Scalar(10)),
+            Sop1(4, "SOrn2SaveexecB64", 106, Gen5Operand.Scalar(126)),
+            Vop3(8, "VCndmaskB32", 5, Operand(neutral), Gen5Operand.Vector(3), Gen5Operand.Scalar(12)),
+            Vop2(16, "VMinU32", 5, Gen5Operand.Vector(5), Gen5Operand.Vector(5)),
+            Sop1(20, "SMovB64", 126, Gen5Operand.Scalar(106)),
+            new Gen5ShaderInstruction(24, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(5), Operand(lane), Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(20)],
+                new Gen5Vop3Control(0, 0, 0, false, 0, null)),
+            EndProgram(32),
+        ]));
+        Assert.Equal(accepted, IndirectSelectorValues.TryGetInitializedReductionInput(plan, 24, out var input, out var before));
+        if (accepted) { Assert.Equal(Gen5Operand.Vector(3), input); Assert.Equal(4u, before); }
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void ReductionCanReadFullyInitializedLanesBeforeRestoringExecution(bool matchingRestore, bool accepted)
+    {
+        var plan = Extract(Program([
+            Sop2(0, "SAndB64", 12, Gen5Operand.Scalar(126), Gen5Operand.Scalar(10)),
+            Sop1(4, "SOrn2SaveexecB64", 106, Gen5Operand.Scalar(126)),
+            Vop3(8, "VCndmaskB32", 5, Operand(255), Gen5Operand.Vector(3), Gen5Operand.Scalar(12)),
+            Vop2(16, "VMinU32", 5, Gen5Operand.Vector(5), Gen5Operand.Vector(5)),
+            new Gen5ShaderInstruction(20, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(5), Operand(31), Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(20)],
+                new Gen5Vop3Control(0, 0, 0, false, 0, null)),
+            Sop1(28, "SMovB64", 126, Gen5Operand.Scalar(matchingRestore ? 106u : 104u)),
+            EndProgram(32),
+        ]));
+        Assert.Equal(accepted, IndirectSelectorValues.TryGetInitializedReductionInput(plan, 20, out _, out _));
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    public void PackedLoopDomainRejectsArithmeticAndEntryBypasses(bool arithmetic, bool bypass, bool accepted)
+    {
+        var plan = Extract(Program([
+            Vop1(0, "VMovB32", 0, Operand(0xFF332211)),
+            bypass ? Branch(4, "SCbranchScc1", 1) : Nop(4),
+            Nop(8),
+            Vop2(12, arithmetic ? "VAddU32" : "VLshrrevB32", 0, Operand(8), Gen5Operand.Vector(0)),
+            Branch(16, "SBranch", -3),
+            EndProgram(20),
+        ]));
+        Assert.Equal(accepted, IndirectSelectorValues.TryGetPackedLoopByteOrigins(plan, [0], 8, 20, out var origins));
+        if (accepted) Assert.Equal(new uint[] { 0, 0x11, 0x22, 0x33, 255 }, origins.Select(origin => origin.Constant).Order().ToArray());
+    }
+
+    [Theory]
+    [InlineData("ImageSampleA")]
+    [InlineData("ImageSampleAO")]
+    public void PackedByteOriginsKeepSampleChannelsSeparateFromTheSentinel(string opcode)
+    {
+        var plan = Extract(Program([
+            Image(0, opcode, 0, samplerRegister: 8),
+            Vop2(8, "VLshlrevB32", 9, Operand(8), Gen5Operand.Vector(5)),
+            Vop3(12, "VOr3U32", 10, Operand(0xFF000000), Gen5Operand.Vector(4), Gen5Operand.Vector(9)),
+            Vop3(20, "VLshlOrU32", 11, Gen5Operand.Vector(6), Operand(16), Gen5Operand.Vector(10)),
+            EndProgram(28),
+        ]));
+        for (var component = 0; component < 4; component++)
+        {
+            Assert.True(IndirectSelectorValues.TryReadPackedByteOrigin(plan, Gen5Operand.Vector(11), component, 28, out var origin));
+            if (component == 3) { Assert.True(origin.IsConstant); Assert.Equal(255u, origin.Constant); }
+            else { Assert.False(origin.IsConstant); Assert.Equal((uint)component, origin.Channel); Assert.Equal(0, origin.MemoryIndex); }
+        }
+    }
+
+    [Fact]
+    public void PackedDomainFiltersByOriginalSelectorAndFallsBackWhenCleanProofIsUnavailable()
+    {
+        var plan = Extract(Program([EndProgram(0)]));
+        var proof = new IndirectSelectorValues.PackedTextureDomain([new(-1, 0, 7)]);
+        DirectImageCandidate[] candidates = [new(2380, 2) { SelectorValue = 7 }, new(2720, 3) { SelectorValue = 8 }];
+        var inputs = new ResourceRuntimeInputs
+        {
+            ReadCleanMemory = (ulong address, out uint value) => { value = 0; return true; },
+            ReadPointSampledByteDomain = (ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler, uint channels,
+                GuestWordReader reader, out uint[] values) => { values = []; return false; },
+        };
+        Assert.True(proof.TryFilterCandidates(plan, inputs, candidates, out var selected));
+        Assert.Equal(candidates.Take(1), selected);
+        Assert.False(proof.TryFilterCandidates(plan, new ResourceRuntimeInputs(), candidates, out selected));
+        Assert.Same(candidates, selected);
+        Assert.False(proof.TryFilterCandidates(plan, inputs, [new(2380, 2)], out _));
+        Assert.True(proof.TryFilterCandidates(plan, inputs, [candidates[1]], out selected));
+        Assert.Empty(selected);
+    }
+
+    [Fact]
+    public void PackedTextureDomainRechecksContentsAndRejectsUnavailableOrOtherStageWrites()
+    {
+        var plan = Extract(Program([Image(0, "ImageSampleA", 0, 8), EndProgram(8)]), userDataCount: 12);
+        var proof = new IndirectSelectorValues.PackedTextureDomain([new(0, 0, 0)]);
+        DirectImageCandidate[] candidates = [new(0, 0) { SelectorValue = 2 }, new(32, 1) { SelectorValue = 3 }];
+        uint content = 2;
+        bool readable = true;
+        var scans = 0;
+        bool Read(ulong address, out uint word) { word = content; return readable; }
+        bool Domain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler, uint channels,
+            GuestWordReader reader, out uint[] values)
+        {
+            scans++;
+            Assert.Equal(1u, channels);
+            values = [];
+            if (!reader(0x9000, out var word)) return false;
+            values = [word];
+            return true;
+        }
+        ResourceRuntimeInputs InputsFor(bool writer = false) => new()
+        {
+            UserData = new uint[12], ReadCleanMemory = Read, ReadMemory = Read,
+            ReadPointSampledByteDomain = Domain, OtherStageMayWriteMemory = writer,
+        };
+        Assert.True(proof.TryFilterCandidates(plan, InputsFor(), candidates, out var selected));
+        Assert.Equal(candidates.Take(1), selected);
+        content = 3;
+        Assert.True(proof.TryFilterCandidates(plan, InputsFor(), candidates, out selected));
+        Assert.Equal(candidates.Skip(1), selected);
+        readable = false;
+        Assert.False(proof.TryFilterCandidates(plan, InputsFor(), candidates, out selected));
+        Assert.Same(candidates, selected);
+        Assert.Equal(3, scans);
+        Assert.False(proof.TryFilterCandidates(plan, InputsFor(true), candidates, out _));
+        Assert.Equal(3, scans);
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, false)]
+    public void PackedTextureReductionRejectsReactivatedUninitializedLanes(bool reactivate, bool constant, bool accepted)
+    {
+        var plan = Extract(Program([
+            Sop1(0, "SAndSaveexecB64", 16, Gen5Operand.Scalar(12)),
+            .. constant ? new[] { Vop1(4, "VMovB32", 4, Operand(2)), Nop(8) }
+                : new[] { Image(4, "ImageSampleA", 0, 8) },
+            Vop1(12, "VMovB32", 0, Gen5Operand.Vector(4)),
+            Sop1(16, "SMovB64", 18, Gen5Operand.Scalar(126)),
+            Sop1(20, "SMovB64", 126, Gen5Operand.Scalar(reactivate ? 16u : 18u)),
+            Vop2(24, "VAndB32", 1, Operand(255), Gen5Operand.Vector(0)),
+            Sop2(28, "SAndB64", 24, Gen5Operand.Scalar(126), Gen5Operand.Scalar(126)),
+            Sop1(32, "SOrn2SaveexecB64", 106, Gen5Operand.Scalar(126)),
+            Vop3(36, "VCndmaskB32", 5, Operand(255), Gen5Operand.Vector(1), Gen5Operand.Scalar(24)),
+            Vop2(44, "VMinU32", 5, Gen5Operand.Vector(5), Gen5Operand.Vector(5)),
+            Sop1(48, "SMovB64", 126, Gen5Operand.Scalar(106)),
+            new Gen5ShaderInstruction(52, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(5), Operand(31), Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(26)],
+                new Gen5Vop3Control(0, 0, 0, false, 0, null)),
+            Vop2(60, "VLshrrevB32", 0, Operand(8), Gen5Operand.Vector(0)),
+            Branch(64, "SBranch", -12), EndProgram(68),
+        ]), userDataCount: 14);
+        Assert.Equal(accepted, IndirectSelectorValues.TryGetPackedReductionOrigins(plan, 52, 20, 68, out _));
+    }
+
     private static Gen5ShaderProgram RuntimeMemoryBoundProgram(bool writes = false) => Program([
         ScalarLoad(0, 4, 2), MoveScalar(8, 8, 0),
         Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),

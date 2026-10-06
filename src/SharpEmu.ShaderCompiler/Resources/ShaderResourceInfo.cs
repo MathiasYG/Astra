@@ -213,6 +213,7 @@ public sealed record IndirectImageSelector(
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
     public uint? CandidateCountSource { get; init; }
     internal IndirectSelectorValues.GatheredByteSelectorProof? GatheredByteSelectorProof { get; init; }
+    internal IndirectSelectorValues.PackedTextureDomain? PackedTextureDomain { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }
     public uint DynamicOffsetBase { get; init; }
@@ -224,7 +225,10 @@ public sealed record IndirectImageSelector(
     public uint MaterialImmediate { get; init; }
 }
 
-public sealed record DirectImageCandidate(uint Offset, uint Source);
+public sealed record DirectImageCandidate(uint Offset, uint Source)
+{
+    internal uint? SelectorValue { get; init; }
+}
 
 // A wave-uniform descriptor selector. The guest derives each descriptor key from
 // a set bit in one scalar mask, through a compact global index table. Keeping this

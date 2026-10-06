@@ -165,6 +165,25 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryGetImageWriteRange(ReadOnlySpan<uint> image, out ulong address, out ulong size) =>
             ImageRequestBuilders.TryGetStorageAllocationRange(image, out address, out size);
 
+        public bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
+            uint channels, SharpEmu.ShaderCompiler.Resources.GuestWordReader cleanReader, out uint[] values)
+        {
+            values = [];
+            if (image.Length != 8 || new TextureDescriptorWords(image).Format != GuestPixelFormat.Bits8_8_8_8UInt)
+                return false;
+            var data = ImageRequestBuilders.Texture(image,
+                new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description.Data;
+            foreach (var identifier in _trackedImageBindings)
+            {
+                var bound = _imageCache.GetImage(identifier);
+                if (!bound.Binding.IsTarget && !bound.Binding.ShaderWrite) continue;
+                var output = bound.Description.Data;
+                if (data.Size != 0 && output.Size != 0 && data.Address < output.Address + output.Size &&
+                    output.Address < data.Address + data.Size) return false;
+            }
+            return ImageRequestBuilders.TryReadPointSampledByteDomain(image, sampler, channels, cleanReader, out values);
+        }
+
         public bool TryReadCleanGuestWord(ulong address, out uint word)
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);

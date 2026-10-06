@@ -8,6 +8,438 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // A finite overestimate of a selector. Unsupported paths retain the full-domain scan.
 public sealed class IndirectSelectorValues
 {
+    // A sampled origin is conditional on the runtime source being point-sampled
+    // RGBA8_UINT. The host reader must establish that condition before use.
+    internal readonly record struct PackedByteOrigin(int MemoryIndex, uint Channel, uint Constant)
+    {
+        internal bool IsConstant => MemoryIndex < 0;
+        internal ScalarValue? InitializedMask { get; init; }
+    }
+
+    internal sealed record PackedTextureDomain(PackedByteOrigin[] Origins)
+    {
+        internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue selector, out PackedTextureDomain domain)
+        {
+            domain = null!;
+            var reads = new List<uint>();
+            bool Visit(ScalarValue value)
+            {
+                if (value.Kind == ScalarValueKind.FirstLane) { reads.Add((uint)value.Payload); return true; }
+                return value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.UMin32 &&
+                    value.Operands.Length == 2 && value.Operands.All(Visit);
+            }
+            if (!Visit(selector) || reads.Count == 0 || reads.Count > 2) return false;
+            // Unknown shader writes cannot be assumed disjoint from sampled data.
+            if (Enumerable.Range(0, plan.Memory.Count).Any(index => plan.Memory[index].Kind != MemoryResourceKind.LocalDataShare &&
+                plan.Memory[index].Access is MemoryAccess.Write or MemoryAccess.Atomic)) return false;
+            PackedByteOrigin[]? common = null;
+            foreach (var read in reads)
+            {
+                PackedByteOrigin[]? found = null;
+                foreach (var edge in plan.Graph.Program.Instructions)
+                {
+                    if (!Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var start) || start >= read || edge.Pc <= read) continue;
+                    var end = edge.Pc + (uint)edge.Words.Count * 4;
+                    if (!TryGetPackedReductionOrigins(plan, read, start, end, out var origins)) continue;
+                    if (found is not null && !found.ToHashSet().SetEquals(origins)) return false;
+                    found = origins;
+                }
+                if (found is null || common is not null && !common.ToHashSet().SetEquals(found))
+                {
+                    return false;
+                }
+                common = found;
+            }
+            if (common is null) return false;
+            foreach (var origin in common.Where(origin => !origin.IsConstant))
+            {
+                if (origin.MemoryIndex >= plan.Graph.Accesses.Length ||
+                    plan.Graph.Accesses[origin.MemoryIndex] is not { Handle: { } image, SamplerHandle: { } sampler } ||
+                    image.Operands.Length != 8 || sampler.Operands.Length != 4 ||
+                    image.Operands.Concat(sampler.Operands).Any(word => !plan.ValidateRuntimeValue(word)))
+                {
+                    return false;
+                }
+            }
+            domain = new(common);
+            return true;
+        }
+
+        internal bool TryFilterCandidates(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+            IReadOnlyList<DirectImageCandidate> candidates, out IReadOnlyList<DirectImageCandidate> selected)
+        {
+            selected = candidates;
+            if (candidates.Any(candidate => !candidate.SelectorValue.HasValue) ||
+                !TryEvaluate(plan, inputs, out var values)) return false;
+            var allowed = values.ToHashSet();
+            selected = candidates.Where(candidate => allowed.Contains(candidate.SelectorValue!.Value)).ToArray();
+            return true;
+        }
+
+        internal bool TryEvaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] values)
+        {
+            values = [];
+            if (inputs.OtherStageMayWriteMemory || inputs.ReadCleanMemory is null || inputs.ReadPointSampledByteDomain is null) return false;
+            var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(inputs.ReadCleanMemory));
+            var found = Origins.Where(origin => origin.IsConstant).Select(origin => origin.Constant).ToHashSet();
+            var sampledDomains = new Dictionary<string, uint[]>();
+            foreach (var group in Origins.Where(origin => !origin.IsConstant).GroupBy(origin => origin.MemoryIndex))
+            {
+                var access = plan.Graph.Accesses[group.Key]!;
+                var image = new uint[8]; var sampler = new uint[4];
+                for (var index = 0; index < image.Length; index++)
+                    if (!evaluator.Evaluate(access.Handle!.Operands[index], out image[index])) return false;
+                for (var index = 0; index < sampler.Length; index++)
+                    if (!evaluator.Evaluate(access.SamplerHandle!.Operands[index], out sampler[index])) return false;
+                var channels = group.Aggregate(0u, (mask, origin) => mask | (1u << (int)origin.Channel));
+                // Identical descriptors and channel masks share one scan within
+                // this evaluation only; ownership is checked again on later draws.
+                var key = string.Join(",", image.Concat(sampler).Append(channels));
+                if (!sampledDomains.TryGetValue(key, out var sampled))
+                {
+                    if (!inputs.ReadPointSampledByteDomain(image, sampler, channels, inputs.ReadCleanMemory, out sampled)) return false;
+                    sampledDomains.Add(key, sampled);
+                }
+                found.UnionWith(sampled);
+            }
+            values = found.Order().ToArray();
+            return true;
+        }
+    }
+
+    internal static bool TryGetPackedReductionOrigins(ShaderResourcePlan plan, uint readPc, uint loopStart, uint loopEnd,
+        out PackedByteOrigin[] origins)
+    {
+        origins = [];
+        if (!TryGetInitializedReductionInput(plan, readPc, out var input, out var before)) return false;
+        var registers = new HashSet<uint>();
+        var requests = 0;
+        bool ReadMinimum(Gen5Operand vector, uint pc)
+        {
+            if (++requests > 32 || vector.Kind != Gen5OperandKind.VectorRegister) return false;
+            foreach (var instruction in plan.Graph.Program.Instructions.Reverse())
+            {
+                if (instruction.Pc >= pc) continue;
+                if (instruction.Pc < loopStart || Builder.MayExpandExecution(instruction) ||
+                    Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _)) return false;
+                if (!Builder.WritesRegister(instruction, vector)) continue;
+                var sources = instruction.Sources;
+                if (instruction.Opcode == "VAndB32" && instruction.Control is null && sources.Count == 2 &&
+                    sources[0].Kind == Gen5OperandKind.LiteralConstant && sources[0].Value == 255 &&
+                    sources[1].Kind == Gen5OperandKind.VectorRegister)
+                {
+                    registers.Add(sources[1].Value); return true;
+                }
+                if (instruction.Opcode == "VMinU32" && sources.Count == 2 &&
+                    instruction.Control is Gen5SdwaControl { DestinationSelect: 6, Source0Select: 0, Source1Select: 0,
+                        Source0SignExtend: false, Source1SignExtend: false, AbsoluteMask: 0, NegateMask: 0,
+                        OutputModifier: 0, Clamp: false, ScalarDestination: null } &&
+                    sources.All(source => source.Kind == Gen5OperandKind.VectorRegister))
+                {
+                    foreach (var source in sources) registers.Add(source.Value);
+                    return true;
+                }
+                if (instruction.Opcode == "VMin3U32" && sources.Count == 3 &&
+                    instruction.Control is Gen5Vop3Control { AbsoluteMask: 0, NegateMask: 0, OutputModifier: 0, Clamp: false, OperandSelect: 0 })
+                    return sources.All(source => ReadMinimum(source, instruction.Pc));
+                return false;
+            }
+            return false;
+        }
+        if (!ReadMinimum(input, before) || !TryGetPackedLoopByteOrigins(plan, registers.ToArray(), loopStart, loopEnd, out origins)) return false;
+        var initialize = plan.Graph.Program.Instructions.First(instruction => instruction.Pc == before + 4);
+        if (!plan.Graph.LaneSelectionMasks.TryGetValue(initialize.Pc, out var selectedMask)) return false;
+        foreach (var origin in origins)
+            if (origin.InitializedMask is { } initializedMask && !MaskSubset(selectedMask, initializedMask)) return false;
+        origins = origins.Append(new PackedByteOrigin(-1, 0, uint.MaxValue)).Distinct().ToArray();
+        return true;
+    }
+
+    private static bool MaskSubset(ScalarValue selected, ScalarValue initialized)
+    {
+        if (initialized.Kind == ScalarValueKind.Operation && initialized.Operation == ScalarOperation.LogicalAnd)
+            return initialized.Operands.All(operand => MaskSubset(selected, operand));
+        var active = new HashSet<ScalarValue>();
+        var requests = 0;
+        (bool Proven, bool Anchored) Visit(ScalarValue value)
+        {
+            if (++requests > 4096) return (false, false);
+            if (ReferenceEquals(value, initialized) || value.IsConstant && value.ConstantU32 == 0 ||
+                initialized.IsConstant && initialized.ConstantU32 != 0) return (true, true);
+            if (!active.Add(value)) return (true, false);
+            try
+            {
+                if (value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.LogicalAnd)
+                {
+                    foreach (var operand in value.Operands)
+                    {
+                        var result = Visit(operand);
+                        if (result.Proven && result.Anchored) return result;
+                    }
+                    return (false, false);
+                }
+                if (value.Kind == ScalarValueKind.Phi || value.Kind == ScalarValueKind.Select ||
+                    value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.LogicalOr)
+                {
+                    var operands = value.Kind == ScalarValueKind.Select ? value.Operands.Skip(1) : value.Operands;
+                    var anchored = false;
+                    var any = false;
+                    foreach (var operand in operands)
+                    {
+                        any = true;
+                        var result = Visit(operand);
+                        if (!result.Proven) return (false, false);
+                        anchored |= result.Anchored;
+                    }
+                    return (any, anchored);
+                }
+                return (false, false);
+            }
+            finally { active.Remove(value); }
+        }
+        var proof = Visit(selected);
+        return proof.Proven && proof.Anchored;
+    }
+
+    // Establish a full-wave initialization followed only by value-preserving
+    // lane moves and unsigned minima. The returned input still needs its own
+    // byte-domain proof; the neutral sentinel and zero must also be included.
+    internal static bool TryGetInitializedReductionInput(ShaderResourcePlan plan, uint readPc,
+        out Gen5Operand input, out uint before)
+    {
+        input = default; before = 0;
+        var instructions = plan.Graph.Program.Instructions;
+        var readIndex = instructions.ToList().FindIndex(instruction => instruction.Pc == readPc);
+        if (readIndex < 2) return false;
+        var read = instructions[readIndex];
+        if (read.Opcode != "VReadlaneB32" || read.Sources.Count < 2 ||
+            !Constant(read.Sources[1], out _) || plan.Graph.WaveSize is not (32 or 64)) return false;
+        var restoreIndex = readIndex - 1;
+        while (restoreIndex > 0 && instructions[restoreIndex].Opcode == "VReadlaneB32") restoreIndex--;
+        var reductionEnd = restoreIndex;
+        if (instructions[restoreIndex].Opcode != "SMovB64")
+        {
+            reductionEnd = readIndex;
+            while (reductionEnd > 0 && instructions[reductionEnd - 1].Opcode == "VReadlaneB32") reductionEnd--;
+            restoreIndex = readIndex + 1;
+            while (restoreIndex < instructions.Count && instructions[restoreIndex].Opcode == "VReadlaneB32") restoreIndex++;
+            if (restoreIndex >= instructions.Count) return false;
+        }
+        var restore = instructions[restoreIndex];
+        if (restore.Opcode != "SMovB64" || restore.Sources.Count != 1 ||
+            !restore.Destinations.Contains(Gen5Operand.Scalar(126))) return false;
+        var saved = restore.Sources[0];
+        var expandIndex = reductionEnd - 1;
+        while (expandIndex >= 0 && instructions[expandIndex].Opcode != "SOrn2SaveexecB64") expandIndex--;
+        if (expandIndex < 0 || expandIndex + 1 >= reductionEnd) return false;
+        var expand = instructions[expandIndex];
+        if (expand.Sources.Count != 1 || expand.Sources[0] != Gen5Operand.Scalar(126) ||
+            !expand.Destinations.Contains(saved)) return false;
+        var initialize = instructions[expandIndex + 1];
+        if (initialize.Opcode != "VCndmaskB32" || initialize.Sources.Count != 3 || initialize.Destinations.Count != 1 ||
+            !Constant(initialize.Sources[0], out var neutral) || neutral is not (255 or uint.MaxValue) ||
+            initialize.Control is not Gen5Vop3Control { AbsoluteMask: 0, NegateMask: 0, OutputModifier: 0, Clamp: false, OperandSelect: 0 } ||
+            initialize.Sources[1].Kind != Gen5OperandKind.VectorRegister) return false;
+        var mask = initialize.Sources[2];
+        var maskIndex = expandIndex - 1;
+        while (maskIndex >= 0 && !Builder.WritesSavedMask(instructions[maskIndex], mask)) maskIndex--;
+        if (maskIndex < 0) return false;
+        var capture = instructions[maskIndex];
+        if (capture.Opcode != "SAndB64" || capture.Sources.Count != 2 ||
+            !capture.Sources.Contains(Gen5Operand.Scalar(126))) return false;
+        for (var index = maskIndex + 1; index < expandIndex; index++)
+            if (Builder.MayExpandExecution(instructions[index]) ||
+                Gen5IrBranchResolver.Instance.TryGetBranchTarget(instructions[index], out _)) return false;
+        var known = new HashSet<Gen5Operand> { initialize.Destinations[0] };
+        for (var index = expandIndex + 2; index < reductionEnd; index++)
+        {
+            var instruction = instructions[index];
+            if (instruction.Destinations.Count != 1 || instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister) return false;
+            if (instruction.Opcode == "VMinU32" && instruction.Sources.Count == 2 && instruction.Sources.All(known.Contains))
+            {
+                if (instruction.Control is not null && instruction.Control is not Gen5DppControl
+                    { AbsoluteMask: 0, NegateMask: 0, BankMask: 15, RowMask: 15, FetchInactive: false }) return false;
+                if (instruction.Control is Gen5DppControl && !known.Contains(instruction.Destinations[0])) return false;
+                if (instruction.Control is Gen5DppControl dpp && dpp.Control is not (273 or 274 or 276 or 280)) return false;
+            }
+            else if (instruction.Opcode == "VPermlanex16B32" && instruction.Sources.Count == 3 && known.Contains(instruction.Sources[0]) &&
+                Constant(instruction.Sources[1], out _) && Constant(instruction.Sources[2], out _) &&
+                instruction.Control is Gen5Vop3Control { AbsoluteMask: 0, NegateMask: 0, OutputModifier: 0, Clamp: false, OperandSelect: 2 }) { }
+            else return false;
+            known.Add(instruction.Destinations[0]);
+        }
+        if (!known.Contains(read.Sources[0])) return false;
+        if (instructions.Any(instruction => Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
+            target > capture.Pc && target <= read.Pc)) return false;
+        input = initialize.Sources[1]; before = expand.Pc;
+        return true;
+
+        static bool Constant(Gen5Operand operand, out uint value)
+        {
+            value = operand.Value;
+            return operand.Kind == Gen5OperandKind.LiteralConstant ||
+                operand.Kind == Gen5OperandKind.EncodedConstant && Gen5InlineConstants.TryDecode(operand.Value, out value);
+        }
+    }
+
+    // This proves the packed register domain is closed under the loop's writes.
+    // It does not prove which lanes a later reduction reads.
+    internal static bool TryGetPackedLoopByteOrigins(ShaderResourcePlan plan, IReadOnlyList<uint> registers,
+        uint loopStart, uint loopEnd, out PackedByteOrigin[] origins)
+    {
+        origins = [];
+        if (registers.Count == 0 || registers.Distinct().Count() != registers.Count || loopStart >= loopEnd) return false;
+        var found = new HashSet<PackedByteOrigin>();
+        foreach (var register in registers)
+            for (var component = 0; component < 4; component++)
+            {
+                if (!TryReadPackedByteOrigin(plan, Gen5Operand.Vector(register), component, loopStart, out var origin)) return false;
+                found.Add(origin);
+            }
+        var instructions = plan.Graph.Program.Instructions;
+        var backedge = false;
+        foreach (var instruction in instructions)
+        {
+            var inside = instruction.Pc >= loopStart && instruction.Pc < loopEnd;
+            if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target))
+            {
+                if (!inside && target >= loopStart && target < loopEnd) return false;
+                if (inside && target == loopStart) backedge = true;
+                if (inside && target < loopStart) return false;
+            }
+            if (!inside) continue;
+            // Reject vector memory tuple writes until their reaching definitions
+            // are tracked per component by this proof.
+            if (instruction.Control is Gen5BufferMemoryControl or Gen5GlobalMemoryControl) return false;
+            if (instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+                instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal)) return false;
+            foreach (var register in registers)
+            {
+                var vector = Gen5Operand.Vector(register);
+                if (instruction.Control is Gen5ImageControl image && register >= image.VectorData && register - image.VectorData < (instruction.Opcode.StartsWith("ImageGather", StringComparison.Ordinal) ? 4 : System.Numerics.BitOperations.PopCount(image.Dmask)))
+                    return false;
+                if (!Builder.WritesRegister(instruction, vector)) continue;
+                if (instruction.Opcode != "VLshrrevB32" || instruction.Sources.Count != 2 ||
+                    instruction.Sources[1] != vector || instruction.Control is not null ||
+                    !Decode(instruction.Sources[0], out var amount) || amount != 8) return false;
+                found.Add(new(-1, 0, 0));
+            }
+        }
+        if (!backedge) return false;
+        origins = found.ToArray();
+        return true;
+
+        static bool Decode(Gen5Operand operand, out uint value)
+        {
+            value = operand.Value;
+            return operand.Kind == Gen5OperandKind.LiteralConstant ||
+                operand.Kind == Gen5OperandKind.EncodedConstant && Gen5InlineConstants.TryDecode(operand.Value, out value);
+        }
+    }
+
+    internal static bool TryReadPackedByteOrigin(ShaderResourcePlan plan, Gen5Operand operand,
+        int byteIndex, uint before, out PackedByteOrigin origin)
+    {
+        origin = default;
+        if (byteIndex is < 0 or > 3) return false;
+        var active = new HashSet<(Gen5Operand, int, uint)>();
+        var requests = 0;
+        static bool ShiftAmount(Gen5Operand value, out uint amount)
+        {
+            amount = value.Value;
+            return (value.Kind == Gen5OperandKind.LiteralConstant ||
+                value.Kind == Gen5OperandKind.EncodedConstant && Gen5InlineConstants.TryDecode(value.Value, out amount)) &&
+                amount <= 24 && amount % 8 == 0;
+        }
+        bool Read(Gen5Operand value, int component, uint pc, out PackedByteOrigin result)
+        {
+            result = default;
+            uint? writePc = null;
+            if (++requests > 256 || !active.Add((value, component, pc))) return false;
+            try
+            {
+                uint constant;
+                if (value.Kind == Gen5OperandKind.LiteralConstant) constant = value.Value;
+                else if (value.Kind == Gen5OperandKind.EncodedConstant && Gen5InlineConstants.TryDecode(value.Value, out constant)) { }
+                else
+                {
+                    if (value.Kind != Gen5OperandKind.VectorRegister) return false;
+                    foreach (var instruction in plan.Graph.Program.Instructions.Reverse())
+                    {
+                        if (instruction.Pc >= pc) continue;
+                        // This local proof does not infer reaching definitions across
+                        // branches, relative register addressing or mask expansion.
+                        if (instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+                            instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal) ||
+                            Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _) ||
+                            Builder.MayExpandExecution(instruction)) return false;
+                        if (instruction.Control is Gen5ImageControl image &&
+                            value.Value >= image.VectorData && value.Value - image.VectorData < (instruction.Opcode.StartsWith("ImageGather", StringComparison.Ordinal) ? 4 : System.Numerics.BitOperations.PopCount(image.Dmask)))
+                        {
+                            writePc = instruction.Pc;
+                            if (instruction.Opcode is not ("ImageSampleA" or "ImageSampleAO") || image.Dmask != 15 || image.D16 ||
+                                !plan.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex)) return false;
+                            result = component == 0 ? new(memoryIndex, value.Value - image.VectorData, 0) : new(-1, 0, 0);
+                            return true;
+                        }
+                        if (instruction.Control is Gen5BufferMemoryControl or Gen5GlobalMemoryControl) return false;
+                        if (!Builder.WritesRegister(instruction, value)) continue;
+                        writePc = instruction.Pc;
+                        if (instruction.Control is Gen5SdwaControl or Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl ||
+                            instruction.Control is Gen5Vop3Control { AbsoluteMask: not 0 } or
+                                Gen5Vop3Control { NegateMask: not 0 } or Gen5Vop3Control { OperandSelect: not 0 } or
+                                Gen5Vop3Control { Clamp: true } or Gen5Vop3Control { OutputModifier: not 0 }) return false;
+                        var sources = instruction.Sources;
+                        if (instruction.Opcode == "VMovB32" && sources.Count == 1)
+                            return Read(sources[0], component, instruction.Pc, out result);
+                        if (instruction.Opcode is "VOrB32" or "VOr3U32")
+                        {
+                            result = new(-1, 0, 0);
+                            foreach (var source in sources)
+                            {
+                                if (!Read(source, component, instruction.Pc, out var next)) return false;
+                                if (next.IsConstant && next.Constant == 0) continue;
+                                if (!result.IsConstant || result.Constant != 0) return false;
+                                result = next;
+                            }
+                            return true;
+                        }
+                        if (instruction.Opcode == "VLshlOrU32" && sources.Count == 3 && ShiftAmount(sources[1], out var packedShift))
+                        {
+                            var inputByte = component - (int)(packedShift / 8);
+                            var shifted = new PackedByteOrigin(-1, 0, 0);
+                            if (inputByte >= 0 && !Read(sources[0], inputByte, instruction.Pc, out shifted)) return false;
+                            if (!Read(sources[2], component, instruction.Pc, out var other)) return false;
+                            if (shifted.IsConstant && shifted.Constant == 0) { result = other; return true; }
+                            if (other.IsConstant && other.Constant == 0) { result = shifted; return true; }
+                            return false;
+                        }
+                        if (instruction.Opcode is "VLshlrevB32" or "VLshrrevB32" && sources.Count == 2 &&
+                            ShiftAmount(sources[0], out var shift))
+                        {
+                            var inputByte = component + (instruction.Opcode == "VLshrrevB32" ? 1 : -1) * (int)(shift / 8);
+                            if (inputByte is < 0 or > 3) { result = new(-1, 0, 0); return true; }
+                            return Read(sources[1], inputByte, instruction.Pc, out result);
+                        }
+                        return false;
+                    }
+                    return false;
+                }
+                result = new(-1, 0, (constant >> (component * 8)) & 255);
+                return true;
+            }
+            finally
+            {
+                if (writePc is { } definition && plan.Graph.InstructionExecutionMasks.TryGetValue(definition, out var mask))
+                    result = result with { InitializedMask = result.InitializedMask is { } prior
+                        ? plan.Graph.Operation(ScalarOperation.LogicalAnd, ScalarValueType.Bool, prior, mask) : mask };
+                active.Remove((value, component, pc));
+            }
+        }
+        return Read(operand, byteIndex, before, out origin);
+    }
+
+
     private const int MaximumValues = 4096;
     private const int MaximumCombinations = 65536;
     internal static bool WritesMask(Gen5ShaderInstruction instruction, Gen5Operand mask) => Builder.WritesSavedMask(instruction, mask);

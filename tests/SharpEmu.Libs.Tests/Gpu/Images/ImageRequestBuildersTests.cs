@@ -16,6 +16,50 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixture>
 {
+    [Fact]
+    public void PointSampledByteDomainFollowsDescriptorSwizzles()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UInt, 4, 4);
+        // Output red selects stored alpha, green is zero, blue is one.
+        words[3] = (words[3] & ~0xFFFu) | 7u | (1u << 6) | (4u << 9);
+        bool Read(ulong address, out uint word) { word = 0xFA040302; return true; }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 7, Read, out var values));
+        Assert.Equal(new uint[] { 0, 1, 250, 255 }, values);
+        words[3] = (words[3] & ~7u) | 2u;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 7, Read, out values));
+    }
+
+    [Fact]
+    public void PointSampledByteDomainIncludesSelectedChannelsAndRequiresTheWholeSource()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UInt, 4, 4,
+            tile: GuestTileMode.Linear);
+        var sampler = new uint[4];
+        var size = ImageRequestBuilders.Texture(words,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description.Data.Size;
+        var reads = 0;
+        bool Read(ulong address, out uint word)
+        {
+            reads++;
+            word = address == Base + size - 4 ? 0xFA090807u : 0xFA040302u;
+            return true;
+        }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 7, Read, out var values));
+        Assert.Equal(new uint[] { 0, 1, 2, 3, 4, 7, 8, 9, 255 }, values);
+        Assert.Equal((int)(size / 4), reads);
+        bool Incomplete(ulong address, out uint word)
+        {
+            word = 0xFA040302;
+            return address != Base + size - 4;
+        }
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 7, Incomplete, out values));
+        Assert.Empty(values);
+        sampler[2] = 1u << 20;
+        reads = 0;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 7, Read, out values));
+        Assert.Equal(0, reads);
+    }
+
     private const ulong Base = 0x1_0000_0000;
 
     [Theory]

@@ -60,6 +60,12 @@ internal interface IShaderPipelineHost
 
     // Reads one guest dword only when no GPU work may still own the range.
     bool TryReadCleanGuestWord(ulong address, out uint word);
+    bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
+        uint channels, GuestWordReader cleanReader, out uint[] values)
+    {
+        values = [];
+        return false;
+    }
     bool TryGetImageWriteRange(ReadOnlySpan<uint> image, out ulong address, out ulong size)
     {
         address = size = 0;

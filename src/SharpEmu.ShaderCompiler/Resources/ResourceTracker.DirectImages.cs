@@ -238,6 +238,7 @@ public sealed partial class ResourceTracker
             uint? zeroCountGuard = null)
         {
             candidatePlan = null!;
+            IndirectSelectorValues.PackedTextureDomain.TryCreate(_plan, selected, out var packedDomain);
             var candidates = new List<DirectImageCandidate>();
             var sources = new List<DescriptorSource>();
             var keys = new HashSet<uint>();
@@ -255,7 +256,7 @@ public sealed partial class ResourceTracker
                 };
                 if (!ValidateSource(source, out _)) return false;
                 sources.Add(source);
-                candidates.Add(new DirectImageCandidate(key.ConstantU32, 0));
+                candidates.Add(new DirectImageCandidate(key.ConstantU32, 0) { SelectorValue = result });
             }
 
             for (var index = 0; index < candidates.Count; index++)
@@ -268,6 +269,7 @@ public sealed partial class ResourceTracker
                     {
                         DirectCandidates = candidates,
                         CandidateCountSource = countSource,
+                        PackedTextureDomain = packedDomain,
                         GatheredByteSelectorProof = byteSelectorProof,
                     },
             };

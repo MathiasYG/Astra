@@ -217,6 +217,12 @@ public static class ResourceMaterializer
                         snapshot.Images[imageIndex] = new uint[8];
                         continue;
                     }
+                    if (indirect.PackedTextureDomain is { } packed && inputs.ReadPointSampledByteDomain is not null)
+                    {
+                        if (!packed.TryFilterCandidates(plan, inputs, directCandidates, out var selected) || selected.Count == 0)
+                            return false;
+                        directCandidates = selected;
+                    }
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
                         cleanInputs, [], evaluateTable: false, out var descriptors, out _))
                     {
