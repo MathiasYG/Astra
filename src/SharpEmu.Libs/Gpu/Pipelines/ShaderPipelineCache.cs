@@ -538,7 +538,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         if (nativeTwoSampleMixedSupported && rendering.Samples == 2)
+        {
+            // Coverage masks are per pixel in the 2x2 sample-location grid.
+            // The native path currently represents unrestricted coverage only.
+            const uint activeSamples = 0x0003_0003;
+            if ((context.SampleCoverageMaskX0Y0X1Y0 & activeSamples) != activeSamples ||
+                (context.SampleCoverageMaskX0Y1X1Y1 & activeSamples) != activeSamples)
+                throw SubmissionScheduler.Fatal("Two-sample rendering with restricted per-pixel coverage is not supported.");
             context.SampleLocations.Locations.CopyTo(renderingState.SampleLocationWords, 0);
+        }
 
         var samples = rendering.Samples;
         if (colorCount == 0 && !withDepth)
