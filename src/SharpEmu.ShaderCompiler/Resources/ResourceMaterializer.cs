@@ -445,6 +445,20 @@ public static class ResourceMaterializer
                 var memory = plan.Memory[index];
                 if (memory.Access is not (MemoryAccess.Write or MemoryAccess.Atomic) ||
                     memory.Kind is MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) continue;
+                if (memory.Kind is MemoryResourceKind.Buffer or MemoryResourceKind.ScalarBuffer)
+                {
+                    if (plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } buffer ||
+                        buffer.Operands.Any(operand => !plan.ValidateRuntimeValue(operand)) ||
+                        !IndirectSelectorValues.PackedPointerDescriptor.EvaluateHandle(buffer, evaluator, out var descriptor) ||
+                        !IndirectSelectorValues.PackedPointerDescriptor.Range(descriptor, out var bufferAddress, out var length))
+                        return false;
+                    // Include the immediate offset and a full element past the final
+                    // record, even when its stride is smaller than the store width.
+                    var extra = (ulong)memory.Offset + Math.Max(16ul, (ulong)memory.DataBits * memory.DataDwords / 8);
+                    if (length + extra > (1ul << 48) - bufferAddress) return false;
+                    writes.Add((bufferAddress, length + extra));
+                    continue;
+                }
                 if (memory.Kind != MemoryResourceKind.Image || inputs.ReadImageWriteRange is null ||
                     plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.ImageHandle, Operands.Length: 8 } handle)
                     return false;

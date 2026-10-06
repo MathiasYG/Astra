@@ -370,6 +370,50 @@ public sealed class DirectImageTableTests
         }
     }
 
+    [Theory]
+    [InlineData(0x9000UL, 0u, false, true)]
+    [InlineData(0x1001UL, 0u, false, false)]
+    [InlineData(0x8001UL, 0u, false, false)]
+    [InlineData(0x8041UL, 0u, false, false)]
+    [InlineData(0x0FC0UL, 0u, false, false)]
+    [InlineData(0x9000UL, 0x80000000u, false, false)]
+    [InlineData(0x9000UL, 0u, true, false)]
+    public void RuntimeDescriptorsRequireDisjointReadableBufferWrites(
+        ulong outputAddress, uint flags, bool unreadable, bool accepted)
+    {
+        var instructions = RuntimeMemoryBoundProgram().Instructions;
+        var program = Program([
+            .. instructions.Take(instructions.Count - 1),
+            ScalarLoad(60, 4, 32, 4, immediateOffset: 64),
+            BufferAccess(68, "BufferStoreDwordx4", 32, offset: 12, dwords: 4,
+                indexEnabled: true, vectorAddress: 0), EndProgram(76),
+        ]);
+        var plan = Extract(program, userDataCount: 6);
+        bool Read(ulong address, out uint word)
+        {
+            if (address >= 0x8040 && address < 0x8050)
+            {
+                word = (address - 0x8040) switch
+                {
+                    0 => (uint)outputAddress,
+                    4 => (uint)(outputAddress >> 32) | (4u << 16) | flags,
+                    8 => 16,
+                    12 => 0xFAC,
+                    _ => 0,
+                };
+                return !unreadable;
+            }
+            return ReadRuntimeBoundMemory(address, 2, out word);
+        }
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        var original = snapshot;
+        Assert.Equal(accepted, ResourceMaterializer.Materialize(plan,
+            new ResourceRuntimeInputs { UserData = [0x1000, 0, 0, 0, 0x8000, 0], ReadMemory = Read, ReadCleanMemory = Read },
+            ref snapshot, ref specialization));
+        if (!accepted) Assert.Same(original, snapshot);
+    }
+
     [Fact]
     public void ZeroRuntimeCountCannotHideAnImageConsumerAfterTheLoop()
     {
