@@ -22,6 +22,29 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // selection, the duplicated point sampler, and the per-mip storage descriptors.
 public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestOutputHelper output) : IClassFixture<HeadlessVulkanFixture>
 {
+    [Fact]
+    public unsafe void DebugMessengerReceivesSubmittedMessages()
+    {
+        var vulkan = fixture.Vulkan;
+        if (vulkan is null || !vulkan.ValidationEnabled) return;
+        _ = vulkan.TakeValidationMessages();
+        const string messageText = "SharpEmu debug messenger callback test";
+        var pointer = Silk.NET.Core.Native.SilkMarshal.StringToPtr(messageText);
+        try
+        {
+            var data = new DebugUtilsMessengerCallbackDataEXT
+            {
+                SType = StructureType.DebugUtilsMessengerCallbackDataExt,
+                PMessage = (byte*)pointer,
+            };
+            var submit = (delegate* unmanaged<Instance, DebugUtilsMessageSeverityFlagsEXT, DebugUtilsMessageTypeFlagsEXT, DebugUtilsMessengerCallbackDataEXT*, void>)
+                vulkan.Vk.GetInstanceProcAddr(vulkan.Instance, "vkSubmitDebugUtilsMessageEXT").Handle;
+            Assert.True(submit != null);
+            submit(vulkan.Instance, DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt, DebugUtilsMessageTypeFlagsEXT.GeneralBitExt, &data);
+            Assert.Contains(vulkan.TakeValidationMessages(), message => message.Contains(messageText, StringComparison.Ordinal));
+        }
+        finally { Silk.NET.Core.Native.SilkMarshal.Free(pointer); }
+    }
     [Theory]
     [InlineData(0u, 0.5f)]
     [InlineData(1u, 1f)]
