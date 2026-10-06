@@ -767,6 +767,7 @@ public sealed class IndirectSelectorValues
             // Every possible shader write must be bounded. Unknown address spaces
             // decline this proof instead of assuming they cannot touch the table.
             var writeHandles = new Dictionary<ScalarValue, ulong>();
+            var imageWrites = new HashSet<ScalarValue>();
             for (var index = 0; index < plan.Memory.Count; index++)
             {
                 var memory = plan.Memory[index];
@@ -774,6 +775,14 @@ public sealed class IndirectSelectorValues
                 // GDS has its own backing allocation, like LDS and scratch. Its
                 // offsets are not guest virtual addresses into descriptor memory.
                 if (memory.Kind is MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) continue;
+                if (memory.Kind == MemoryResourceKind.Image)
+                {
+                    if (inputs.ReadImageWriteRange is null ||
+                        plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.ImageHandle, Operands.Length: 8 } image)
+                        return false;
+                    imageWrites.Add(image);
+                    continue;
+                }
                 if (memory.Kind is not (MemoryResourceKind.Buffer or MemoryResourceKind.ScalarBuffer) ||
                     plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } output)
                     return false;
@@ -800,6 +809,15 @@ public sealed class IndirectSelectorValues
                         !PackedPointerDescriptor.Range(outputWords, out var address, out var length) ||
                         address + length + extra > 1ul << 48) return false;
                     writes.Add((address, length + extra));
+                }
+                foreach (var output in imageWrites)
+                {
+                    var outputWords = new uint[8];
+                    for (var component = 0; component < outputWords.Length; component++)
+                        if (!evaluator.Evaluate(output.Operands[component], out outputWords[component])) return false;
+                    if (!inputs.ReadImageWriteRange!(outputWords, out var address, out var size) || size == 0 ||
+                        address >= 1ul << 48 || size > (1ul << 48) - address) return false;
+                    writes.Add((address, size));
                 }
             }
             // Compare after evaluating *all* groups: a later group's output may

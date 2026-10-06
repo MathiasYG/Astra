@@ -79,7 +79,10 @@ public sealed class ResourceMaterializationCache
         if (ResourceMaterializer.RequiresDescriptorWriteProof(plan) ||
             plan.DescriptorSources.Any(source => source.IndirectImage?.PackedTextureDomain is not null ||
                 source.IndirectImage?.Workgroup?.FlatAttribute is not null ||
-                source.IndirectImage?.Workgroup?.BufferDomain is not null))
+                source.IndirectImage?.Workgroup?.BufferDomain is not null) ||
+            plan.DescriptorSources.Any(source => source.IndirectImage?.Workgroup is not null) &&
+            plan.Memory.Entries.Any(memory => memory.Kind == MemoryResourceKind.Image &&
+                memory.Access is MemoryAccess.Write or MemoryAccess.Atomic))
             return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
         var key = KeyOf(plan, inputs);
         var found = TryFind(key, plan, inputs, out var cached);

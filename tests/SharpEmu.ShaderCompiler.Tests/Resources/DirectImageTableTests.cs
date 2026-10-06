@@ -1351,6 +1351,73 @@ public sealed class DirectImageTableTests
         Assert.Equal((1, 2), (cache.Hits, cache.Misses));
     }
 
+    [Theory]
+    [InlineData(0x9000UL, 32UL, true, true)]
+    [InlineData(0x1001UL, 32UL, true, false)]
+    [InlineData(0x101FUL, 1UL, true, false)]
+    [InlineData(0x103FUL, 1UL, true, true)]
+    [InlineData(0x9000UL, 0UL, true, false)]
+    [InlineData(0xFFFFFFFFFFFFUL, 2UL, true, false)]
+    [InlineData(0x9000UL, 32UL, false, false)]
+    public void WorkgroupTableChecksImageWritesAgainstEveryGroupsReads(
+        ulong outputAddress, ulong size, bool readableRange, bool accepted)
+    {
+        var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 32),
+            Image(32, "ImageStore", 16, dmask: 1), EndProgram(40)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
+        var proof = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!;
+        var original = WorkgroupImageInputs();
+        bool Range(ReadOnlySpan<uint> words, out ulong address, out ulong length)
+        {
+            // The later group's image can overwrite an earlier group's table.
+            address = words[0] == 0x3000 ? outputAddress : 0xA000;
+            length = size;
+            return readableRange;
+        }
+        var inputs = new ResourceRuntimeInputs { UserData = original.UserData,
+            ReadMemory = original.ReadMemory, ReadCleanMemory = original.ReadCleanMemory,
+            ComputeState = original.ComputeState, ReadImageWriteRange = Range };
+        Assert.Equal(accepted, proof.TryEvaluate(plan, inputs, out _, out _));
+        var missingRange = new ResourceRuntimeInputs { UserData = original.UserData,
+            ReadMemory = original.ReadMemory, ReadCleanMemory = original.ReadCleanMemory,
+            ComputeState = original.ComputeState };
+        Assert.False(proof.TryEvaluate(plan, missingRange, out _, out _));
+    }
+
+    [Fact]
+    public void WorkgroupImageWriteRangesAreRevalidatedOnRepeatedMaterialization()
+    {
+        var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 32),
+            Image(32, "ImageStore", 16, dmask: 1), EndProgram(40)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 8,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(8, null, null, null));
+        var original = WorkgroupImageInputs();
+        ulong outputAddress = 0x9000;
+        bool Range(ReadOnlySpan<uint> words, out ulong address, out ulong size)
+        {
+            address = outputAddress; size = 32; return true;
+        }
+        bool Resident(ulong address, Span<byte> bytes, bool clean)
+        {
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+            {
+                if (!original.ReadCleanMemory!(address + (uint)offset, out var word)) return false;
+                BitConverter.TryWriteBytes(bytes[offset..], word);
+            }
+            return true;
+        }
+        var inputs = new ResourceRuntimeInputs { UserData = original.UserData,
+            ReadMemory = original.ReadMemory, ReadCleanMemory = original.ReadCleanMemory,
+            ComputeState = original.ComputeState, ReadImageWriteRange = Range };
+        var cache = new ResourceMaterializationCache();
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        outputAddress = 0x1000;
+        Assert.False(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(0, cache.Hits);
+    }
+
     [Fact]
     public void WorkgroupSamplerResourcesAreReusedForRepeatedInstructions()
     {
