@@ -93,6 +93,7 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.ClipDistanceEnabled => _supportsShaderClipDistance;
         private bool _postDepthCoverageEnabled;
         bool IShaderPipelineHost.PostDepthCoverageSupported => _postDepthCoverageEnabled;
+        public bool NativeTwoSampleMixedSupported => _supportsNativeTwoSampleMixed;
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
@@ -837,9 +838,42 @@ internal static unsafe partial class VulkanVideoPresenter
                         FrontFace = parameters.FrontFaceClockwise ? FrontFace.Clockwise : FrontFace.CounterClockwise,
                         LineWidth = 1,
                     };
+                    var nativeMixed = _supportsNativeTwoSampleMixed &&
+                        parameters.Samples == 2 && rendering.DepthSamples == 2 && colorCount > 0 &&
+                        rendering.ColorSamples.Take(colorCount).All(count => count == 1);
+                    var coverageReduction = new PipelineCoverageReductionStateCreateInfoNV
+                    {
+                        SType = StructureType.PipelineCoverageReductionStateCreateInfoNV,
+                        CoverageReductionMode = CoverageReductionModeNV.TruncateNV,
+                    };
+                    var sampleLocationsEnabled = _supportsNativeTwoSampleMixed && parameters.Samples == 2;
+                    var sampleLocations = stackalloc SampleLocationEXT[8];
+                    for (var pixel = 0; pixel < 4; pixel++)
+                        for (var sample = 0; sample < 2; sample++)
+                        {
+                            var word = rendering.SampleLocationWords[pixel * 4] >> (sample * 8);
+                            var x = (int)(word << 28) >> 28;
+                            var y = (int)(word << 24) >> 28;
+                            sampleLocations[pixel * 2 + sample] = new SampleLocationEXT((x + 8) / 16f, (y + 8) / 16f);
+                        }
+                    var sampleLocationState = new PipelineSampleLocationsStateCreateInfoEXT
+                    {
+                        SType = StructureType.PipelineSampleLocationsStateCreateInfoExt,
+                        PNext = nativeMixed ? &coverageReduction : null,
+                        SampleLocationsEnable = true,
+                        SampleLocationsInfo = new SampleLocationsInfoEXT
+                        {
+                            SType = StructureType.SampleLocationsInfoExt,
+                            SampleLocationsPerPixel = SampleCountFlags.Count2Bit,
+                            SampleLocationGridSize = new Extent2D(2, 2),
+                            SampleLocationsCount = 8,
+                            PSampleLocations = sampleLocations,
+                        },
+                    };
                     var multisample = new PipelineMultisampleStateCreateInfo
                     {
                         SType = StructureType.PipelineMultisampleStateCreateInfo,
+                        PNext = sampleLocationsEnabled ? &sampleLocationState : (nativeMixed ? &coverageReduction : null),
                         SampleShadingEnable = parameters.SampleShadingEnable,
                         RasterizationSamples = ImageDescription.VulkanSampleCount(parameters.Samples),
                         MinSampleShading = 1f,
@@ -895,10 +929,21 @@ internal static unsafe partial class VulkanVideoPresenter
                         DepthAttachmentFormat = rendering.DepthFormat,
                         StencilAttachmentFormat = rendering.StencilFormat,
                     };
+                    var colorSampleCounts = stackalloc SampleCountFlags[8];
+                    for (var index = 0; index < colorCount; index++)
+                        colorSampleCounts[index] = ImageDescription.VulkanSampleCount(rendering.ColorSamples[index]);
+                    var attachmentSampleCounts = new AttachmentSampleCountInfoNV
+                    {
+                        SType = StructureType.AttachmentSampleCountInfoNV,
+                        PNext = &renderingInfo,
+                        ColorAttachmentCount = (uint)colorCount,
+                        PColorAttachmentSamples = colorSampleCounts,
+                        DepthStencilAttachmentSamples = ImageDescription.VulkanSampleCount(rendering.DepthSamples == 0 ? 1 : rendering.DepthSamples),
+                    };
                     var pipelineInfo = new GraphicsPipelineCreateInfo
                     {
                         SType = StructureType.GraphicsPipelineCreateInfo,
-                        PNext = &renderingInfo,
+                        PNext = nativeMixed ? &attachmentSampleCounts : &renderingInfo,
                         StageCount = stageCount,
                         PStages = shaderStages,
                         PVertexInputState = &vertexInput,

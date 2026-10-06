@@ -46,6 +46,7 @@ internal interface IShaderPipelineHost
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
     bool PostDepthCoverageSupported => false;
+    bool NativeTwoSampleMixedSupported => false;
 
     RenderHostLimits Limits { get; }
 

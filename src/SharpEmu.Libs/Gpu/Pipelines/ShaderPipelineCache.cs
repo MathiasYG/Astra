@@ -112,13 +112,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
                 out var outputModes, out var outputMappings);
+            var customSampleOffsets = new List<(float X, float Y)>();
+            var rasterizationSamples = 1u << context.AntialiasingConfig.SampleCountLog2;
+            var pixelIterations = (context.ScanModeControl1 & (1u << 16)) != 0
+                ? 1u << context.EnhancedQualityAntialiasing.PixelShaderIterationSamples : 1u;
+            if (_host.NativeTwoSampleMixedSupported && rasterizationSamples == 2 &&
+                (shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress & 0x11u) != 0)
+                for (uint pixelLocation = 0; pixelLocation < 4; pixelLocation++)
+                    for (uint sample = 0; sample < (pixelIterations == 1 ? 1 : rasterizationSamples); sample++)
+                    {
+                        var position = context.SampleLocations.Position(pixelLocation, sample);
+                        customSampleOffsets.Add((position.X - .5f, position.Y - .5f));
+                    }
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface,
                 outputModes, outputMappings, inputCount,
                 1u << context.EnhancedQualityAntialiasing.MaskExportSamples,
-                1u << context.AntialiasingConfig.SampleCountLog2,
-                (context.ScanModeControl1 & (1u << 16)) != 0
-                    ? 1u << context.EnhancedQualityAntialiasing.PixelShaderIterationSamples : 1u,
-                context.ShaderSampleExclusionMask);
+                rasterizationSamples, pixelIterations, context.ShaderSampleExclusionMask, customSampleOffsets);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
@@ -425,7 +434,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.NativeTwoSampleMixedSupported);
         var key = KeyOf(description);
         lock (_gate)
         {
@@ -462,7 +471,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        SampleCountFlags noAttachmentSampleCounts)
+        SampleCountFlags noAttachmentSampleCounts, bool nativeTwoSampleMixedSupported = false)
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
@@ -521,6 +530,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             renderingState.StencilFormat = rendering.StencilFormat;
             renderingState.DepthSamples = depth.Target.Target.Samples;
         }
+
+        if (nativeTwoSampleMixedSupported && rendering.Samples == 2)
+            context.SampleLocations.Locations.CopyTo(renderingState.SampleLocationWords, 0);
 
         var samples = rendering.Samples;
         if (colorCount == 0 && !withDepth)

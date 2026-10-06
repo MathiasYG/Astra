@@ -93,6 +93,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public IImageFormatSupport FormatSupport { get; } = new AcceptingFormatSupport();
 
     public bool IsRecording => Recording;
+    public bool NativeTwoSampleMixedSupported { get; set; }
 
     public ImageLayout ColorLayout { get; set; } = ImageLayout.ColorAttachmentOptimal;
 
