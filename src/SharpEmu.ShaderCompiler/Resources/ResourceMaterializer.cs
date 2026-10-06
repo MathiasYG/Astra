@@ -1006,7 +1006,9 @@ public static class ResourceMaterializer
         }
 
         var imageCount = denseImages.Count;
-        if (imageCount > ShaderResourceInfo.MaxImages)
+        // Each bounded indirect root can contribute its own candidate table.
+        // MaxImages bounds the plan roots and each table, not their combined expansion.
+        if (imageCount > checked(info.Images.Count * ShaderResourceInfo.MaxImages))
         {
             failure = ResourceMaterializationFailure.ImageCapacityExceeded;
             return Fail("indirect image candidates exceed the dense image resource limit");

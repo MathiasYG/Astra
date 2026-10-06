@@ -60,18 +60,20 @@ public sealed class ResourceMaterializerTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void RepeatedSampledTablesShareCompatibleCandidatesAndKeepRootOrdering(bool differentViewWidth)
+    [InlineData(false, 3)]
+    [InlineData(false, 130)]
+    [InlineData(true, 3)]
+    [InlineData(true, 130)]
+    public void RepeatedSampledTablesShareCompatibleCandidatesAndKeepRootOrdering(bool differentViewWidth, int candidateCount)
     {
         var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
         var secondRoot = plan.Info.Images[0].Clone();
         if (differentViewWidth) secondRoot.R128 = !secondRoot.R128;
         plan.Info.Images.Add(secondRoot);
         plan.Info.SampledPairs.Add(new SampledImagePair { Image = 1, Sampler = 0 });
-        uint[] userData = [0x1000, 224 << 16, 3, 0, 0x10000, 16 << 16, 6, 0, 7];
-        var memory = new TestWordMemory { Words = new uint[0x11000 / 4] };
-        for (var index = 0; index < 3; index++)
+        uint[] userData = [0x1000, 224 << 16, (uint)candidateCount, 0, 0x10000, 16 << 16, (uint)candidateCount * 2, 0, 7];
+        var memory = new TestWordMemory { Words = new uint[0x13000 / 4] };
+        for (var index = 0; index < candidateCount; index++)
         {
             memory.At(0x1000 + (ulong)index * 224 + 4) = (uint)index;
             var descriptor = ResourceTrackerTests.ImageDescriptor();
@@ -82,13 +84,13 @@ public sealed class ResourceMaterializerTests
         var specialization = new ResourceSpecialization();
         Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: memory.Read),
             ref snapshot, ref specialization, out var failure), failure.ToString());
-        Assert.Equal(differentViewWidth ? 6 : 4, snapshot.Images.Length);
+        Assert.Equal(differentViewWidth ? candidateCount * 2 : candidateCount + 1, snapshot.Images.Length);
         var first = specialization.IndirectImageCandidates.Where(edge => edge.Root == 0).Select(edge => edge.Candidate).ToArray();
         var second = specialization.IndirectImageCandidates.Where(edge => edge.Root == 1).Select(edge => edge.Candidate).ToArray();
         Assert.Equal(0u, first[0]);
         Assert.Equal(1u, second[0]);
-        Assert.Equal(3, first.Length);
-        Assert.Equal(3, second.Length);
+        Assert.Equal(candidateCount, first.Length);
+        Assert.Equal(candidateCount, second.Length);
         if (!differentViewWidth) Assert.Equal(first.Skip(1), second.Skip(1));
         else Assert.Empty(first.Intersect(second));
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
