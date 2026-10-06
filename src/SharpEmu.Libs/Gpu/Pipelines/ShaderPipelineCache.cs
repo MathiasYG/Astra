@@ -130,7 +130,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface,
                 outputModes, outputMappings, inputCount,
                 1u << context.EnhancedQualityAntialiasing.MaskExportSamples,
-                rasterizationSamples, pixelIterations, context.ShaderSampleExclusionMask, customSampleOffsets);
+                rasterizationSamples, pixelIterations, context.ShaderSampleExclusionMask, customSampleOffsets,
+                context.DepthRenderOverride.ForceShaderDepthOrder);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));

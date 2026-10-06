@@ -68,7 +68,8 @@ public static class PixelStageInputResolver
         uint rasterizationSamples = 1,
         uint? pixelShaderIterationSamples = null,
         uint shaderSampleExclusionMask = 0,
-        IReadOnlyList<(float X, float Y)>? customSampleOffsets = null)
+        IReadOnlyList<(float X, float Y)>? customSampleOffsets = null,
+        bool forceShaderDepthOrder = false)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         if (pixelShaderIterationSamples is uint iterations &&
@@ -112,12 +113,13 @@ public static class PixelStageInputResolver
         var control = shaderInterface.DepthShaderControl;
         var earlyDepth = control.DepthExportOrder == 1 && !control.KillEnable && !control.DepthExportEnable &&
             !control.MaskExportEnable && !control.DepthBeforeShader && !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0;
-        // Shader coverage changes must affect depth updates unless depth-before-shader is forced.
-        var coverageRequiresLateDepth = control.DepthExportOrder == 1 && (control.MaskExportEnable || control.KillEnable) &&
-            !control.DepthBeforeShader && !control.DepthExportEnable &&
+        // Early-then-late order expresses a preference. Depth exports and coverage
+        // changes require late processing unless the guest forces shader ordering.
+        var requiresLateDepth = !forceShaderDepthOrder && control.DepthExportOrder == 1 &&
+            (control.DepthExportEnable || control.MaskExportEnable || control.KillEnable) && !control.DepthBeforeShader &&
             !control.DualExportEnable && !control.ExecuteOnNoop && control.RemainingBits == 0;
         if ((shaderSampleExclusionMask & 0xFFFFu) != 0 && control.DepthExportOrder == 1 &&
-            !earlyDepth && !coverageRequiresLateDepth)
+            !earlyDepth && !requiresLateDepth)
             throw SubmissionScheduler.Fatal("Sample exclusion requires supported early depth/stencil processing.");
         return new PixelInputInfo
         {

@@ -119,6 +119,46 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal(2u, info.MaskExportSamples);
         Assert.Equal(0u, info.ShaderSampleExclusionMask);
     }
+    [Theory]
+    [InlineData(0x11u, false, true)]
+    [InlineData(0x51u, false, true)]
+    [InlineData(0x111u, false, true)]
+    [InlineData(0x151u, false, true)]
+    [InlineData(0x51u, true, false)]
+    [InlineData(0x50u, true, false)]
+    [InlineData(0x1011u, false, false)]
+    [InlineData(0x211u, false, false)]
+    [InlineData(0x411u, false, false)]
+    [InlineData(0x8011u, false, false)]
+    public void DepthExportsUseLateFallbackOnlyWhenGuestOrderingIsNotForced(uint raw, bool forced, bool accepted)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, [0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var shaderInterface = new SharpEmu.Libs.Gpu.GpuCommands.Registers.ShaderInterfaceRegisters {
+            DepthShaderControl = SharpEmu.Libs.Gpu.GpuCommands.Registers.DepthShaderControlRegisters.Decode(raw) };
+        PixelInputInfo Resolve() => PixelStageInputResolver.Resolve(_guest.Context, source.Registered, shaderInterface,
+            new byte[8], new SharpEmu.Libs.Gpu.Images.ColorComponentMap[8], 0,
+            rasterizationSamples: 2, pixelShaderIterationSamples: 1, shaderSampleExclusionMask: 0xFFFE,
+            forceShaderDepthOrder: forced);
+        if (!accepted)
+        {
+            Assert.Throws<SchedulerFatalException>(() => Resolve());
+            return;
+        }
+        var info = Resolve();
+        Assert.False(info.EarlyDepth);
+        Assert.True(info.DepthExportEnable);
+        Assert.Equal((raw & 0x40) != 0, info.KillEnable);
+        Assert.Equal((raw & 0x100) != 0, info.SampleMaskExportEnable);
+        Assert.Equal(0u, info.ShaderSampleExclusionMask);
+        var cursor = 0u;
+        _guest.Programs.GetOrCompile(source, new StageCompileOptions { PixelInfo = info }, ref cursor, out _);
+        var request = Assert.Single(_guest.Compiler.Requests);
+        Assert.True(request.PixelDepthExportEnable);
+        Assert.False(request.EarlyFragmentTests);
+        Assert.Equal(info.SampleMaskExportEnable, request.PixelSampleMaskExportEnable);
+    }
+
     [Fact]
     public void SampleExclusionRequiresSupportAndSeparatesEarlyPixelPrograms()
     {
