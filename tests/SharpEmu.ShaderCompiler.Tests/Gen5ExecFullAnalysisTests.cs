@@ -51,6 +51,26 @@ public sealed class Gen5ExecFullAnalysisTests
 
     private const uint Exec = 126;
 
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void CompareExecutionOnlyPreservesTheSavedScalarMask(bool executionOnly, bool expected)
+    {
+        var initialization = VectorAdd();
+        Scalar("SMovB64", 106, Gen5Operand.Scalar(Exec));
+        var pc = Add(executionOnly ? "VCmpxLtF32" : "VCmpLtF32", Gen5ShaderEncoding.Vopc,
+            [Gen5Operand.Scalar(106)], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)]);
+        var index = _program.FindIndex(instruction => instruction.Pc == pc);
+        _program[index] = _program[index] with { Control = new Gen5SdwaControl(6, 0, 6, 6,
+            false, false, 0, 0, 0, false, 106) };
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(106));
+        var use = VectorAdd();
+        var program = new Gen5ShaderProgram(0, _program);
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(program, initialization, false).Contains(use));
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(program, initialization, false).Contains(use));
+        Assert.Equal(expected, Gen5ExecFullAnalysis.Analyze(program, false).Contains(use));
+    }
+
     private readonly List<Gen5ShaderInstruction> _program = [];
     private uint _pc;
 

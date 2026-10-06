@@ -137,6 +137,9 @@ public static class Gen5ExecFullAnalysis
         var opcode = instruction.Opcode;
         var sources = instruction.Sources;
         var destinations = instruction.Destinations;
+        // GFX10 VCMPX writes only EXEC; legacy SDWA/VOP3 destination bits
+        // must not invalidate an SGPR holding a saved execution mask.
+        var executionCompare = opcode.StartsWith("VCmpx", StringComparison.Ordinal);
         var wide = opcode.StartsWith('S') &&
             (opcode.EndsWith("B64", StringComparison.Ordinal) ||
              opcode.EndsWith("U64", StringComparison.Ordinal) ||
@@ -147,7 +150,7 @@ public static class Gen5ExecFullAnalysis
         var writesExec = false;
         foreach (var destination in destinations)
         {
-            if (destination.Kind != Gen5OperandKind.ScalarRegister)
+            if (destination.Kind != Gen5OperandKind.ScalarRegister || executionCompare)
             {
                 continue;
             }
@@ -159,7 +162,7 @@ public static class Gen5ExecFullAnalysis
             }
         }
 
-        var scalarDestination = instruction.Control switch
+        var scalarDestination = executionCompare ? null : instruction.Control switch
         {
             Gen5Vop3Control control => control.ScalarDestination,
             Gen5SdwaControl control => control.ScalarDestination,
