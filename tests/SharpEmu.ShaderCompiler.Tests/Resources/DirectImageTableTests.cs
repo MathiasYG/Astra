@@ -1676,6 +1676,49 @@ public sealed class DirectImageTableTests
         Assert.Contains("992u", repeatedMetal.Source);
     }
 
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void WorkgroupLoopReusesMaskedInputsWithoutOmittingDistinctOutputRanges(bool changingOutput, bool accepted)
+    {
+        var originalPlan = WorkgroupLoopImagePlan();
+        var prefix = originalPlan.Graph.Program.Instructions.Where(instruction => instruction.Pc < 60)
+            .Select(instruction => instruction.Pc == 0
+                ? Sop2(0, "SAndB32", 15, Gen5Operand.Scalar(12), Operand(8)) : instruction);
+        var program = Program([.. prefix, .. changingOutput ? new[] {
+            Sop2(60, "SMulI32", 15, Gen5Operand.Scalar(12), Operand(32)),
+            ScalarBufferLoad(64, 8, 16, 8, dynamicOffsetRegister: 15),
+            Image(72, "ImageStore", 16, dmask: 1), EndProgram(80),
+        } : new[] { EndProgram(60) }]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 12,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(12, null, null, null));
+        var proof = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!;
+        var original = WorkgroupLoopImageInputs(end: 4);
+        bool Read(ulong address, out uint word)
+        {
+            if (address is >= 0x3200 and < 0x4000)
+            {
+                word = ((address - 0x3000) % 32) switch {
+                    0 => 0x6000u + (uint)(address - 0x3000) / 32 * 0x100,
+                    4 => 20u << 20, 12 => 0xFACu | (9u << 28), _ => 0,
+                };
+                return true;
+            }
+            return original.ReadCleanMemory!(address, out word);
+        }
+        bool Range(ReadOnlySpan<uint> words, out ulong address, out ulong size)
+        {
+            address = words[0] == 0x7000 ? 0x1000UL : 0x10000UL;
+            size = 32; return true;
+        }
+        var userData = original.UserData.ToArray(); userData[10] = 4096;
+        var inputs = new ResourceRuntimeInputs { UserData = userData, ReadMemory = Read,
+            ReadCleanMemory = Read, ReadImageWriteRange = Range,
+            ComputeState = new(64, 64, 1, 1, false, 0, 1, changingOutput ? 128u : 32768u, 1, 1) };
+        Assert.Equal(accepted, proof.TryEvaluate(plan, inputs, out var keys, out _));
+        if (accepted) Assert.Equal(new uint[] { 96, 32 }, keys);
+    }
+
     [Fact]
     public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
     {

@@ -883,8 +883,48 @@ public sealed class IndirectSelectorValues
                 var extra = (ulong)memory.Offset + Math.Max(16ul, (ulong)memory.DataBits * memory.DataDwords / 8);
                 writeHandles[output] = Math.Max(writeHandles.GetValueOrDefault(output), extra);
             }
+            var inputFrontier = new HashSet<ScalarValue>();
+            if (LoopCounter is not null)
+            {
+                var roots = new List<ScalarValue>(Handle.Operands) { LoopInitial!, LoopLimit! };
+                if (Key is not null) roots.Add(Key);
+                roots.AddRange(writeHandles.Keys.SelectMany(handle => handle.Operands));
+                roots.AddRange(imageWrites.SelectMany(handle => handle.Operands));
+                var pending = new Stack<ScalarValue>(roots); var visited = new HashSet<ScalarValue>();
+                while (pending.TryPop(out var value))
+                {
+                    if (!visited.Add(value)) continue;
+                    if (value.Kind == ScalarValueKind.ResourceTableWord)
+                    {
+                        var slot = (int)value.Payload;
+                        if (slot >= 0 && slot < plan.TableReads.Count) pending.Push(plan.TableReads[slot].Value);
+                        continue;
+                    }
+                    if (ReferenceEquals(value, Input)) inputFrontier.Add(Input);
+                    foreach (var operand in value.Operands)
+                    {
+                        if (ReferenceEquals(operand, Input)) inputFrontier.Add(value);
+                        else pending.Push(operand);
+                    }
+                }
+            }
+            var repeatedInputs = new HashSet<string>();
             foreach (var group in inputValues)
             {
+                if (inputFrontier.Count != 0)
+                {
+                    // Equal values at every immediate use of the workgroup input
+                    // imply equal descriptor, bound and output expressions. Include
+                    // output dependencies so a later group cannot hide an alias.
+                    var frontierEvaluator = new RuntimeValueEvaluator(plan, clean, Input, group);
+                    var signature = new List<ulong>(inputFrontier.Count);
+                    foreach (var value in inputFrontier)
+                    {
+                        if (!frontierEvaluator.EvaluateWide(value, out var word)) { signature.Clear(); break; }
+                        signature.Add(word);
+                    }
+                    if (signature.Count == inputFrontier.Count && !repeatedInputs.Add(string.Join(',', signature))) continue;
+                }
                 uint first = 0, end = 1;
                 if (LoopCounter is not null)
                 {
