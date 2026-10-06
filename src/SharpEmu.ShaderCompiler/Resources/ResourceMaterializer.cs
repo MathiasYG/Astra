@@ -921,13 +921,15 @@ public static class ResourceMaterializer
 
     private static uint StorageMipCount(ImageResource image, ReadOnlySpan<uint> descriptor)
     {
-        if (image.MipMode != ImageMipMode.DynamicStorage || NullImageDescriptor(descriptor))
+        if (image.MipMode == ImageMipMode.None || NullImageDescriptor(descriptor))
         {
             return 1;
         }
 
         var baseLevel = (descriptor[3] >> 12) & 0xF;
         var last = (descriptor[3] >> 16) & 0xF;
+        if (image.MipMode == ImageMipMode.ExplicitLodGather && !image.R128)
+            last = Math.Min(last, (descriptor[5] >> 4) & 0xF);
         return baseLevel <= last ? last - baseLevel + 1 : 0;
     }
 
@@ -950,6 +952,22 @@ public static class ResourceMaterializer
         specializedSnapshot = snapshot;
         specialization = new ResourceSpecialization();
         var info = plan.Info;
+        // Core Vulkan gather always addresses the view's base level. Explicit-LOD
+        // gathers instead bind one view per accessible mip and select it in the shader.
+        // Linear mip filtering and unnormalized gathers need separate semantics.
+        foreach (var access in plan.Memory.Entries.Where(access => access.Opcode == "ImageGather4CL"))
+        {
+            if (access.Sampler >= snapshot.Samplers.Length || access.Resource >= info.Images.Count)
+                return Fail("explicit LOD gather has no image or sampler");
+            var sampler = snapshot.Samplers[access.Sampler];
+            var descriptor = snapshot.Images[access.Resource];
+            if (sampler.Length < 4 || ((sampler[2] >> 26) & 3) > 1 ||
+                (sampler[0] & (1u << 15)) != 0 || descriptor.Length < 8 ||
+                ((descriptor[1] >> 8) & 0xFFF) != 0 ||
+                info.Images[(int)access.Resource].IndirectSearchIterations != 0)
+                return Fail("explicit LOD gather requires normalized point mip selection without a resource min LOD or indirect candidates");
+        }
+
         var denseImages = snapshot.Images.ToList();
         var owners = Enumerable.Range(0, info.Images.Count).Select(index => (uint)index).ToList();
         var sharedCandidates = new List<(uint Root, uint Candidate)>();

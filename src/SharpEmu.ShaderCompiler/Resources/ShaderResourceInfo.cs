@@ -26,6 +26,7 @@ public enum ImageMipMode : byte
 {
     None,
     DynamicStorage,
+    ExplicitLodGather,
 }
 
 // The identity dword selection with every component in place.

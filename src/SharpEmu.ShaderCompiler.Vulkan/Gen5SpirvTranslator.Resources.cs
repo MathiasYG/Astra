@@ -1438,6 +1438,28 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (imageInfo.MipMode == ImageMipMode.ExplicitLodGather && instruction.Opcode == "ImageGather4CL")
+            {
+                var coordinateCount = imageClass.Arrayed
+                    ? ImageSpatialComponentCountOf(imageClass.Dimension) + 1
+                    : ImageSpatialComponentCountOf(imageClass.Dimension);
+                var lod = LoadImageFloatAddress(image, ImageFullAddressSlots(image) + (int)coordinateCount);
+                var limits = LoadS(image.ScalarSampler + 1);
+                uint Limit(uint shift) => _module.AddInstruction(SpirvOp.FDiv, _floatType,
+                    _module.AddInstruction(SpirvOp.ConvertUToF, _floatType,
+                        BitwiseAnd(ShiftRightLogical(limits, UInt(shift)), UInt(0xFFF))), Float(256));
+                var clamped = Ext(43, _floatType, lod, Limit(0), Limit(12));
+                clamped = Ext(43, _floatType, clamped, Float(0), Float(imageInfo.MipCount - 1));
+                var nearest = Ext(8, _floatType, _module.AddInstruction(SpirvOp.FAdd, _floatType, clamped, Float(0.5f)));
+                var selected = _module.AddInstruction(SpirvOp.ConvertFToU, _uintType, nearest);
+                var mipFilter = BitwiseAnd(ShiftRightLogical(LoadS(image.ScalarSampler + 2), UInt(26)), UInt(3));
+                selector = _module.AddInstruction(SpirvOp.Select, _uintType,
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, mipFilter, UInt(0)), UInt(0), selected);
+                elements = Enumerable.Range(0, (int)imageInfo.MipCount)
+                    .Select(mip => ((uint)resourceIndex, (uint)element + (uint)mip)).ToList();
+                return true;
+            }
+
             if (request.IndirectRootByMemoryIndex.TryGetValue(memoryIndex, out var keyMemoryIndex) && imageInfo.IndirectSearchIterations != 0)
             {
                 if (!HasFlattenedTable)
@@ -1536,6 +1558,7 @@ public static partial class Gen5SpirvTranslator
             // Several descriptors (per-mip elements, indirect candidates) need the caller's constant case.
             var severalDescriptors =
                 (imageInfo.MipMode == ImageMipMode.DynamicStorage && instruction.Opcode is "ImageLoadMip" or "ImageStoreMip") ||
+                (imageInfo.MipMode == ImageMipMode.ExplicitLodGather && instruction.Opcode == "ImageGather4CL") ||
                 (request.IndirectRootByMemoryIndex.ContainsKey(memoryIndex) && imageInfo.IndirectSearchIterations != 0);
             if (fixedElement is null && severalDescriptors)
             {

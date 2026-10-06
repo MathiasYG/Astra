@@ -602,7 +602,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
                 throw new ResourcePlanException($"shader binding layout failed: image {index} has an unmapped binding class");
             }
 
-            var dynamic = image.MipMode == ImageMipMode.DynamicStorage;
+            var dynamic = image.MipMode is ImageMipMode.DynamicStorage or ImageMipMode.ExplicitLodGather;
             var count = dynamic ? image.MipCount : 1;
             if (count == 0 || (!dynamic && image.MipCount != 1))
             {

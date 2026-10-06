@@ -793,7 +793,8 @@ public sealed partial class ResourceTracker
     private uint AddImage(uint source, MemoryAccessInfo memory, uint pc)
     {
         var resourceClass = memory.ImageClass;
-        var mip = resourceClass == ImageResourceClass.Storage && memory.ImageHasMip ? ImageMipMode.DynamicStorage : ImageMipMode.None;
+        var mip = memory.Opcode == "ImageGather4CL" ? ImageMipMode.ExplicitLodGather :
+            resourceClass == ImageResourceClass.Storage && memory.ImageHasMip ? ImageMipMode.DynamicStorage : ImageMipMode.None;
         var depth = (memory.ImageSampleFlags & ImageSampleFlags.Compare) != 0;
         for (var index = 0; index < _info.Images.Count; index++)
         {

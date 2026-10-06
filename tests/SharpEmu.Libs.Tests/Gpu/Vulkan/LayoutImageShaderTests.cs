@@ -22,6 +22,31 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // selection, the duplicated point sampler, and the per-mip storage descriptors.
 public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestOutputHelper output) : IClassFixture<HeadlessVulkanFixture>
 {
+    [Theory]
+    [InlineData(2u, false)]
+    [InlineData(3u, false)]
+    [InlineData(1u, true)]
+    public void ExplicitLodComparisonGatherRejectsUnsupportedSamplerModes(uint mipFilter, bool unnormalized)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, Format32Float, lastLevel: 1));
+        instructions.Add(MoveScalar(pc, FirstImageRegister + 5, 1u << 4)); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister, (1u << 12) | (unnormalized ? 1u << 15 : 0))); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister + 1, 0xFFFu << 12)); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister + 2, mipFilter << 26)); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister + 3, 0)); pc += 8;
+        var gather = Image(pc, "ImageGather4CL", FirstImageRegister, SamplerRegister);
+        gather = gather with { Control = ((Gen5ImageControl)gather.Control!) with { AddressRegisters = [0, 1, 2, 3] } };
+        instructions.Add(gather); pc += 8;
+        instructions.Add(BufferAccess(pc, "BufferStoreDwordx4", ResultRegister, dwords: 4, vectorData: 4)); pc += 8;
+        instructions.Add(EndProgram(pc));
+        var plan = ShaderResourcePlan.Extract(Program([.. instructions]), ShaderStage.Compute, 1, 0, 64);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.False(ResourceMaterializer.Materialize(plan, Inputs(UserData()), ref snapshot, ref specialization));
+    }
+
     [Fact]
     public unsafe void DebugMessengerReceivesSubmittedMessages()
     {
@@ -161,6 +186,64 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
             Enumerable.Range(0, 4).Select(index => BitConverter.ToSingle(bytes, index * 4)).ToArray());
         harness.AssertNoValidationMessages();
         output.WriteLine($"Verified workgroup descriptor offsets on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
+    [Theory]
+    [InlineData(0f, 0f)]
+    [InlineData(1f, 1f)]
+    [InlineData(8f, 1f)]
+    [InlineData(-2f, 0f)]
+    [InlineData(1f, 0f, true)]
+    [InlineData(0.49f, 0f)]
+    [InlineData(0.51f, 1f)]
+    [InlineData(1f, 0f, false, 0u)]
+    public void ExplicitLodComparisonGatherSelectsTheRequestedMip(float lod, float expected, bool mixedQuad = false, uint mipFilter = 1)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, Format32Float, lastLevel: 1));
+        // MAX_MIP must describe the same accessible mip range as LAST_LEVEL.
+        instructions.Add(MoveScalar(pc, FirstImageRegister + 5, 1u << 4)); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister, 1u << 12)); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister + 1, 0xFFFu << 12)); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister + 2, mipFilter << 26)); pc += 8;
+        instructions.Add(MoveScalar(pc, SamplerRegister + 3, 0)); pc += 8;
+        instructions.Add(MoveVector(pc, 0, BitConverter.SingleToUInt32Bits(0.5f))); pc += 8;
+        instructions.Add(MoveVector(pc, 1, BitConverter.SingleToUInt32Bits(0.5f))); pc += 8;
+        instructions.Add(MoveVector(pc, 2, BitConverter.SingleToUInt32Bits(0.5f))); pc += 8;
+        instructions.Add(MoveVector(pc, 3, BitConverter.SingleToUInt32Bits(lod))); pc += 8;
+        var gather = Image(pc, "ImageGather4CL", FirstImageRegister, SamplerRegister);
+        gather = gather with { Control = ((Gen5ImageControl)gather.Control!) with { AddressRegisters = [0, 1, 2, 3] } };
+        instructions.Add(gather); pc += 8;
+        instructions.Add(BufferAccess(pc, "BufferStoreDwordx4", ResultRegister, dwords: 4, vectorData: 4)); pc += 8;
+        instructions.Add(EndProgram(pc));
+        using var run = new Run(vulkan, Program([.. instructions]), UserData(), 1);
+        var resource = run.ResourceAt(FirstImageAddress);
+        Assert.Equal(2u, run.Resources.Info.Images[resource].MipCount);
+        var description = Describe(0, Format.D32Sfloat, GuestPixelFormat.Bits32Float, 4, 4, 2);
+        var image = run.Harness.CreateImage(description);
+        float[] texels = [.. Enumerable.Repeat(0.25f, 16), .. Enumerable.Repeat(0.75f, 4)];
+        if (mixedQuad) new float[] { 0.25f, 0.75f, 0.5f, 1f }.CopyTo(texels, 16);
+        run.Harness.UploadImage(image, MemoryMarshal.AsBytes<float>(texels), ImageTestHarness.WholeImageCopies(description, 0));
+        var views = Enumerable.Range(0, 2).Select(mip => new DescriptorImageInfo
+        {
+            ImageView = image.GetOrCreateView(ImageViewDescription.Default with
+            {
+                Format = Format.D32Sfloat, Usage = ImageUsageFlags.SampledBit,
+                BaseLevel = (uint)mip, LevelCount = 1,
+            }),
+            ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+        }).ToArray();
+        var sampler = run.Runner.CreateSampler(Filter.Nearest, CompareOp.Less);
+        run.Dispatch(run.BindImages(new Dictionary<int, DescriptorImageInfo[]> { [resource] = views }, [sampler]),
+            command => image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command));
+        for (var index = 0; index < 4; index++)
+            Assert.Equal(mixedQuad ? new float[] { 0f, 1f, 1f, 0f }[index] : expected,
+                BitConverter.UInt32BitsToSingle(run.ResultWord(index)));
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Explicit-LOD comparison gather readback on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
     [Theory]
