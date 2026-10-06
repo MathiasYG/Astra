@@ -1758,9 +1758,13 @@ public sealed class DirectImageTableTests
         first.SetPhiOperands([0, 2], [proof.LoopCounter!, second]);
         second.SetPhiOperands([0, 1], [proof.LoopCounter!, first]);
         Assert.True(IndirectSelectorValues.IsLoopCounterAlias(first, proof.LoopCounter!));
-        var evaluator = new RuntimeValueEvaluator(plan, WorkgroupLoopImageInputs(), proof.Input, 0, proof.LoopCounter, 7);
+        var aliases = new Dictionary<ScalarValue, bool>();
+        var evaluator = new RuntimeValueEvaluator(plan, WorkgroupLoopImageInputs(), proof.Input, 0, proof.LoopCounter, 7, aliases);
         Assert.True(evaluator.Evaluate(first, out var value));
         Assert.Equal(7u, value);
+        var next = new RuntimeValueEvaluator(plan, WorkgroupLoopImageInputs(), proof.Input, 1, proof.LoopCounter, 9, aliases);
+        Assert.True(next.Evaluate(first, out value));
+        Assert.Equal(9u, value);
         second.SetPhiOperands([0, 1], [ScalarValue.ConstantOf(8u), first]);
         Assert.False(IndirectSelectorValues.IsLoopCounterAlias(first, proof.LoopCounter!));
         var rejected = new RuntimeValueEvaluator(plan, WorkgroupLoopImageInputs(), proof.Input, 0, proof.LoopCounter, 7);

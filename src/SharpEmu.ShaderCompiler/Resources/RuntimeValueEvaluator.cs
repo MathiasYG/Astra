@@ -24,16 +24,19 @@ public sealed class RuntimeValueEvaluator
     private readonly uint _workgroupId;
     private readonly ScalarValue? _loopCounter;
     private readonly uint _loopValue;
+    private readonly Dictionary<ScalarValue, bool>? _loopAliases;
 
     // Only bounded descriptor proofs supply a workgroup value. Ordinary host
     // evaluation continues to reject this GPU input.
     internal RuntimeValueEvaluator(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
-        ScalarValue workgroupInput, uint workgroupId, ScalarValue? loopCounter = null, uint loopValue = 0) : this(plan, inputs)
+        ScalarValue workgroupInput, uint workgroupId, ScalarValue? loopCounter = null, uint loopValue = 0,
+        Dictionary<ScalarValue, bool>? loopAliases = null) : this(plan, inputs)
     {
         _workgroupInput = workgroupInput;
         _workgroupId = workgroupId;
         _loopCounter = loopCounter;
         _loopValue = loopValue;
+        _loopAliases = loopCounter is null ? null : loopAliases ?? new();
         // Proof evaluation substitutes one GPU workgroup input and must use the
         // interpreter's bounded-read checks rather than the ordinary compiled path.
         _compiled = null;
@@ -99,7 +102,8 @@ public sealed class RuntimeValueEvaluator
     public bool EvaluateWide(ScalarValue value, out ulong result)
     {
         result = 0;
-        if (_loopCounter is not null && IndirectSelectorValues.IsLoopCounterAlias(value, _loopCounter))
+        if (_loopCounter is not null && (ReferenceEquals(value, _loopCounter) ||
+            value.Kind == ScalarValueKind.Phi && IsLoopAlias(value)))
         {
             result = _loopValue;
             return true;
@@ -146,6 +150,14 @@ public sealed class RuntimeValueEvaluator
         _cache[value] = computed;
         result = computed;
         return true;
+    }
+
+    private bool IsLoopAlias(ScalarValue value)
+    {
+        if (_loopAliases!.TryGetValue(value, out var alias)) return alias;
+        alias = IndirectSelectorValues.IsLoopCounterAlias(value, _loopCounter!);
+        _loopAliases.Add(value, alias);
+        return alias;
     }
 
     private bool Operand(ScalarValue value, int index, out ulong result) => EvaluateWide(value.Operands[index], out result);

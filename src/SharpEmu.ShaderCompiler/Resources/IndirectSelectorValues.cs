@@ -679,7 +679,8 @@ public sealed class IndirectSelectorValues
                         if (counter is not null) return false;
                         counter = candidate; initial = candidateInitial; limit = candidateLimit;
                     }
-                if (counter is null || loops.Any(value => !IsLoopCounterAlias(value, counter))) return false;
+                if (counter is null || initial is null || limit is null ||
+                    loops.Any(value => !IsLoopCounterAlias(value, counter))) return false;
                 var boundsMemo = new Dictionary<ScalarValue, ScalarValue>();
                 if (!plan.ValidateRuntimeValue(plan.Graph.Substitute(initial, replacements, boundsMemo)) ||
                     !plan.ValidateRuntimeValue(plan.Graph.Substitute(limit, replacements, boundsMemo))) return false;
@@ -931,6 +932,7 @@ public sealed class IndirectSelectorValues
                 }
             }
             var repeatedInputs = new HashSet<string>();
+            var loopAliases = new Dictionary<ScalarValue, bool>();
             foreach (var group in inputValues)
             {
                 if (inputFrontier.Count != 0)
@@ -960,7 +962,7 @@ public sealed class IndirectSelectorValues
                 for (var iteration = first; iteration < end; iteration++)
                 {
                     if (++evaluations > MaximumCombinations) return false;
-                    var evaluator = new RuntimeValueEvaluator(plan, clean, Input, group, LoopCounter, iteration);
+                    var evaluator = new RuntimeValueEvaluator(plan, clean, Input, group, LoopCounter, iteration, loopAliases);
                     var key = group;
                     if (Key is not null && !evaluator.Evaluate(Key, out key)) return false;
                     var words = new uint[Handle.Operands.Length];
