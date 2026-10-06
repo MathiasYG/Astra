@@ -105,6 +105,23 @@ public sealed class RegisterWriteTableTests
         Assert.Equal(0x00040008u, banks.Context.SampleCoverageMaskX0Y1X1Y1);
     }
 
+    [Theory]
+    [InlineData(0x40u, true)]
+    [InlineData(0u, false)]
+    [InlineData(0x68000040u, true)]
+    public void DepthOverridePreservesForcedShaderOrderAndResetsItOnLaterWrites(uint raw, bool forced)
+    {
+        var banks = NewBanks();
+        Assert.Equal(1u, WriteContext(banks, DbRenderOverride, raw));
+        Assert.Equal(forced, banks.Context.DepthRenderOverride.ForceShaderDepthOrder);
+        Assert.Equal(forced, banks.Context.Copy().DepthRenderOverride.ForceShaderDepthOrder);
+        Assert.Equal((raw & 0x20000000u) != 0, banks.Context.DepthRenderOverride.ForceZValid);
+        Assert.Equal((raw & 0x08000000u) != 0, banks.Context.DepthRenderOverride.ForceZDirty);
+        Assert.Equal((raw & 0x40000000u) != 0, banks.Context.DepthRenderOverride.ForceStencilValid);
+        Assert.Equal(1u, WriteContext(banks, DbRenderOverride, 0));
+        Assert.False(banks.Context.DepthRenderOverride.ForceShaderDepthOrder);
+    }
+
     [Fact]
     public void SamplePositionsDecodeSignedOffsetsAndQuadPixels()
     {

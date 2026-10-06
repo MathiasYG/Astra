@@ -202,6 +202,7 @@ public struct ColorControlRegisters
 
 public struct DepthRenderOverrideRegisters
 {
+    public bool ForceShaderDepthOrder;
     public bool ForceZValid;
     public bool ForceZDirty;
     public bool ForceStencilValid;
@@ -209,6 +210,7 @@ public struct DepthRenderOverrideRegisters
 
     public static DepthRenderOverrideRegisters Decode(uint value) => new()
     {
+        ForceShaderDepthOrder = RegisterField.Bit(value, 6),
         ForceZValid = (value & 0x2000_0000u) != 0,
         ForceZDirty = (value & 0x0800_0000u) != 0,
         ForceStencilValid = (value & 0x4000_0000u) != 0,
