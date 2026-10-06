@@ -5048,11 +5048,18 @@ public static partial class Gen5SpirvTranslator
                 var key = Load(_uintType, scratch);
                 var emitted = true;
                 var caseError = string.Empty;
-                foreach (var candidate in candidates)
+                foreach (var group in candidates.GroupBy(candidate => candidate.Sampler))
                 {
-                    EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, key, UInt(candidate.Offset)), () =>
+                    uint? condition = null;
+                    foreach (var candidate in group)
                     {
-                        if (!TryEmitImage(instruction, image, out caseError, candidate.Sampler)) emitted = false;
+                        var matches = _module.AddInstruction(SpirvOp.IEqual, _boolType, key, UInt(candidate.Offset));
+                        condition = condition is { } previous
+                            ? _module.AddInstruction(SpirvOp.LogicalOr, _boolType, previous, matches) : matches;
+                    }
+                    EmitConditional(condition!.Value, () =>
+                    {
+                        if (!TryEmitImage(instruction, image, out caseError, group.Key)) emitted = false;
                     });
                     if (!emitted) break;
                 }

@@ -33,12 +33,12 @@ public static partial class Gen5MslTranslator
                     error = "finite sampler has no executed selector read";
                     return false;
                 }
-                foreach (var candidate in candidates)
+                foreach (var group in candidates.GroupBy(candidate => candidate.Sampler))
                 {
-                    Line($"if ({scratch} == {candidate.Offset}u)");
+                    Line($"if ({string.Join(" || ", group.Select(candidate => $"{scratch} == {candidate.Offset}u"))})");
                     Line("{");
                     _indent++;
-                    var emitted = TryEmitImage(instruction, image, out error, candidate.Sampler);
+                    var emitted = TryEmitImage(instruction, image, out error, group.Key);
                     _indent--;
                     Line("}");
                     if (!emitted) return false;

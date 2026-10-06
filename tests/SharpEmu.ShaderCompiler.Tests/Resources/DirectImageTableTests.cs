@@ -1652,6 +1652,31 @@ public sealed class DirectImageTableTests
     }
 
     [Fact]
+    public void RepeatedSamplerKeysShareTheirImageOperationBodies()
+    {
+        var (plan, inputs) = WorkgroupLoopSamplers();
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var finite = resources.FiniteSamplersByMemoryIndex.Values.Single();
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 12),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+            { LocalSizeX = 1, ThreadCountX = 2, ComputeSystemRegisters = new(12, null, null, null) };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var original, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var originalMetal, out error), error);
+        finite.Candidates = Enumerable.Range(0, 32)
+            .Select(index => new FiniteSamplerCandidate((uint)index * 32, (uint)index % 2)).ToArray();
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var repeated, out error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var repeatedMetal, out error), error);
+        // The extra comparisons grow linearly; the sampling bodies must not be
+        // duplicated sixteen times for the same two native samplers.
+        Assert.True(repeated.Spirv.Length < original.Spirv.Length * 2);
+        Assert.True(repeatedMetal.Source.Length < originalMetal.Source.Length * 2);
+        Assert.Contains("992u", repeatedMetal.Source);
+    }
+
+    [Fact]
     public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
     {
         var program = Program([.. WorkgroupImageProgram().Instructions.Where(instruction => instruction.Pc < 40),
