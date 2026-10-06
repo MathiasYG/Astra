@@ -285,6 +285,15 @@ public sealed partial class ResourceTracker
     private bool TryGetBoundedRuntimeSelector(ScalarValue offset, uint loadPc, out ScalarValue selector, out ScalarValue limit)
     {
         selector = limit = null!;
+        // A constant record-field offset does not change the guarded counter.
+        // Candidate construction still evaluates the complete offset expression.
+        while (offset.Kind == ScalarValueKind.Operation && offset.Operation == ScalarOperation.IAdd32 &&
+            offset.Operands.Length == 2)
+        {
+            if (offset.Operands[1].IsConstant) offset = offset.Operands[0];
+            else if (offset.Operands[0].IsConstant) offset = offset.Operands[1];
+            else return false;
+        }
         if (offset.Kind != ScalarValueKind.Operation ||
             offset.Operation is not (ScalarOperation.IMul32 or ScalarOperation.ShiftLeft32) ||
             offset.Operands.Length != 2) return false;

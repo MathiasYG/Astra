@@ -256,6 +256,40 @@ public sealed class DirectImageTableTests
         Assert.Empty(snapshot.Images);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RuntimeBoundPreservesConstantFieldOffsetsAndRejectsVaryingOffsets(bool varying)
+    {
+        var program = Program([
+            ScalarLoad(0, 4, 2), MoveScalar(8, 8, 0),
+            Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),
+            Sop2(16, "SCselectB64", 106, Gen5Operand.Scalar(126), Operand(0)),
+            Branch(20, "SCbranchVccz", 10),
+            Sop2(24, "SMulI32", 10, Gen5Operand.Scalar(8), Operand(64)),
+            Sop2(28, "SAddI32", 10, Gen5Operand.Scalar(10), varying ? Gen5Operand.Scalar(3) : Operand(32)),
+            ScalarLoad(32, 0, 16, 8, dynamicOffsetRegister: 10),
+            ScalarLoad(40, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 10),
+            Image(48, "ImageSampleLz", 16, 24, dmask: 1),
+            Sop2(56, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
+            Branch(60, "SBranch", -13), EndProgram(64),
+        ]);
+        if (varying)
+        {
+            Assert.Throws<ResourcePlanException>(() => Extract(program, userDataCount: 6));
+            return;
+        }
+        var plan = Extract(program, userDataCount: 6);
+        bool Read(ulong address, out uint word) =>
+            ReadRuntimeBoundMemory(address == 0x8000 ? address : address - 32, 2, out word);
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan,
+            Inputs([0x1000, 0, 0, 0, 0x8000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.Equal(0xFFF000u, snapshot.Samplers[0][1]);
+    }
+
     private static Gen5ShaderProgram RuntimeMemoryBoundProgram(bool writes = false) => Program([
         ScalarLoad(0, 4, 2), MoveScalar(8, 8, 0),
         Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),
