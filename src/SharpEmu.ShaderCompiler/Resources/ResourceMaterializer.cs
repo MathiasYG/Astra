@@ -143,6 +143,8 @@ public static class ResourceMaterializer
                     ComputeState = inputs.ComputeState, TablePhase = inputs.TablePhase,
                     OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
                     ReadImageWriteRange = inputs.ReadImageWriteRange,
+                    ReadPointSampledByteDomain = inputs.ReadPointSampledByteDomain,
+                    ReadFlatParameterDomain = inputs.ReadFlatParameterDomain,
                 };
             }
         }

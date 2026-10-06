@@ -5,6 +5,7 @@ using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
@@ -13,6 +14,31 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class ShaderProgramCacheTests : IDisposable
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ConvertedVertexParameterDomainRequiresReadableFiniteRecords(bool unreadable)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA,
+            [0x7E1E0280, 0xE00C2000, 0x80000C00, 0x7E1E110F, 0xF8000233, 0x00000F09, 0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Vertex, PipelineTestGuest.BufferDescriptor(DataBase, 8, 2, 71));
+        _guest.WriteWords(DataBase, 0, 0x3E000000, 0, 0xBE000000);
+        var pixel = new Gen5ShaderProgram(CodeB, [new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp,
+            "VInterpMovF32", [2u], [Gen5Operand.Vector(2)], [Gen5Operand.Vector(2)], new Gen5InterpolationControl(3, 1))]);
+        var reader = _guest.Programs.CreateFlatParameterDomainReader(source, pixel,
+            new PixelInputInfo { InputCount = 4, InterpolatorSettings = [0, 1, 2, 3] });
+        bool Clean(ulong address, out uint word)
+        {
+            word = 0;
+            return !(unreadable && address == DataBase + 12) && _guest.Host.TryReadCleanGuestWord(address, out word);
+        }
+        Assert.Equal(!unreadable, reader(3, 1, Clean, out var values));
+        if (!unreadable) Assert.Equal(new uint[] { 0, 1, uint.MaxValue }, values);
+        _guest.WriteWords(DataBase + 4, 0x7C000000);
+        Assert.False(reader(3, 1, Clean, out values));
+        Assert.Empty(values);
+    }
+
     [Theory]
     [InlineData(1u, 4)]
     [InlineData(2u, 8)]
@@ -111,6 +137,69 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.NotEqual(enabled, Compile(0));
         Assert.Equal(enabled, Compile(0xFFFE));
         Assert.Contains(_guest.Compiler.Requests, request => request.PixelShaderSampleExclusionMask == 0xFFFE);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void FlatParameterDomainRequiresSynchronizationBeforeReadingGpuData(bool completed)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA,
+            [0x7E1E0280, 0xE00C2000, 0x80000C00, 0x7E1E110F, 0xF8000233, 0x00000F09, 0xBF810000]);
+        var source = _guest.Source(CodeA, ShaderStage.Vertex, PipelineTestGuest.BufferDescriptor(DataBase, 8, 1, 71));
+        _guest.WriteWords(DataBase, 0, 0x3E000000);
+        var pixel = new Gen5ShaderProgram(CodeB, [new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp,
+            "VInterpMovF32", [2u], [Gen5Operand.Vector(2)], [Gen5Operand.Vector(2)], new Gen5InterpolationControl(3, 1))]);
+        var synchronized = false;
+        var calls = 0;
+        var dataReads = 0;
+        bool Synchronize(ulong address, ulong size)
+        {
+            Assert.Equal(DataBase, address);
+            Assert.Equal(8ul, size);
+            calls++;
+            return synchronized = completed;
+        }
+        bool Read(ulong address, out uint word)
+        {
+            dataReads++;
+            Assert.True(synchronized);
+            return _guest.Host.TryReadCleanGuestWord(address, out word);
+        }
+        var reader = _guest.Programs.CreateFlatParameterDomainReader(source, pixel,
+            new PixelInputInfo { InputCount = 4, InterpolatorSettings = [0, 1, 2, 3] }, Synchronize);
+        Assert.Equal(completed, reader(3, 1, Read, out var values));
+        Assert.Equal(1, calls);
+        Assert.Equal(completed ? 1 : 0, dataReads);
+        if (completed) Assert.Equal(new uint[] { 0, 1 }, values);
+        else Assert.Empty(values);
+    }
+
+    [Theory]
+    [InlineData("skip-initialization")]
+    [InlineData("skip-conversion")]
+    [InlineData("expand-execution")]
+    [InlineData("normalized-format")]
+    [InlineData("default-parameter")]
+    public void FlatParameterDomainDeclinesUnprovenExecutionOrConversion(string caseName)
+    {
+        uint[] words = caseName switch
+        {
+            "skip-initialization" => [0xBF840001, 0x7E1E0280, 0xE00C2000, 0x80000C00, 0x7E1E110F, 0xF8000233, 0x00000F09, 0xBF810000],
+            "skip-conversion" => [0x7E1E0280, 0xE00C2000, 0x80000C00, 0xBF840001, 0x7E1E110F, 0xF8000233, 0x00000F09, 0xBF810000],
+            "expand-execution" => [0x7E1E0280, 0xE00C2000, 0x80000C00, 0x7E1E110F, 0xBEFE04C1, 0xF8000233, 0x00000F09, 0xBF810000],
+            _ => [0x7E1E0280, 0xE00C2000, 0x80000C00, 0x7E1E110F, 0xF8000233, 0x00000F09, 0xBF810000],
+        };
+        _guest.RegisterProgram(CodeA, HeaderA, words);
+        var source = _guest.Source(CodeA, ShaderStage.Vertex,
+            PipelineTestGuest.BufferDescriptor(DataBase, 8, 1, caseName == "normalized-format" ? 65u : 71u));
+        _guest.WriteWords(DataBase, 0, 0x3E000000);
+        var pixel = new Gen5ShaderProgram(CodeB, [new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp,
+            "VInterpMovF32", [2u], [Gen5Operand.Vector(2)], [Gen5Operand.Vector(2)], new Gen5InterpolationControl(3, 1))]);
+        var reader = _guest.Programs.CreateFlatParameterDomainReader(source, pixel,
+            new PixelInputInfo { InputCount = 4, InterpolatorSettings = [0, 1, 2, caseName == "default-parameter" ? 0x23u : 3u] });
+        Assert.False(reader(3, 1, _guest.Host.TryReadCleanGuestWord, out var values));
+        Assert.Empty(values);
     }
 
     private const ulong CodeA = PipelineTestGuest.MemoryBase + 0x1000;

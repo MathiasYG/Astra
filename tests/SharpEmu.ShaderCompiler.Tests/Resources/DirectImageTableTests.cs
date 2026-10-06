@@ -606,6 +606,46 @@ public sealed class DirectImageTableTests
         Assert.Equal(accepted, IndirectSelectorValues.TryGetPackedReductionOrigins(plan, 52, 20, 68, out _));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void FlatParameterDescriptorTableRequiresTheHostDomainAndPreservesScalarLoads(bool provideDomain)
+    {
+        var program = Program([
+            Sop1(0, "SMovB64", 6, Gen5Operand.Scalar(126)),
+            new(4, Gen5ShaderEncoding.Vintrp, "VInterpMovF32", [2u], [Gen5Operand.Vector(2)],
+                [Gen5Operand.Vector(2)], new Gen5InterpolationControl(3, 1)),
+            Sop1(8, "SFF1I32B64", 9, Gen5Operand.Scalar(6)),
+            new(12, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(2), Gen5Operand.Scalar(9), Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(10)], null),
+            Sop2(20, "SMulI32", 9, Gen5Operand.Scalar(10), Operand(64)),
+            ScalarBufferLoad(24, 0, 16, 8, dynamicOffsetRegister: 9),
+            ScalarBufferLoad(32, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 9),
+            Image(40, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1), EndProgram(48),
+        ]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, Hash, 0, 8);
+        var original = WorkgroupImageInputs();
+        bool Domain(uint attribute, uint channel, GuestWordReader reader, out uint[] values)
+        {
+            Assert.Equal(3u, attribute); Assert.Equal(1u, channel);
+            values = [0, 1]; return true;
+        }
+        var inputs = new ResourceRuntimeInputs { UserData = original.UserData,
+            ReadMemory = original.ReadMemory, ReadCleanMemory = original.ReadCleanMemory,
+            ReadFlatParameterDomain = provideDomain ? Domain : null };
+        var snapshot = new ResourceSnapshot(); var specialization = new ResourceSpecialization();
+        Assert.Equal(provideDomain, ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        if (provideDomain)
+        {
+            Assert.True(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!
+                .TryEvaluate(plan, inputs, out var keys, out _));
+            Assert.Equal(new uint[] { 0, 64 }, keys);
+            Assert.Equal(2, snapshot.Images.Length);
+            Assert.Contains(plan.Graph.Program.Instructions, instruction => instruction.Pc == 24 && instruction.Opcode == "SBufferLoadDwordx8");
+            Assert.NotEmpty(plan.DynamicReads);
+        }
+    }
+
     private static Gen5ShaderProgram RuntimeMemoryBoundProgram(bool writes = false) => Program([
         ScalarLoad(0, 4, 2), MoveScalar(8, 8, 0),
         Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),

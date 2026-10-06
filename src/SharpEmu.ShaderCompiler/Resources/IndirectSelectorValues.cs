@@ -578,13 +578,14 @@ public sealed class IndirectSelectorValues
 
     // Enumerate the actual dispatch domain, never a guessed workgroup ID. The
     // original scalar loads and their run-time image selector remain in the shader.
-    internal sealed record WorkgroupDescriptor(ScalarValue Handle, ScalarValue Input, ScalarValue? Key)
+    internal sealed record WorkgroupDescriptor(ScalarValue Handle, ScalarValue Input, ScalarValue? Key,
+        uint? FlatAttribute = null, uint FlatChannel = 0)
     {
         internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue handle, ScalarValue? key,
             out WorkgroupDescriptor result)
         {
             result = null!;
-            if (plan.Stage != ShaderStage.Compute ||
+            if (plan.Stage is not (ShaderStage.Compute or ShaderStage.Pixel) ||
                 handle.Kind is not (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) ||
                 handle.Operands.Length != (handle.Kind == ScalarValueKind.ImageHandle ? 8 : 4)) return false;
             ScalarValue? input = null;
@@ -600,7 +601,12 @@ public sealed class IndirectSelectorValues
                     input = value;
                 }
                 // No lane-dependent proof or branch-dependent descriptor is implied.
-                else if (value.Kind == ScalarValueKind.FirstLane) return false;
+                else if (value.Kind == ScalarValueKind.FirstLane)
+                {
+                    if (plan.Stage != ShaderStage.Pixel || input is not null && !ReferenceEquals(input, value)) return false;
+                    input = value;
+                    continue;
+                }
                 foreach (var operand in value.Operands) pending.Push(operand);
             }
             if (input is null) return false;
@@ -610,7 +616,64 @@ public sealed class IndirectSelectorValues
                 if (!plan.ValidateRuntimeValue(plan.Graph.Substitute(word, replacements, memo))) return false;
             if (key is not null && (key.Type != ScalarValueType.U32 ||
                 !plan.ValidateRuntimeValue(plan.Graph.Substitute(key, replacements, memo)))) return false;
-            result = new(handle, input, key);
+            uint? attribute = null; uint channel = 0;
+            if (input.Kind == ScalarValueKind.FirstLane)
+            {
+                var instructions = plan.Graph.Program.Instructions;
+                var lane = instructions.FirstOrDefault(instruction => instruction.Pc == input.Payload);
+                if (lane is not { Opcode: "VReadlaneB32", Sources.Count: >= 1 } ||
+                    lane.Sources[0].Kind != Gen5OperandKind.VectorRegister) return false;
+                var definition = instructions.Where(instruction => instruction.Pc < lane.Pc &&
+                    Builder.WritesRegister(instruction, lane.Sources[0])).LastOrDefault();
+                // P0 is one vertex's parameter, not a barycentric difference.
+                if (definition is not { Opcode: "VInterpMovF32", Control: Gen5InterpolationControl interpolation } ||
+                    (definition.Words[0] & 255) != 2 || interpolation.Channel >= 4 ||
+                    instructions.Any(instruction => instruction.Pc > definition.Pc && instruction.Pc < lane.Pc &&
+                        Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _))) return false;
+                if (lane.Sources.Count < 2 || lane.Sources[1].Kind != Gen5OperandKind.ScalarRegister) return false;
+                var scan = instructions.Where(instruction => instruction.Pc < lane.Pc &&
+                    Builder.WritesRegister(instruction, lane.Sources[1])).LastOrDefault();
+                if (scan is not { Opcode: "SFF1I32B64", Sources.Count: 1 } ||
+                    scan.Sources[0].Kind != Gen5OperandKind.ScalarRegister) return false;
+                var capture = instructions.Where(instruction => instruction.Pc < definition.Pc &&
+                    Builder.WritesSavedMask(instruction, scan.Sources[0])).LastOrDefault();
+                if (capture is not { Opcode: "SMovB64", Sources.Count: 1 } ||
+                    capture.Sources[0] != Gen5Operand.Scalar(126) ||
+                    instructions.Any(instruction => instruction.Pc > capture.Pc && instruction.Pc < lane.Pc &&
+                        (Builder.WritesSavedMask(instruction, scan.Sources[0]) || Builder.MayExpandExecution(instruction)))) return false;
+                if (!Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(plan.Graph.Program, capture.Pc, true).Contains(definition.Pc) ||
+                    !Gen5ExecFullAnalysis.AnalyzeInitializedLanes(plan.Graph.Program, definition.Pc, true).Contains(lane.Pc)) return false;
+                var loopEnd = lane.Pc;
+                foreach (var edge in instructions.Where(instruction => instruction.Pc > lane.Pc))
+                    if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var start) && start > definition.Pc && start <= lane.Pc)
+                        loopEnd = Math.Max(loopEnd, edge.Pc);
+                if (instructions.Any(instruction => instruction.Pc > definition.Pc && instruction.Pc <= loopEnd &&
+                    Builder.WritesRegister(instruction, lane.Sources[0]))) return false;
+                var flow = plan.Graph.ControlFlow;
+                var definitionBlock = Enumerable.Range(0, flow.Blocks.Count).First(index =>
+                    definition.Pc >= flow.Blocks[index].StartPc && definition.Pc < flow.Blocks[index].EndPc);
+                var readBlock = Enumerable.Range(0, flow.Blocks.Count).First(index =>
+                    lane.Pc >= flow.Blocks[index].StartPc && lane.Pc < flow.Blocks[index].EndPc);
+                var captureBlock = flow.BlockOf(capture.Pc);
+                var capturePending = new Stack<int>(); capturePending.Push(0);
+                var captureSeen = new HashSet<int>();
+                while (capturePending.TryPop(out var block))
+                {
+                    if (block == captureBlock || !captureSeen.Add(block)) continue;
+                    if (block == definitionBlock) return false;
+                    foreach (var next in flow.Successors[block]) capturePending.Push(next);
+                }
+                var pendingBlocks = new Stack<int>(); pendingBlocks.Push(0);
+                var seenBlocks = new HashSet<int>();
+                while (pendingBlocks.TryPop(out var block))
+                {
+                    if (block == definitionBlock || !seenBlocks.Add(block)) continue;
+                    if (block == readBlock) return false;
+                    foreach (var next in flow.Successors[block]) pendingBlocks.Push(next);
+                }
+                attribute = interpolation.Attribute; channel = interpolation.Channel;
+            }
+            result = new(handle, input, key, attribute, channel);
             return true;
         }
 
@@ -618,13 +681,27 @@ public sealed class IndirectSelectorValues
             out uint[] keys, out uint[][] descriptors)
         {
             keys = []; descriptors = [];
-            if (inputs.ReadCleanMemory is null || inputs.ComputeState is not { } dispatch) return false;
-            var count = Input.Payload switch
+            if (inputs.OtherStageMayWriteMemory || inputs.ReadCleanMemory is null) return false;
+            uint[] inputValues;
+            if (FlatAttribute is { } attribute)
             {
-                0 => dispatch.DispatchGroupsX, 1 => dispatch.DispatchGroupsY, 2 => dispatch.DispatchGroupsZ, _ => 0u,
-            };
-            if (count == 0 || count > MaximumCombinations || dispatch.DispatchGroupsX == 0 ||
-                dispatch.DispatchGroupsY == 0 || dispatch.DispatchGroupsZ == 0) return false;
+                if (plan.Memory.Entries.Any(memory => memory.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) && memory.Access is MemoryAccess.Write or MemoryAccess.Atomic) ||
+                    inputs.ReadFlatParameterDomain is null ||
+                    !inputs.ReadFlatParameterDomain(attribute, FlatChannel, inputs.ReadCleanMemory, out inputValues) ||
+                    inputValues.Length == 0 || inputValues.Length > MaximumCombinations) return false;
+                inputValues = inputValues.Distinct().ToArray();
+            }
+            else
+            {
+                if (inputs.ComputeState is not { } dispatch) return false;
+                var count = Input.Payload switch
+                {
+                    0 => dispatch.DispatchGroupsX, 1 => dispatch.DispatchGroupsY, 2 => dispatch.DispatchGroupsZ, _ => 0u,
+                };
+                if (count == 0 || count > MaximumCombinations || dispatch.DispatchGroupsX == 0 ||
+                    dispatch.DispatchGroupsY == 0 || dispatch.DispatchGroupsZ == 0) return false;
+                inputValues = Enumerable.Range(0, (int)count).Select(value => (uint)value).ToArray();
+            }
             var captured = new Dictionary<ulong, uint>();
             bool Read(ulong address, out uint word)
             {
@@ -653,7 +730,7 @@ public sealed class IndirectSelectorValues
                 var extra = (ulong)memory.Offset + Math.Max(16ul, (ulong)memory.DataBits * memory.DataDwords / 8);
                 writeHandles[output] = Math.Max(writeHandles.GetValueOrDefault(output), extra);
             }
-            for (uint group = 0; group < count; group++)
+            foreach (var group in inputValues)
             {
                 var evaluator = new RuntimeValueEvaluator(plan, clean, Input, group);
                 var key = group;

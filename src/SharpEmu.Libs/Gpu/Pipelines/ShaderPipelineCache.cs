@@ -151,6 +151,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     {
                         PixelInfo = pixelInfo,
                         OtherStageMayWriteMemory = vertexMayWriteMemory,
+                        ReadFlatParameterDomain = _programs.CreateFlatParameterDomainReader(vertexSource,
+                            _programs.Decode(pixelSource), pixelInfo!, _host.TrySynchronizeVertexDomain),
                         PixelOutputs = pixelOutputs,
                         PixelInputEnable = shaderInterface.PixelInputEnable,
                         PixelInputAddress = shaderInterface.PixelInputAddress,

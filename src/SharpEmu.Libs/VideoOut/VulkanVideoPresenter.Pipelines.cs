@@ -165,6 +165,21 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryGetImageWriteRange(ReadOnlySpan<uint> image, out ulong address, out ulong size) =>
             ImageRequestBuilders.TryGetStorageAllocationRange(image, out address, out size);
 
+        public bool TrySynchronizeVertexDomain(ulong address, ulong size)
+        {
+            if (size == 0 || address >= 1ul << 48 || size > (1ul << 48) - address || !_guestMemory.CanRead(address, size)) return false;
+            foreach (var identifier in _trackedImageBindings)
+            {
+                var image = _imageCache.GetImage(identifier);
+                if (!image.Binding.IsTarget && !image.Binding.ShaderWrite) continue;
+                var data = image.Description.Data;
+                if (data.Size != 0 && address < data.Address + data.Size && data.Address < address + size) return false;
+            }
+            if (_imageCache.HasGpuModifiedImageBytes(address, size)) return false;
+            return _bufferCache.TrySynchronizeCpuRead(address, size,
+                SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.ShaderResourceRead);
+        }
+
         public bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
             uint channels, SharpEmu.ShaderCompiler.Resources.GuestWordReader cleanReader, out uint[] values)
         {

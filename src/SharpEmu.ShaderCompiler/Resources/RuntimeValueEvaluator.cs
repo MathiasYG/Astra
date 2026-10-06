@@ -95,7 +95,7 @@ public sealed class RuntimeValueEvaluator
     public bool EvaluateWide(ScalarValue value, out ulong result)
     {
         result = 0;
-        if (value.Kind == ScalarValueKind.WorkgroupId && ReferenceEquals(value, _workgroupInput))
+        if (value.Kind is ScalarValueKind.WorkgroupId or ScalarValueKind.FirstLane && ReferenceEquals(value, _workgroupInput))
         {
             result = _workgroupId;
             return true;

@@ -11,6 +11,7 @@ public delegate bool GuestWordReader(ulong address, out uint word);
 public delegate bool GuestImageRangeReader(ReadOnlySpan<uint> image, out ulong address, out ulong size);
 public delegate bool GuestSampledByteDomainReader(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
     uint channels, GuestWordReader cleanReader, out uint[] values);
+public delegate bool FlatParameterDomainReader(uint attribute, uint channel, GuestWordReader cleanReader, out uint[] values);
 
 // What one draw supplies to materialise a plan: its user data, the shader base and
 // the two memory readers. The clean reader refuses memory the GPU may still own.
@@ -24,6 +25,7 @@ public sealed class ResourceRuntimeInputs
     public bool OtherStageMayWriteMemory { get; init; }
     public GuestImageRangeReader? ReadImageWriteRange { get; init; }
     public GuestSampledByteDomainReader? ReadPointSampledByteDomain { get; init; }
+    public FlatParameterDomainReader? ReadFlatParameterDomain { get; init; }
 
     // Told true before the flattened table's words are evaluated and false after, so a reader
     // wrapper can tell the words only the table reads from those the descriptors depend on.
@@ -43,6 +45,7 @@ public sealed class ResourceRuntimeInputs
         OtherStageMayWriteMemory = OtherStageMayWriteMemory,
         ReadImageWriteRange = ReadImageWriteRange,
         ReadPointSampledByteDomain = ReadPointSampledByteDomain,
+        ReadFlatParameterDomain = ReadFlatParameterDomain,
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
