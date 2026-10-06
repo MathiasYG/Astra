@@ -65,7 +65,14 @@ public sealed class DirectImageTableTests
             return;
         }
         Assert.Equal(expectedCandidates > 1, specialization.Images[0].IndirectSearchIterations != 0);
+        Assert.Equal(0xFFF000u, snapshot.Samplers[0][1]);
         if (expectedCandidates == 1) Assert.Equal(0x2000u, snapshot.Images[0][0]);
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info,
+            BindingLayout.CollectUserDataRegisters(program, 0, 3), false,
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout),
+            out _, out var error), error);
     }
 
     [Theory]
@@ -88,9 +95,14 @@ public sealed class DirectImageTableTests
             Sop2(44, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(1)),
             Branch(48, "SBranch", -12), EndProgram(56),
         ]);
+        if (!accepted)
+        {
+            Assert.Throws<ResourcePlanException>(() => Extract(program, userDataCount: 3));
+            return;
+        }
         var plan = Extract(program, userDataCount: 3);
         var source = plan.DescriptorSources[(int)plan.Info.Images[0].Source];
-        Assert.Equal(accepted, source.IndirectImage?.CandidateCountSource is not null);
+        Assert.NotNull(source.IndirectImage?.CandidateCountSource);
     }
 
     [Fact]
@@ -111,6 +123,7 @@ public sealed class DirectImageTableTests
         var plan = Extract(program, userDataCount: 3);
         var cache = new ResourceMaterializationCache();
         var firstDescriptorBase = 0x2000u;
+        var secondSamplerWord = 0xFFF000u;
         bool Read(ulong address, out uint word)
         {
             word = 0;
@@ -122,7 +135,7 @@ public sealed class DirectImageTableTests
                 0 => record == 0 ? firstDescriptorBase : 0x2100u,
                 1 => 20u << 20,
                 3 => 0xFACu | (9u << 28),
-                9 => 0xFFF000,
+                9 => record == 1 ? secondSamplerWord : 0xFFF000,
                 _ => 0,
             };
             return true;
@@ -153,6 +166,13 @@ public sealed class DirectImageTableTests
         Assert.NotSame(first, changed);
         Assert.Equal(0x2200u, changed.Images[0][0]);
         Assert.Equal((1, 2), (cache.Hits, cache.Misses));
+        Assert.Equal(0xFFF000u, changed.Samplers[0][1]);
+        secondSamplerWord = 0xFFE000;
+        var rejected = changed;
+        var rejectedSpecialization = new ResourceSpecialization();
+        Assert.False(cache.Materialize(plan, Inputs([0x1000, 0, 2], readCleanMemory: Read), ReadResident,
+            ref rejected, ref rejectedSpecialization, out _));
+        Assert.Same(changed, rejected);
     }
 
     [Theory]
@@ -266,6 +286,231 @@ public sealed class DirectImageTableTests
             _ => 0,
         };
         return true;
+    }
+
+    [Theory]
+    [InlineData(5u, 0u, false, false, true)]
+    [InlineData(60u, 0u, false, false, true)]
+    [InlineData(3u, 0u, false, false, false)]
+    [InlineData(5u, 3u, false, false, false)]
+    [InlineData(5u, 0u, true, false, false)]
+    [InlineData(5u, 0u, false, true, false)]
+    public void GatheredByteSelectorRequiresUnsignedByteDescriptorsAndNoWriteHazard(
+        uint format, uint borderType, bool otherStageWrites, bool shaderWrites, bool accepted)
+    {
+        var program = GatheredSelectorProgram(shaderWrites ? "write" : "valid");
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, Hash, 0, 6);
+        var source = plan.DescriptorSources[(int)plan.Info.Images.Last().Source];
+        var proof = source.IndirectImage?.GatheredByteSelectorProof;
+        Assert.NotNull(proof);
+        Assert.Equal(256, source.IndirectImage!.DirectCandidates!.Count);
+        Assert.Equal(Enumerable.Range(0, 256).Select(index => (uint)index * 32),
+            source.IndirectImage.DirectCandidates.Select(candidate => candidate.Offset));
+
+        var imageWords = new uint[] { 0x10, format << 20, 0, 0x90000920, 0, 0, 0, 0 };
+        bool Read(ulong address, out uint word)
+        {
+            if (address is >= 0x1000 and < 0x1020)
+            {
+                word = imageWords[(int)((address - 0x1000) / 4)];
+                return true;
+            }
+            if (address is >= 0x1020 and < 0x1030)
+            {
+                word = address == 0x102C ? borderType << 30 : 0;
+                return true;
+            }
+            if (address is >= 0x2000 and < 0x4000)
+            {
+                word = imageWords[(int)(((address - 0x2000) % 32) / 4)];
+                return true;
+            }
+            word = 0;
+            return false;
+        }
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [0x2000, 32u << 16, 256, 0x5204, 0x1000, 0],
+            ReadMemory = Read,
+            ReadCleanMemory = Read,
+            OtherStageMayWriteMemory = otherStageWrites,
+        };
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        var priorSnapshot = snapshot;
+        var priorSpecialization = specialization;
+        Assert.Equal(accepted, ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        if (!accepted)
+        {
+            Assert.Same(priorSnapshot, snapshot);
+            Assert.Same(priorSpecialization, specialization);
+        }
+        else
+        {
+            var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+            var layout = BindingLayout.Allocate(resources.Info,
+                BindingLayout.CollectUserDataRegisters(program, 0, 6), false,
+                ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+            var request = new ShaderCompileRequest(plan, resources, layout);
+            Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+        }
+    }
+
+    [Fact]
+    public void GatheredByteProofFailsWhenItsDescriptorBecomesUnreadableOrChangesFormat()
+    {
+        var program = GatheredSelectorProgram();
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, Hash, 0, 6);
+        var imageWords = new uint[] { 0x10, 5u << 20, 0, 0x90000920, 0, 0, 0, 0 };
+        bool unreadable = false;
+        bool Read(ulong address, out uint word)
+        {
+            if (unreadable && address == 0x1004)
+            {
+                word = 0;
+                return false;
+            }
+            if (address is >= 0x1000 and < 0x1020)
+            {
+                word = imageWords[(int)((address - 0x1000) / 4)];
+                return true;
+            }
+            if (address is >= 0x1020 and < 0x1030)
+            {
+                word = 0;
+                return true;
+            }
+            if (address is >= 0x2000 and < 0x4000)
+            {
+                word = imageWords[(int)(((address - 0x2000) % 32) / 4)];
+                return true;
+            }
+            word = 0;
+            return false;
+        }
+        ResourceRuntimeInputs Inputs() => new()
+        {
+            UserData = [0x2000, 32u << 16, 256, 0x5204, 0x1000, 0],
+            ReadMemory = Read,
+            ReadCleanMemory = Read,
+        };
+        bool ReadResident(ulong address, Span<byte> destination, bool clean)
+        {
+            for (var offset = 0; offset < destination.Length; offset += sizeof(uint))
+            {
+                if (!Read(address + (uint)offset, out var word)) return false;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(destination[offset..], word);
+            }
+            return true;
+        }
+
+        var cache = new ResourceMaterializationCache();
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        Assert.True(cache.Materialize(plan, Inputs(), ReadResident, ref snapshot, ref specialization, out _));
+        var cachedSnapshot = snapshot;
+        var cachedSpecialization = specialization;
+        imageWords[1] = 3u << 20;
+        Assert.False(cache.Materialize(plan, Inputs(), ReadResident, ref snapshot, ref specialization, out _));
+        Assert.Same(cachedSnapshot, snapshot);
+        Assert.Same(cachedSpecialization, specialization);
+
+        unreadable = true;
+        ResourceSnapshot freshSnapshot = new();
+        ResourceSpecialization freshSpecialization = new();
+        Assert.False(ResourceMaterializer.Materialize(plan, Inputs(), ref freshSnapshot, ref freshSpecialization));
+        Assert.Empty(freshSnapshot.Images);
+    }
+
+    [Theory]
+    [InlineData("unknown-arm")]
+    [InlineData("missing-guard")]
+    [InlineData("unconditional-repeat")]
+    [InlineData("changed-mask")]
+    [InlineData("gather-d16")]
+    [InlineData("bypass-gather")]
+    [InlineData("exec-expansion")]
+    public void UnreachableOrChangedGatherDefinitionsDoNotCreateAByteProof(string variation)
+    {
+        try
+        {
+            var plan = ShaderResourcePlan.Extract(GatheredSelectorProgram(variation), ShaderStage.Pixel, Hash, 0, 6);
+            Assert.All(plan.DescriptorSources, source => Assert.Null(source.IndirectImage?.GatheredByteSelectorProof));
+        }
+        catch (ResourcePlanException)
+        {
+            // Rejecting the whole unsupported shader plan is also fail-closed.
+        }
+    }
+
+    private static Gen5ShaderProgram GatheredSelectorProgram(string variation = "valid")
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            ScalarLoad(0, 4, 16, 8),
+            ScalarLoad(8, 4, 24, 4, 32),
+            MoveVector(16, 7, 0),
+            Image(20, "ImageGather4Lz", 16, 24, dmask: 1),
+            Vop2(28, "VCndmaskB32", 6, Gen5Operand.Vector(4), Gen5Operand.Vector(7)),
+            Branch(32, "SCbranchExecz", variation == "write" ? (short)18 : (short)15),
+            Sop1(36, "SMovB64", 8, Gen5Operand.Scalar(126)),
+            Sop1(40, "SFF1I32B64", 10, Gen5Operand.Scalar(8)),
+            new(44, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(6), Gen5Operand.Scalar(10), Gen5Operand.Scalar(0)],
+                [Gen5Operand.Scalar(12)], null),
+            new(52, Gen5ShaderEncoding.Vopc, "VCmpEqU32", [0u],
+                [Gen5Operand.Scalar(12), Gen5Operand.Vector(6)], [Gen5Operand.Scalar(20)],
+                new Gen5SdwaControl(6, 0, 6, 6, false, false, 0, 0, 0, false, 20)),
+            Sop1(56, "SAndSaveexecB64", 22, Gen5Operand.Scalar(20)),
+            Branch(60, "SCbranchExecz", 5),
+            Sop2(64, "SMulI32", 10, Gen5Operand.Scalar(12), Operand(32)),
+            ScalarBufferLoad(68, 0, 32, 8, dynamicOffsetRegister: 10),
+            Image(76, "ImageSampleLz", 32, 24, dmask: 1),
+        };
+
+        if (variation == "write")
+        {
+            // s[4:5] points at the gather's image descriptor; v0 is a zero byte offset.
+            instructions.Add(MoveVector(84, 0, 0));
+            instructions.Add(GlobalAccess(88, "GlobalStoreDword", 4, vectorAddress: 0));
+        }
+
+        var reductionPc = variation == "write" ? 96u : 84u;
+        var restorePc = reductionPc + 4;
+        var repeatPc = restorePc + 4;
+        var endPc = repeatPc + 4;
+        instructions.Add(Sop2(reductionPc, "SAndn2B64", 8, Gen5Operand.Scalar(8), Gen5Operand.Scalar(20)));
+        instructions.Add(Sop1(restorePc, "SMovB64", 126, Gen5Operand.Scalar(22)));
+        var backWords = checked((short)((40 - (int)(repeatPc + 4)) / 4));
+        instructions.Add(Branch(repeatPc, "SCbranchScc1", backWords));
+        instructions.Add(EndProgram(endPc));
+
+        for (var index = 0; index < instructions.Count; index++)
+        {
+            var instruction = instructions[index];
+            instructions[index] = variation switch
+            {
+                "unknown-arm" when instruction.Pc == 28 => instruction with
+                    { Sources = [Gen5Operand.Vector(42), Gen5Operand.Vector(7)] },
+                "missing-guard" when instruction.Pc == 32 => Sop1(32, "SMovB32", 10, Operand(0)),
+                "unconditional-repeat" when instruction.Pc == repeatPc => Branch(repeatPc, "SBranch", backWords),
+                "changed-mask" when instruction.Pc == reductionPc => Sop1(reductionPc, "SMovB64", 8, Operand(0)),
+                "gather-d16" when instruction.Pc == 20 => instruction with
+                    { Control = ((Gen5ImageControl)instruction.Control!) with { D16 = true } },
+                "bypass-gather" when instruction.Pc == 0 => Branch(0, "SCbranchScc1", 6),
+                _ => instruction,
+            };
+        }
+
+        if (variation == "exec-expansion")
+        {
+            for (var index = 0; index < instructions.Count; index++)
+                if (instructions[index].Pc >= 32)
+                    instructions[index] = instructions[index] with { Pc = instructions[index].Pc + 4 };
+            instructions.Insert(5, Sop1(32, "SMovB64", 126, Operand(uint.MaxValue)));
+        }
+
+        return Program(instructions.ToArray());
     }
 
     [Theory]

@@ -12,9 +12,137 @@ public sealed class IndirectSelectorValues
     private const int MaximumCombinations = 65536;
     internal static bool WritesMask(Gen5ShaderInstruction instruction, Gen5Operand mask) => Builder.WritesSavedMask(instruction, mask);
     private sealed record Expression(uint[]? Values = null, ScalarValue? RuntimeValue = null,
-        ScalarOperation Operation = ScalarOperation.None, Expression[]? Inputs = null);
+        ScalarOperation Operation = ScalarOperation.None, Expression[]? Inputs = null, int? GatherMemoryIndex = null);
     private readonly Expression _root;
     private readonly WaveMaskSelectorBounds? _waveBounds;
+
+    internal sealed record GatheredByteSelectorProof(int[] ImageMemoryIndices)
+    {
+        internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue selector,
+            out GatheredByteSelectorProof proof)
+        {
+            proof = null!;
+            if (plan.Stage != ShaderStage.Pixel || selector.Kind != ScalarValueKind.FirstLane) return false;
+            var instructions = plan.Graph.Program.Instructions;
+            var readIndex = instructions.ToList().FindIndex(instruction => instruction.Pc == selector.Payload);
+            if (readIndex < 0 || !ResourceTracker.TryGetStableLaneReadStart(instructions, readIndex, out var start)) return false;
+            var read = instructions[readIndex];
+            var captureIndex = instructions.ToList().FindIndex(instruction => instruction.Pc == start);
+            if (captureIndex < 1 || instructions[captureIndex] is not
+                { Opcode: "SMovB64", Sources.Count: 1, Destinations.Count: 1 } capture ||
+                capture.Sources[0] != Gen5Operand.Scalar(126)) return false;
+            var remaining = capture.Destinations[0];
+            var guardIndex = captureIndex - 1;
+            while (guardIndex >= 0 && !Gen5IrBranchResolver.Instance.TryGetBranchTarget(instructions[guardIndex], out _))
+            {
+                if (Builder.MayExpandExecution(instructions[guardIndex])) return false;
+                guardIndex--;
+            }
+            if (guardIndex < 0 || instructions[guardIndex].Opcode != "SCbranchExecz" ||
+                !Gen5IrBranchResolver.Instance.TryGetBranchTarget(instructions[guardIndex], out var emptyTarget) ||
+                emptyTarget <= read.Pc) return false;
+
+            var flow = plan.Graph.ControlFlow;
+            int Block(uint pc) => Enumerable.Range(0, flow.Blocks.Count).FirstOrDefault(index =>
+                pc >= flow.Blocks[index].StartPc && pc < flow.Blocks[index].EndPc, -1);
+            var guardBlock = Block(instructions[guardIndex].Pc);
+            var readBlock = Block(read.Pc);
+            var emptyBlock = Block(emptyTarget);
+            var admittedBlock = Block(instructions[guardIndex].Pc + (uint)instructions[guardIndex].Words.Count * sizeof(uint));
+            if (guardBlock < 0 || readBlock < 0 || emptyBlock < 0 || admittedBlock < 0) return false;
+            bool ReachesRead(int entry, bool removeAdmitted)
+            {
+                var pending = new Queue<int>();
+                var visited = new HashSet<int>();
+                pending.Enqueue(entry);
+                while (pending.TryDequeue(out var block))
+                {
+                    if (!visited.Add(block)) continue;
+                    if (block == readBlock) return true;
+                    foreach (var next in flow.Successors[block])
+                        if (!removeAdmitted || block != guardBlock || next != admittedBlock) pending.Enqueue(next);
+                }
+                return false;
+            }
+            if (ReachesRead(0, true) || ReachesRead(emptyBlock, false)) return false;
+            if (instructions[readIndex - 1] is not { Opcode: "SFF1I32B64", Sources.Count: 1 } scan ||
+                scan.Sources[0] != remaining) return false;
+            var repeatIndex = -1;
+            for (var index = readIndex + 1; index < instructions.Count; index++)
+            {
+                var instruction = instructions[index];
+                if (!Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) || target != scan.Pc) continue;
+                if (instruction.Opcode != "SCbranchScc1") return false;
+                repeatIndex = index;
+                break;
+            }
+            if (repeatIndex < 0 || emptyTarget <= instructions[repeatIndex].Pc) return false;
+            var setter = repeatIndex - 1;
+            while (setter > readIndex && instructions[setter].Opcode == "SMovB64") setter--;
+            if (setter <= readIndex || instructions[setter] is not { Opcode: "SAndn2B64", Sources.Count: 2 } reduction ||
+                reduction.Sources[0] != remaining || !reduction.Destinations.Contains(remaining)) return false;
+            for (var index = captureIndex + 1; index < repeatIndex; index++)
+                if (Builder.WritesSavedMask(instructions[index], remaining) && index != setter) return false;
+
+            var root = new Builder(plan, allowGather: true).Read(read.Sources[0], start);
+            if (root is null) return false;
+            var origins = new HashSet<int>();
+            bool Collect(Expression expression)
+            {
+                if (expression.GatherMemoryIndex is { } memory)
+                {
+                    if ((uint)memory >= plan.Graph.Accesses.Length ||
+                        plan.Graph.Accesses[memory] is not { Handle: { } image, SamplerHandle: { } sampler } ||
+                        image.Operands.Length != 8 || sampler.Operands.Length != 4 ||
+                        image.Operands.Concat(sampler.Operands).Any(word => !plan.ValidateRuntimeValue(word))) return false;
+                    origins.Add(memory);
+                    return true;
+                }
+                if (expression.Values is { } constants) return constants.All(value => value <= byte.MaxValue);
+                return expression.RuntimeValue is null && expression.Operation == ScalarOperation.None &&
+                    expression.Inputs is { } operands && operands.All(Collect);
+            }
+            if (!Collect(root) || origins.Count == 0) return false;
+            proof = new(origins.Order().ToArray());
+            return true;
+        }
+
+        internal bool HasByteRange(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+        {
+            if (inputs.OtherStageMayWriteMemory || inputs.ReadCleanMemory is null ||
+                Enumerable.Range(0, plan.Memory.Count).Any(index => plan.Memory[index].Kind != MemoryResourceKind.LocalDataShare &&
+                    plan.Memory[index].Access is MemoryAccess.Write or MemoryAccess.Atomic)) return false;
+
+            var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(inputs.ReadCleanMemory));
+            foreach (var memoryIndex in ImageMemoryIndices)
+            {
+                if ((uint)memoryIndex >= plan.Accesses.Length ||
+                    plan.Accesses[memoryIndex] is not { Handle: { } image, SamplerHandle: { } sampler } ||
+                    image.Operands.Length != 8 || sampler.Operands.Length != 4) return false;
+                var imageWords = new uint[8];
+                var samplerWords = new uint[4];
+                for (var index = 0; index < imageWords.Length; index++)
+                    if (!evaluator.Evaluate(image.Operands[index], out imageWords[index])) return false;
+                for (var index = 0; index < samplerWords.Length; index++)
+                    if (!evaluator.Evaluate(sampler.Operands[index], out samplerWords[index])) return false;
+
+                var format = GuestImageFormat.FormatOf(imageWords);
+                if (format is not (GuestImageFormat.Format8Uint or GuestImageFormat.Format8x4Uint) ||
+                    GuestImageFormat.ImageTypeOf(imageWords) != GuestImageFormat.ImageType2D ||
+                    (imageWords[1] >> 8 & 0xFFF) != 0 || (imageWords[3] >> 12 & 0xFF) != 0 ||
+                    (imageWords[4] & 0x1FFF) != 0 || (imageWords[4] >> 16 & 0x1FFF) != 0 ||
+                    (imageWords[5] >> 4 & 0xF) != 0 || (imageWords[6] & (3u << 20)) != 0) return false;
+                for (var channel = 0; channel < 4; channel++)
+                    if (((imageWords[3] >> (channel * 3)) & 7) is not (0 or 1 or 4 or 5 or 6 or 7)) return false;
+
+                if ((samplerWords[0] & (7u << 9)) != 0 || (samplerWords[0] & (7u << 12)) != 0 ||
+                    (samplerWords[0] & (1u << 15)) != 0 ||
+                    (samplerWords[2] & (3u << 20)) != 0 || (samplerWords[2] & (3u << 22)) != 0 ||
+                    (samplerWords[2] & (3u << 26)) != 0 || (samplerWords[3] >> 30) == 3) return false;
+            }
+            return true;
+        }
+    }
 
     // Enumerate the actual dispatch domain, never a guessed workgroup ID. The
     // original scalar loads and their run-time image selector remain in the shader.
@@ -686,7 +814,7 @@ public sealed class IndirectSelectorValues
         return values.Length != 0;
     }
 
-    private sealed class Builder(ShaderResourcePlan plan)
+    private sealed class Builder(ShaderResourcePlan plan, bool allowGather = false)
     {
         private readonly HashSet<(Gen5Operand Operand, uint Address)> _active = [];
         private int _requests;
@@ -756,6 +884,11 @@ public sealed class IndirectSelectorValues
 
         private Expression? Define(Gen5ShaderInstruction instruction, Gen5Operand destination)
         {
+            if (allowGather && instruction.Control is Gen5ImageControl gather &&
+                instruction.Opcode == "ImageGather4Lz" && !gather.D16 && gather.Dmask is 1 or 2 or 4 or 8 &&
+                destination.Kind == Gen5OperandKind.VectorRegister && destination.Value >= gather.VectorData &&
+                destination.Value - gather.VectorData < 4 && plan.Memory.TryGetIndex(instruction.Pc, 0, out var gatherIndex))
+                return new(GatherMemoryIndex: gatherIndex);
             if (!instruction.Destinations.Contains(destination)) return null;
             // Packed descriptor selectors may extract the upper word with SDWA.
             // A full-dword destination discards the previous value; partial

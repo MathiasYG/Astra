@@ -43,6 +43,41 @@ public sealed partial class ResourceTracker
         return true;
     }
 
+    private bool TryMakeRuntimeSampler(ScalarValue handle, out uint sourceIndex)
+    {
+        sourceIndex = 0;
+        var reads = handle.Operands.Select(word => _graph.ResolveInvariantPhi(word) ?? word).ToArray();
+        if (reads.Length != 4 || reads.Any(word => word.Kind is not
+                (ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord) ||
+                word.Kind != reads[0].Kind || word.MemoryIndex < 0 || word.MemoryIndex >= _plan.Memory.Count ||
+                !MemoryIndexBelongsTo(word.MemoryIndex, word))) return false;
+        var memory = _plan.Memory[reads[0].MemoryIndex];
+        var block = _graph.ControlFlow.Blocks.First(candidate => memory.Pc >= candidate.StartPc && memory.Pc < candidate.EndPc);
+        if (reads.Any(word => _plan.Memory[word.MemoryIndex].Pc < block.StartPc ||
+                _plan.Memory[word.MemoryIndex].Pc >= block.EndPc) ||
+            !TryGetBoundedRuntimeSelector(reads[0].Operands[1], memory.Pc, out var selector, out var limit)) return false;
+        var candidates = new List<uint>();
+        for (uint index = 0; index < ShaderResourceInfo.MaxImages; index++)
+        {
+            var replacements = new Dictionary<ScalarValue, ScalarValue> { [selector] = _graph.Constant(index) };
+            var memo = new Dictionary<ScalarValue, ScalarValue>();
+            var candidate = new DescriptorSource
+            {
+                Dwords = reads.Select(word => _graph.Substitute(word, replacements, memo)).ToArray(),
+            };
+            if (!ValidateSource(candidate, out _)) return false;
+            candidates.Add(InternSource(candidate));
+        }
+        var countSource = InternSource(new DescriptorSource { Dwords = [limit] });
+        sourceIndex = InternSource(new DescriptorSource
+        {
+            Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray(),
+            EquivalentSamplerSources = candidates,
+            RuntimeSamplerCountSource = countSource,
+        });
+        return true;
+    }
+
     private bool TryMakeFiniteSampler(ScalarValue handle, DescriptorSource original, out uint sourceIndex)
     {
         sourceIndex = 0;
@@ -161,6 +196,7 @@ public sealed partial class ResourceTracker
         var visited = new HashSet<ScalarValue>();
         ScalarValue? selector = null;
         uint[]? finiteValues = null;
+        IndirectSelectorValues.GatheredByteSelectorProof? byteSelectorProof = null;
         while (pending.TryPop(out var value))
         {
             if (!visited.Add(value)) continue;
@@ -178,16 +214,26 @@ public sealed partial class ResourceTracker
                 finiteValues = values;
                 continue;
             }
+            if (value.Kind == ScalarValueKind.FirstLane &&
+                IndirectSelectorValues.GatheredByteSelectorProof.TryCreate(_plan, value, out var byteProof))
+            {
+                if (selector is not null && !ReferenceEquals(selector, value)) return false;
+                selector = value;
+                finiteValues = Enumerable.Range(0, byte.MaxValue + 1).Select(index => (uint)index).ToArray();
+                byteSelectorProof = byteProof;
+                continue;
+            }
             if (!value.IsConstant && value.Kind != ScalarValueKind.Operation) return false;
             foreach (var operand in value.Operands) pending.Push(operand);
         }
         if (selector is null) return false;
 
-        var madeCandidates = MakeCandidates(selector, finiteValues, out var selectedPlan);
+        var madeCandidates = MakeCandidates(selector, finiteValues, out var selectedPlan, byteSelectorProof: byteSelectorProof);
         plan = selectedPlan;
         return madeCandidates;
 
-        bool MakeCandidates(ScalarValue selected, uint[]? domain, out IndirectImagePlan candidatePlan, uint? countSource = null)
+        bool MakeCandidates(ScalarValue selected, uint[]? domain, out IndirectImagePlan candidatePlan,
+            uint? countSource = null, IndirectSelectorValues.GatheredByteSelectorProof? byteSelectorProof = null)
         {
             candidatePlan = null!;
             var candidates = new List<DirectImageCandidate>();
@@ -216,7 +262,11 @@ public sealed partial class ResourceTracker
             {
                 Dwords = sources[0].Dwords,
                 IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0)
-                    { DirectCandidates = candidates, CandidateCountSource = countSource },
+                    {
+                        DirectCandidates = candidates,
+                        CandidateCountSource = countSource,
+                        GatheredByteSelectorProof = byteSelectorProof,
+                    },
             };
             candidatePlan = new IndirectImagePlan
             {

@@ -3505,22 +3505,6 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             if (!_request.BufferCandidateTableByMemoryIndex.TryGetValue(memoryIndex, out var table))
             {
-                // A formatted load needs a statically known Vulkan view format.  Most
-                // runtime V#s prove a bounded SRT candidate set above, but a few Yotei
-                // material-lookup paths merge descriptors through control flow and have
-                // no finite, safe candidate table.  Do not reinterpret an arbitrary
-                // device address with a guessed format: a null read is the defined
-                // fallback, matching the bindless-image fallback in ResourceTracker.
-                if (instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal))
-                {
-                    for (uint index = 0; index < control.DwordCount; index++)
-                    {
-                        StoreV(control.VectorData + index, UInt(0));
-                    }
-
-                    return true;
-                }
-
                 error = $"runtime buffer descriptor has no candidate table for {instruction.Opcode}";
                 return false;
             }

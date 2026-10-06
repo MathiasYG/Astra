@@ -203,6 +203,8 @@ public sealed class ShaderResourcePlan
 
         foreach (var sampler in plan.Info.Samplers)
         {
+            if (plan.DescriptorSources[(int)sampler.Source].RuntimeSamplerCountSource is { } countSource)
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)countSource], cleanSlots);
             if (plan.DescriptorSources[(int)sampler.Source].Workgroup is not null)
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)sampler.Source], cleanSlots);
             if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is { } candidates)

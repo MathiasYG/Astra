@@ -127,8 +127,9 @@ public static class ResourceMaterializer
         snapshot = new MaterializedSnapshot();
         // A clean host read does not cover writes made during this draw. These
         // proofs require stable descriptor inputs throughout shader execution.
-        if (plan.DescriptorSources.Any(source => source.IndirectImage is { } indirect &&
-                (indirect.CandidateCountSource is not null)) &&
+        if (plan.DescriptorSources.Any(source => source.RuntimeSamplerCountSource is not null ||
+                source.IndirectImage is { } indirect &&
+                (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null)) &&
             (inputs.OtherStageMayWriteMemory || plan.Memory.Entries.Any(memory =>
                 memory.Kind != MemoryResourceKind.LocalDataShare &&
                 memory.Access is MemoryAccess.Write or MemoryAccess.Atomic)))
@@ -189,6 +190,8 @@ public static class ResourceMaterializer
                     }
                     continue;
                 }
+                if (indirect.GatheredByteSelectorProof is { } byteProof && !byteProof.HasByteRange(plan, inputs))
+                    return false;
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
                     if (!TryCandidateCount(plan, indirect.CandidateCountSource, directCandidates.Count, cleanInputs, out var candidateCount))
@@ -209,7 +212,7 @@ public static class ResourceMaterializer
                         var descriptor = descriptors[candidateIndex];
                         if (!UsableImageCandidate(descriptor.Dwords, image.R128))
                         {
-                            if (indirect.CandidateCountSource is not null)
+                            if (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null)
                                 return false;
                             descriptor = DescriptorWords.Empty(8);
                         }
@@ -293,6 +296,14 @@ public static class ResourceMaterializer
             snapshot.Samplers[index] = values[cursor++].Dwords;
             if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not { } candidates ||
                 activeSources.Length != 0 && !activeSources[sampler.Source]) continue;
+            var samplerSource = plan.DescriptorSources[(int)sampler.Source];
+            if (samplerSource.RuntimeSamplerCountSource is { } countSource)
+            {
+                if (inputs.ReadCleanMemory is null ||
+                    !TryCandidateCount(plan, countSource, candidates.Count, inputs.WithReader(inputs.ReadCleanMemory), out var count) ||
+                    count == 0) return false;
+                candidates = candidates.Take(count).ToArray();
+            }
             if (inputs.ReadCleanMemory is null ||
                 !RuntimeValueEvaluator.EvaluateSources(plan, candidates.ToArray(), inputs.WithReader(inputs.ReadCleanMemory), [],
                     evaluateTable: false, out var descriptors, out _) || descriptors.Count == 0 ||

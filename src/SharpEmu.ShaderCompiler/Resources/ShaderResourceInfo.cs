@@ -212,6 +212,7 @@ public sealed record IndirectImageSelector(
     public IndirectSelectorValues? SelectorValues { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
     public uint? CandidateCountSource { get; init; }
+    internal IndirectSelectorValues.GatheredByteSelectorProof? GatheredByteSelectorProof { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }
     public uint DynamicOffsetBase { get; init; }
@@ -240,6 +241,7 @@ public sealed class DescriptorSource
     // A finite selector can use one native sampler only when all candidate
     // descriptors are identical. Rechecked against clean memory on every draw.
     public IReadOnlyList<uint>? EquivalentSamplerSources { get; init; }
+    public uint? RuntimeSamplerCountSource { get; init; }
     public IReadOnlyList<DirectImageCandidate>? FiniteSamplerSources { get; init; }
     public int SamplerSelectorMemoryIndex { get; init; } = -1;
     // Scalar loads from an empty buffer return zero regardless of the offset.

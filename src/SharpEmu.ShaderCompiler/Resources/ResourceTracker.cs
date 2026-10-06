@@ -333,6 +333,7 @@ public sealed partial class ResourceTracker
                         (workgroup.Key is null) != (otherWorkgroup.Key is null) ||
                         workgroup.Key is not null && !_graph.Equivalent(workgroup.Key, otherWorkgroup.Key!)) ||
                 current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
+                current.RuntimeSamplerCountSource != source.RuntimeSamplerCountSource ||
                 current.SamplerSelectorMemoryIndex != source.SamplerSelectorMemoryIndex ||
                 (current.FiniteSamplerSources is null) != (source.FiniteSamplerSources is null) ||
                 current.FiniteSamplerSources is { } finiteSources && !finiteSources.SequenceEqual(source.FiniteSamplerSources!) ||
@@ -477,38 +478,18 @@ public sealed partial class ResourceTracker
             if (!sampleAdjust && IndirectSelectorValues.PackedPointerDescriptor.TryCreate(_plan, handle, out var packedPointer))
                 return InternSource(new DescriptorSource { Dwords = source.Dwords, PackedPointer = packedPointer });
             if (expected == ScalarValueKind.SamplerHandle &&
+                TryMakeRuntimeSampler(handle, out var runtimeSamplerSource)) return runtimeSamplerSource;
+            if (expected == ScalarValueKind.SamplerHandle &&
                 TryMakeFiniteSampler(handle, source, out var finiteSamplerSource)) return finiteSamplerSource;
             if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle &&
                 TryMakeZeroExtentBufferSource(source, pc, out var emptyBufferSource))
                 return emptyBufferSource;
 
-            // A bindless image/sampler descriptor whose dwords resolve through a
-            // control-dependent phi (e.g. a hash-table/linear-probe material lookup, as seen
-            // in Ghost of Yotei) has no single compile-time source: real support needs
-            // GPU-side dynamic descriptor indexing, which this resource tracker doesn't
-            // implement. Rather than fail shader recompilation outright, degrade to a null
-            // descriptor for that one access and let it read as a null/black texture,
-            // mirroring KytyPS5's fallback for the same case (feat/shader-control-dependent-
-            // descriptor). Buffer/sampler-adjacent handles or any other validation failure
-            // still hard-fail, since those aren't safe to silently zero.
-            var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
-                (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
-                 (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))));
-            if (dynamicImageFallback)
-            {
-                source = new DescriptorSource
-                {
-                    Dwords = Enumerable.Repeat(_graph.Constant(0u), (int)source.DwordCount).ToArray(),
-                };
-            }
-            else
-            {
-                throw Failure(
-                    pc,
-                    $"{memoryOpcode ?? "memory"} ({memoryAccess}) {expected} dword {badDword} is not a valid runtime value" +
-                        DescribeUndefinedLeaves(source.Dwords[badDword]) +
-                        $" (value: {DescribeValueShape(source.Dwords[badDword])})");
-            }
+            throw Failure(
+                pc,
+                $"{memoryOpcode ?? "memory"} ({memoryAccess}) {expected} dword {badDword} is not a valid runtime value" +
+                    DescribeUndefinedLeaves(source.Dwords[badDword]) +
+                    $" (value: {DescribeValueShape(source.Dwords[badDword])})");
         }
 
         return InternSource(source);
