@@ -62,7 +62,7 @@ internal interface IShaderPipelineHost
     bool TryReadCleanGuestWord(ulong address, out uint word);
     bool TrySynchronizeVertexDomain(ulong address, ulong size) => false;
     bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
-        uint channels, GuestWordReader cleanReader, out uint[] values)
+        uint channels, bool gathered, GuestWordReader cleanReader, out uint[] values)
     {
         values = [];
         return false;

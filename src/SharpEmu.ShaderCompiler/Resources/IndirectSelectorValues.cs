@@ -91,6 +91,8 @@ public sealed class IndirectSelectorValues
         {
             values = [];
             if (inputs.OtherStageMayWriteMemory || inputs.ReadCleanMemory is null || inputs.ReadPointSampledByteDomain is null) return false;
+            if (plan.Memory.Entries.Any(memory => memory.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) &&
+                memory.Access is MemoryAccess.Write or MemoryAccess.Atomic)) return false;
             var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(inputs.ReadCleanMemory));
             var found = Origins.Where(origin => origin.IsConstant).Select(origin => origin.Constant).ToHashSet();
             var sampledDomains = new Dictionary<string, uint[]>();
@@ -103,12 +105,13 @@ public sealed class IndirectSelectorValues
                 for (var index = 0; index < sampler.Length; index++)
                     if (!evaluator.Evaluate(access.SamplerHandle!.Operands[index], out sampler[index])) return false;
                 var channels = group.Aggregate(0u, (mask, origin) => mask | (1u << (int)origin.Channel));
+                var gathered = plan.Memory[group.Key].Opcode == "ImageGather4Lz";
                 // Identical descriptors and channel masks share one scan within
                 // this evaluation only; ownership is checked again on later draws.
-                var key = string.Join(",", image.Concat(sampler).Append(channels));
+                var key = string.Join(",", image.Concat(sampler).Append(channels).Append(gathered ? 1u : 0u));
                 if (!sampledDomains.TryGetValue(key, out var sampled))
                 {
-                    if (!inputs.ReadPointSampledByteDomain(image, sampler, channels, inputs.ReadCleanMemory, out sampled)) return false;
+                    if (!inputs.ReadPointSampledByteDomain(image, sampler, channels, gathered, inputs.ReadCleanMemory, out sampled)) return false;
                     sampledDomains.Add(key, sampled);
                 }
                 found.UnionWith(sampled);
@@ -474,6 +477,12 @@ public sealed class IndirectSelectorValues
 
     internal sealed record GatheredByteSelectorProof(int[] ImageMemoryIndices)
     {
+        internal uint[] Constants { get; init; } = [];
+        internal PackedTextureDomain TextureDomain(ShaderResourcePlan plan) => new(
+            ImageMemoryIndices.Select(index => new PackedByteOrigin(index,
+                (uint)System.Numerics.BitOperations.TrailingZeroCount(
+                    ((Gen5ImageControl)plan.Graph.Program.Instructions.First(instruction => instruction.Pc == plan.Memory[index].Pc).Control!).Dmask), 0))
+            .Concat(Constants.Select(value => new PackedByteOrigin(-1, 0, value))).ToArray());
         internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue selector,
             out GatheredByteSelectorProof proof)
         {
@@ -543,6 +552,7 @@ public sealed class IndirectSelectorValues
             var root = new Builder(plan, allowGather: true).Read(read.Sources[0], start);
             if (root is null) return false;
             var origins = new HashSet<int>();
+            var constants = new HashSet<uint>();
             bool Collect(Expression expression)
             {
                 if (expression.GatherMemoryIndex is { } memory)
@@ -554,12 +564,17 @@ public sealed class IndirectSelectorValues
                     origins.Add(memory);
                     return true;
                 }
-                if (expression.Values is { } constants) return constants.All(value => value <= byte.MaxValue);
+                if (expression.Values is { } values)
+                {
+                    if (values.Any(value => value > byte.MaxValue)) return false;
+                    constants.UnionWith(values);
+                    return true;
+                }
                 return expression.RuntimeValue is null && expression.Operation == ScalarOperation.None &&
                     expression.Inputs is { } operands && operands.All(Collect);
             }
             if (!Collect(root) || origins.Count == 0) return false;
-            proof = new(origins.Order().ToArray());
+            proof = new(origins.Order().ToArray()) { Constants = constants.Order().ToArray() };
             return true;
         }
 
@@ -591,10 +606,10 @@ public sealed class IndirectSelectorValues
                 for (var channel = 0; channel < 4; channel++)
                     if (((imageWords[3] >> (channel * 3)) & 7) is not (0 or 1 or 4 or 5 or 6 or 7)) return false;
 
-                if ((samplerWords[0] & (7u << 9)) != 0 || (samplerWords[0] & (7u << 12)) != 0 ||
+                // Gather returns individual texels; filter modes do not blend their values.
+                if ((samplerWords[0] & (7u << 12)) != 0 ||
                     (samplerWords[0] & (1u << 15)) != 0 ||
-                    (samplerWords[2] & (3u << 20)) != 0 || (samplerWords[2] & (3u << 22)) != 0 ||
-                    (samplerWords[2] & (3u << 26)) != 0 || (samplerWords[3] >> 30) == 3) return false;
+                    (samplerWords[3] >> 30) == 3) return false;
             }
             return true;
         }

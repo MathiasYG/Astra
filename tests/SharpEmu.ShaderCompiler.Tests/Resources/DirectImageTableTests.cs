@@ -527,7 +527,7 @@ public sealed class DirectImageTableTests
         var inputs = new ResourceRuntimeInputs
         {
             ReadCleanMemory = (ulong address, out uint value) => { value = 0; return true; },
-            ReadPointSampledByteDomain = (ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler, uint channels,
+            ReadPointSampledByteDomain = (ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler, uint channels, bool gathered,
                 GuestWordReader reader, out uint[] values) => { values = []; return false; },
         };
         Assert.True(proof.TryFilterCandidates(plan, inputs, candidates, out var selected));
@@ -550,7 +550,7 @@ public sealed class DirectImageTableTests
         var scans = 0;
         bool Read(ulong address, out uint word) { word = content; return readable; }
         bool Domain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler, uint channels,
-            GuestWordReader reader, out uint[] values)
+            bool gathered, GuestWordReader reader, out uint[] values)
         {
             scans++;
             Assert.Equal(1u, channels);
@@ -843,6 +843,62 @@ public sealed class DirectImageTableTests
     {
         var plan = ShaderResourcePlan.Extract(GatheredSelectorProgram(variation), ShaderStage.Pixel, Hash, 0, 6);
         Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images.Last().Source].IndirectImage?.GatheredByteSelectorProof);
+    }
+
+    [Fact]
+    public void GatheredTextureContentsRestrictCandidatesAndAreRecheckedOnEachMaterialization()
+    {
+        var plan = ShaderResourcePlan.Extract(GatheredSelectorProgram(), ShaderStage.Pixel, Hash, 0, 6);
+        uint selectedValue = 0;
+        bool readableContents = true;
+        bool readableCandidate = true;
+        uint candidateLimit = 2;
+        uint[] gather = [0x10, 5u << 20, 0, 0x90000924, 0, 0, 0, 0];
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address >= 0x1000 && address < 0x1020) { word = gather[(int)((address - 0x1000) / 4)]; return true; }
+            if (address >= 0x1020 && address < 0x1030) return true;
+            if (address < 0x2000 || address >= 0x2000 + candidateLimit * 32UL) return false;
+            var record = (uint)(address - 0x2000) / 32;
+            word = ((uint)(address - 0x2000) % 32) switch
+            {
+                0 => 0x2000 + record * 0x100, 4 => 20u << 20, 12 => 0x90000FAC, _ => 0,
+            };
+            return readableCandidate || record == 0;
+        }
+        bool Domain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler, uint channels, bool gathered, GuestWordReader reader, out uint[] values)
+        {
+            Assert.Equal(gather, image.ToArray());
+            Assert.Equal(1u, channels);
+            values = [selectedValue];
+            return readableContents;
+        }
+        bool Resident(ulong address, Span<byte> bytes, bool clean) => false;
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [0x2000, 32u << 16, 256, 0x5204, 0x1000, 0], ReadMemory = Read, ReadCleanMemory = Read,
+            ReadPointSampledByteDomain = Domain,
+        };
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(0x2000u, snapshot.Images.Last()[0]);
+        selectedValue = 1;
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(0x2100u, snapshot.Images.Last()[0]);
+        var original = snapshot;
+        readableCandidate = false;
+        Assert.False(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Same(original, snapshot);
+        readableCandidate = true;
+        readableContents = false;
+        Assert.False(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Same(original, snapshot);
+        Assert.Equal(0, cache.Hits);
+        candidateLimit = 256;
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
     }
 
     private static Gen5ShaderProgram GatheredSelectorProgram(string variation = "valid")

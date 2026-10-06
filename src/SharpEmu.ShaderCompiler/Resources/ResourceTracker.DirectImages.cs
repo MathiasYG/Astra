@@ -239,6 +239,8 @@ public sealed partial class ResourceTracker
         {
             candidatePlan = null!;
             IndirectSelectorValues.PackedTextureDomain.TryCreate(_plan, selected, out var packedDomain);
+            if (packedDomain is null && IndirectSelectorValues.GatheredByteSelectorProof.TryCreate(_plan, selected, out var gatheredDomain))
+                packedDomain = gatheredDomain.TextureDomain(_plan);
             var candidates = new List<DirectImageCandidate>();
             var sources = new List<DescriptorSource>();
             var keys = new HashSet<uint>();
@@ -269,7 +271,7 @@ public sealed partial class ResourceTracker
                     {
                         DirectCandidates = candidates,
                         CandidateCountSource = countSource,
-                        PackedTextureDomain = packedDomain,
+                        PackedTextureDomain = packedDomain ?? byteSelectorProof?.TextureDomain(_plan),
                         GatheredByteSelectorProof = byteSelectorProof,
                     },
             };

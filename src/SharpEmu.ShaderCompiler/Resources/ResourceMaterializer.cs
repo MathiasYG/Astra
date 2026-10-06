@@ -221,9 +221,11 @@ public static class ResourceMaterializer
                     }
                     if (indirect.PackedTextureDomain is { } packed && inputs.ReadPointSampledByteDomain is not null)
                     {
-                        if (!packed.TryFilterCandidates(plan, inputs, directCandidates, out var selected) || selected.Count == 0)
-                            return false;
-                        directCandidates = selected;
+                        if (packed.TryFilterCandidates(plan, inputs, directCandidates, out var selected))
+                        {
+                            if (selected.Count == 0) return false;
+                            directCandidates = selected;
+                        }
                     }
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
                         cleanInputs, [], evaluateTable: false, out var descriptors, out _))
@@ -236,7 +238,7 @@ public static class ResourceMaterializer
                         var descriptor = descriptors[candidateIndex];
                         if (!UsableImageCandidate(descriptor.Dwords, image.R128))
                         {
-                            if (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null)
+                            if (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null || indirect.PackedTextureDomain is not null)
                                 return false;
                             descriptor = DescriptorWords.Empty(8);
                         }
@@ -425,7 +427,7 @@ public static class ResourceMaterializer
     private static bool RequiresStableDescriptorInputs(ShaderResourcePlan plan) =>
         plan.DescriptorSources.Any(source => source.RuntimeSamplerCountSource is not null ||
             source.IndirectImage is { } indirect &&
-            (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null));
+            (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null || indirect.PackedTextureDomain is not null));
 
     internal static bool RequiresDescriptorWriteProof(ShaderResourcePlan plan) =>
         RequiresStableDescriptorInputs(plan) && plan.Memory.Entries.Any(memory =>

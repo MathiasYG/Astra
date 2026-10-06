@@ -10,7 +10,7 @@ public delegate bool GuestWordReader(ulong address, out uint word);
 // Returns the complete guest allocation written through an image descriptor.
 public delegate bool GuestImageRangeReader(ReadOnlySpan<uint> image, out ulong address, out ulong size);
 public delegate bool GuestSampledByteDomainReader(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
-    uint channels, GuestWordReader cleanReader, out uint[] values);
+    uint channels, bool gathered, GuestWordReader cleanReader, out uint[] values);
 public delegate bool FlatParameterDomainReader(uint attribute, uint channel, GuestWordReader cleanReader, out uint[] values);
 
 // What one draw supplies to materialise a plan: its user data, the shader base and

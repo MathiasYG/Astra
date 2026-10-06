@@ -18,20 +18,22 @@ public static partial class ImageRequestBuilders
     // padding overestimates the domain; every byte must still be readable.
     internal static bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> imageWords,
         ReadOnlySpan<uint> samplerWords, uint channels,
-        SharpEmu.ShaderCompiler.Resources.GuestWordReader readCleanWord, out uint[] values)
+        SharpEmu.ShaderCompiler.Resources.GuestWordReader readCleanWord, out uint[] values, bool gathered = false)
     {
         values = [];
         if (imageWords.Length != 8 || samplerWords.Length != 4 || channels is 0 or > 15) return false;
         var image = new TextureDescriptorWords(imageWords);
         var sampler = new SamplerDescriptorWords(samplerWords);
+        if (image.Format == GuestPixelFormat.Bits8UInt)
+            return TryReadR8TexelDomain(imageWords, sampler, channels, readCleanWord, out values, gathered);
         if (image.IsNull || image.Format != GuestPixelFormat.Bits8_8_8_8UInt ||
             image.Type != GuestImageType.Color2D || image.BaseLevel != 0 || image.LastLevel != 0 ||
             image.MaxMip != 0 || image.Depth != 0 || image.BaseArray != 0 || image.MinLod != 0 ||
             image.WriteCompress || image.MetadataCompress ||
             image.TileMode is not (GuestTileMode.Linear or GuestTileMode.Standard4KB) ||
-            sampler.MagnifyFilter != (uint)SamplerFilter.Point || sampler.MinifyFilter != (uint)SamplerFilter.Point ||
-            sampler.MipFilter > (uint)SamplerMipFilter.Point || sampler.DepthCompareFunction != 0 ||
-            sampler.MaxAnisotropyRatio != 0 || sampler.BorderColorType == (uint)SamplerBorderColor.FromTable)
+            !gathered && (sampler.MagnifyFilter != (uint)SamplerFilter.Point || sampler.MinifyFilter != (uint)SamplerFilter.Point ||
+                sampler.MipFilter > (uint)SamplerMipFilter.Point || sampler.MaxAnisotropyRatio != 0) ||
+            sampler.DepthCompareFunction != 0 || sampler.BorderColorType == (uint)SamplerBorderColor.FromTable)
             return false;
 
         uint storedChannels = 0;
@@ -89,6 +91,66 @@ public static partial class ImageRequestBuilders
             data.Address >= 1ul << 48 || data.Size > (1ul << 48) - data.Address) return false;
         address = data.Address;
         size = data.Size;
+        return true;
+    }
+
+    private static bool TryReadR8TexelDomain(ReadOnlySpan<uint> imageWords, in SamplerDescriptorWords sampler,
+        uint channels, SharpEmu.ShaderCompiler.Resources.GuestWordReader reader, out uint[] values, bool gathered)
+    {
+        values = [];
+        var image = new TextureDescriptorWords(imageWords);
+        if (image.IsNull || image.Type != GuestImageType.Color2D || image.BaseLevel != 0 || image.LastLevel != 0 ||
+            image.MaxMip != 0 || image.Depth != 0 || image.BaseArray != 0 || image.MinLod != 0 ||
+            image.WriteCompress || image.MetadataCompress || image.TileMode is not (GuestTileMode.Linear or GuestTileMode.Standard4KB) ||
+            sampler.DepthCompareFunction != 0 || sampler.BorderColorType == (uint)SamplerBorderColor.FromTable ||
+            !gathered && (sampler.MaxAnisotropyRatio != 0 || sampler.MagnifyFilter != (uint)SamplerFilter.Point ||
+                sampler.MinifyFilter != (uint)SamplerFilter.Point || sampler.MipFilter > (uint)SamplerMipFilter.Point)) return false;
+        var description = Texture(imageWords,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description;
+        var data = description.Data;
+        if (data.Size is 0 or > 16 * 1024 * 1024 || data.Address >= 1ul << 48 || data.Size > (1ul << 48) - data.Address) return false;
+        var stored = false;
+        var found = new bool[256];
+        for (var channel = 0; channel < 4; channel++)
+        {
+            if ((channels & (1u << channel)) == 0) continue;
+            var selection = (image.DestinationSelectXyzw >> (channel * 3)) & 7;
+            if (selection == 4) stored = true;
+            else if (selection <= 1) found[selection] = true;
+            else return false;
+        }
+        // Built-in integer borders remain possible even when absent from the texels.
+        found[0] = found[1] = true;
+        TiledSurfaceLayout? surface = null;
+        if (image.TileMode == GuestTileMode.Standard4KB &&
+            (!TileGeometry.TryGetTiledTextureLayout(new(image.Format, image.TileMode, TileSurfaceDimension.Flat2D,
+                description.Extent.Width, description.Extent.Height), out surface) || surface.TotalSize != data.Size)) return false;
+        var words = new Dictionary<ulong, uint>();
+        if (stored)
+        for (uint y = 0; y < description.Extent.Height; y++)
+        for (uint x = 0; x < description.Extent.Width; x++)
+        {
+            ulong offset;
+            if (surface is null) offset = (ulong)y * description.MipLayout[0].Pitch + x;
+            else
+            {
+                var block = surface.Texture.Block;
+                var mip = surface.Mips[0];
+                if (!TileGeometry.TryGetBlockOffset(block, x % block.BlockWidth + mip.TailX,
+                    y % block.BlockHeight + mip.TailY, 0, out var within)) return false;
+                offset = mip.Offset + ((ulong)(y / block.BlockHeight) * (mip.PaddedWidth / block.BlockWidth) +
+                    x / block.BlockWidth) * block.BlockSize + within;
+            }
+            if (offset >= data.Size) return false;
+            var at = data.Address + (offset & ~3ul);
+            if (!words.TryGetValue(at, out var word))
+            {
+                if (!reader(at, out word)) return false;
+                words.Add(at, word);
+            }
+            found[(word >> (int)((offset & 3) * 8)) & 255] = true;
+        }
+        values = Enumerable.Range(0, 256).Where(value => found[value]).Select(value => (uint)value).ToArray();
         return true;
     }
 

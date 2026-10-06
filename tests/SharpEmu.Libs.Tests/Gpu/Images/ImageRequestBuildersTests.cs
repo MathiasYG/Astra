@@ -65,6 +65,43 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     [Theory]
     [InlineData(GuestTileMode.Linear)]
     [InlineData(GuestTileMode.Standard4KB)]
+    public void R8DomainReadsLogicalTexelsWithoutTreatingPaddingAsSampledValues(GuestTileMode tile)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8UInt, 3, 2, tile: tile);
+        var description = ImageRequestBuilders.Texture(words,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description;
+        var secondRow = tile == GuestTileMode.Linear ? description.MipLayout[0].Pitch : 16u;
+        bool Read(ulong address, out uint word)
+        {
+            word = address == Base ? 0xFA050403u : address == Base + secondRow ? 0xFA080706u : 0xFAFAFAFAu;
+            return true;
+        }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 1, Read, out var values));
+        Assert.Equal(new uint[] { 0, 1, 3, 4, 5, 6, 7, 8 }, values);
+        bool Missing(ulong address, out uint word) { Read(address, out word); return address != Base + secondRow; }
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 1, Missing, out values));
+        Assert.Empty(values);
+        words[6] |= 1u << 20;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 1, Read, out values));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void IntegerGatherDomainKeepsTexelsSeparateFromSamplerFiltering(bool gathered, bool accepted)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8UInt, 3, 1);
+        uint[] sampler = [4u << 9, 0, (3u << 20) | (3u << 22) | (2u << 26), 0];
+        bool Read(ulong address, out uint word) { word = 0xFA050403; return true; }
+        Assert.Equal(accepted, ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 1, Read, out var values, gathered));
+        if (accepted) Assert.Equal(new uint[] { 0, 1, 3, 4, 5 }, values);
+        sampler[3] = 3u << 30;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 1, Read, out values, gathered));
+    }
+
+    [Theory]
+    [InlineData(GuestTileMode.Linear)]
+    [InlineData(GuestTileMode.Standard4KB)]
     public void StorageVolumeWriteRangeIncludesEverySliceAndMip(GuestTileMode tile)
     {
         var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32Float, 16, 16,
