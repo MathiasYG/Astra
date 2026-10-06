@@ -99,7 +99,7 @@ public sealed class RuntimeValueEvaluator
     public bool EvaluateWide(ScalarValue value, out ulong result)
     {
         result = 0;
-        if (ReferenceEquals(value, _loopCounter))
+        if (_loopCounter is not null && IndirectSelectorValues.IsLoopCounterAlias(value, _loopCounter))
         {
             result = _loopValue;
             return true;

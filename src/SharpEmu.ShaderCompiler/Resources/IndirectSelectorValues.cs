@@ -8,6 +8,22 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // A finite overestimate of a selector. Unsupported paths retain the full-domain scan.
 public sealed class IndirectSelectorValues
 {
+    internal static bool IsLoopCounterAlias(ScalarValue value, ScalarValue counter)
+    {
+        if (ReferenceEquals(value, counter)) return true;
+        if (value.Kind != ScalarValueKind.Phi) return false;
+        var pending = new Stack<ScalarValue>(); pending.Push(value);
+        var seen = new HashSet<ScalarValue>(); var found = false;
+        while (pending.TryPop(out var current))
+        {
+            if (ReferenceEquals(current, counter)) { found = true; continue; }
+            if (!seen.Add(current)) continue;
+            if (current.Kind != ScalarValueKind.Phi) return false;
+            foreach (var operand in current.Operands) pending.Push(operand);
+        }
+        return found;
+    }
+
     // A sampled origin is conditional on the runtime source being point-sampled
     // RGBA8_UINT. The host reader must establish that condition before use.
     internal readonly record struct PackedByteOrigin(int MemoryIndex, uint Channel, uint Constant)
@@ -656,13 +672,19 @@ public sealed class IndirectSelectorValues
                 plan.Graph.ResolveInvariantPhi(value) is null).ToArray();
             if (loops.Length != 0)
             {
-                if (plan.Stage != ShaderStage.Compute || loops.Length != 1 ||
-                    !TryGetLoop(plan, loops[0], visited, out initial, out limit)) return false;
-                counter = loops[0];
+                if (plan.Stage != ShaderStage.Compute) return false;
+                foreach (var candidate in loops)
+                    if (TryGetLoop(plan, candidate, visited, out var candidateInitial, out var candidateLimit))
+                    {
+                        if (counter is not null) return false;
+                        counter = candidate; initial = candidateInitial; limit = candidateLimit;
+                    }
+                if (counter is null || loops.Any(value => !IsLoopCounterAlias(value, counter))) return false;
                 var boundsMemo = new Dictionary<ScalarValue, ScalarValue>();
                 if (!plan.ValidateRuntimeValue(plan.Graph.Substitute(initial, replacements, boundsMemo)) ||
                     !plan.ValidateRuntimeValue(plan.Graph.Substitute(limit, replacements, boundsMemo))) return false;
                 replacements[counter] = plan.Graph.Constant(0u);
+                foreach (var alias in loops) replacements[alias] = plan.Graph.Constant(0u);
                 if (handle.Kind == ScalarValueKind.SamplerHandle && key is null)
                 {
                     var first = handle.Operands[0];
@@ -753,7 +775,7 @@ public sealed class IndirectSelectorValues
                 return false;
             var increment = Array.FindIndex(counter.Operands, value => value.Kind == ScalarValueKind.Operation &&
                 value.Operation == ScalarOperation.IAdd32 && value.Operands.Length == 2 &&
-                ReferenceEquals(value.Operands[0], counter) && value.Operands[1].IsConstant && value.Operands[1].Payload == 1);
+                IsLoopCounterAlias(value.Operands[0], counter) && value.Operands[1].IsConstant && value.Operands[1].Payload == 1);
             if (increment < 0) return false;
             initial = counter.Operands[1 - increment];
             var flow = plan.Graph.ControlFlow;

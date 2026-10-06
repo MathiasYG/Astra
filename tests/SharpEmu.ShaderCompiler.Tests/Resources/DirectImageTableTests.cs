@@ -1719,6 +1719,54 @@ public sealed class DirectImageTableTests
         if (accepted) Assert.Equal(new uint[] { 96, 32 }, keys);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WorkgroupLoopAcceptsOnlyCounterPreservingControlFlowJoins(bool modifiesCounter)
+    {
+        var prefix = WorkgroupLoopImagePlan().Graph.Program.Instructions.Where(instruction => instruction.Pc < 36)
+            .Select(instruction => instruction.Pc == 16 ? Branch(16, "SCbranchScc0", 14) : instruction);
+        var program = Program([.. prefix,
+            Sopc(36, "SCmpEqU32", Gen5Operand.Scalar(12), Operand(0)),
+            Branch(40, "SCbranchScc0", 2),
+            modifiesCounter ? Sop2(44, "SAddI32", 13, Gen5Operand.Scalar(13), Operand(1)) : Nop(44),
+            Branch(48, "SBranch", 0),
+            ScalarBufferLoad(52, 8, 16, 8, dynamicOffsetRegister: 15),
+            Image(60, "ImageLoad", 16, dmask: 1),
+            Sop2(68, "SAddI32", 13, Gen5Operand.Scalar(13), Operand(1)),
+            Branch(72, "SBranch", -16), EndProgram(76)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 12,
+            computeSystemRegisters: new Gen5ComputeSystemRegisters(12, null, null, null));
+        var proof = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage?.Workgroup;
+        if (modifiesCounter) Assert.Null(proof);
+        else
+        {
+            Assert.NotNull(proof);
+            Assert.True(proof.TryEvaluate(plan, WorkgroupLoopImageInputs(), out var keys, out _));
+            Assert.Equal(new uint[] { 96, 32 }, keys);
+            Assert.True(IndirectSelectorValues.IsLoopCounterAlias(proof.LoopCounter!, proof.LoopCounter!));
+        }
+    }
+
+    [Fact]
+    public void LoopCounterAliasesPreserveCyclesAndRejectOtherIncomingValues()
+    {
+        var plan = WorkgroupLoopImagePlan();
+        var proof = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.Workgroup!;
+        var first = ScalarValue.Phi(1, ScalarValueType.U32);
+        var second = ScalarValue.Phi(2, ScalarValueType.U32);
+        first.SetPhiOperands([0, 2], [proof.LoopCounter!, second]);
+        second.SetPhiOperands([0, 1], [proof.LoopCounter!, first]);
+        Assert.True(IndirectSelectorValues.IsLoopCounterAlias(first, proof.LoopCounter!));
+        var evaluator = new RuntimeValueEvaluator(plan, WorkgroupLoopImageInputs(), proof.Input, 0, proof.LoopCounter, 7);
+        Assert.True(evaluator.Evaluate(first, out var value));
+        Assert.Equal(7u, value);
+        second.SetPhiOperands([0, 1], [ScalarValue.ConstantOf(8u), first]);
+        Assert.False(IndirectSelectorValues.IsLoopCounterAlias(first, proof.LoopCounter!));
+        var rejected = new RuntimeValueEvaluator(plan, WorkgroupLoopImageInputs(), proof.Input, 0, proof.LoopCounter, 7);
+        Assert.False(rejected.Evaluate(first, out _));
+    }
+
     [Fact]
     public void WorkgroupTableKeepsGdsWritesInTheirSeparateAddressSpace()
     {
