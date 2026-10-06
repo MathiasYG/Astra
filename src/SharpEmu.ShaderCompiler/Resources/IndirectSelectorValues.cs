@@ -618,7 +618,7 @@ public sealed class IndirectSelectorValues
     // Enumerate the actual dispatch domain, never a guessed workgroup ID. The
     // original scalar loads and their run-time image selector remain in the shader.
     internal sealed record WorkgroupDescriptor(ScalarValue Handle, ScalarValue Input, ScalarValue? Key,
-        uint? FlatAttribute = null, uint FlatChannel = 0)
+        uint? FlatAttribute = null, uint FlatChannel = 0, IndexedBufferDomain? BufferDomain = null)
     {
         internal static bool TryCreate(ShaderResourcePlan plan, ScalarValue handle, ScalarValue? key,
             out WorkgroupDescriptor result)
@@ -664,6 +664,11 @@ public sealed class IndirectSelectorValues
                     lane.Sources[0].Kind != Gen5OperandKind.VectorRegister) return false;
                 var definition = instructions.Where(instruction => instruction.Pc < lane.Pc &&
                     Builder.WritesRegister(instruction, lane.Sources[0])).LastOrDefault();
+                if (TryGetIndexedBufferDomain(plan, lane, definition, out var bufferDomain))
+                {
+                    result = new(handle, input, key, BufferDomain: bufferDomain);
+                    return true;
+                }
                 // P0 is one vertex's parameter, not a barycentric difference.
                 if (definition is not { Opcode: "VInterpMovF32", Control: Gen5InterpolationControl interpolation } ||
                     (definition.Words[0] & 255) != 2 || interpolation.Channel >= 4 ||
@@ -722,7 +727,13 @@ public sealed class IndirectSelectorValues
             keys = []; descriptors = [];
             if (inputs.OtherStageMayWriteMemory || inputs.ReadCleanMemory is null) return false;
             uint[] inputValues;
-            if (FlatAttribute is { } attribute)
+            if (BufferDomain is { } bufferDomain)
+            {
+                if (plan.Memory.Entries.Any(memory => memory.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) &&
+                        memory.Access is MemoryAccess.Write or MemoryAccess.Atomic) ||
+                    !bufferDomain.TryEvaluate(plan, inputs, out inputValues)) return false;
+            }
+            else if (FlatAttribute is { } attribute)
             {
                 if (plan.Memory.Entries.Any(memory => memory.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) && memory.Access is MemoryAccess.Write or MemoryAccess.Atomic) ||
                     inputs.ReadFlatParameterDomain is null ||
@@ -806,6 +817,83 @@ public sealed class IndirectSelectorValues
             keys = candidates.Keys.ToArray();
             descriptors = candidates.Values.ToArray();
             return descriptors.Length != 0;
+        }
+    }
+
+    private static bool TryGetIndexedBufferDomain(ShaderResourcePlan plan, Gen5ShaderInstruction lane,
+        Gen5ShaderInstruction? definition, out IndexedBufferDomain domain)
+    {
+        domain = null!;
+        if (definition?.Control is not Gen5BufferMemoryControl
+                { IndexEnabled: true, OffsetEnabled: false, Typed: false } control ||
+            definition.Opcode is not ("BufferLoadDword" or "BufferLoadDwordx2" or "BufferLoadDwordx3" or "BufferLoadDwordx4") ||
+            control.OffsetBytes < 0 ||
+            definition.Sources.Count < 3 || !(definition.Sources[2] is { Kind: Gen5OperandKind.EncodedConstant, Value: 128 } or { Kind: Gen5OperandKind.LiteralConstant, Value: 0 }) ||
+            lane.Sources.Count < 2 || lane.Sources[1].Kind != Gen5OperandKind.ScalarRegister ||
+            !plan.Memory.TryGetIndex(definition.Pc, 0, out var memoryIndex) ||
+            plan.Accesses[memoryIndex]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } handle ||
+            !plan.ValidateRuntimeValue(handle)) return false;
+        var component = lane.Sources[0].Value - control.VectorData;
+        if (component >= control.DwordCount) return false;
+        var instructions = plan.Graph.Program.Instructions;
+        var scan = instructions.Where(instruction => instruction.Pc < lane.Pc &&
+            Builder.WritesRegister(instruction, lane.Sources[1])).LastOrDefault();
+        if (scan is not { Opcode: "SFF1I32B64", Sources.Count: 1 } ||
+            scan.Sources[0] is not { Kind: Gen5OperandKind.ScalarRegister, Value: < 126 } remaining || (remaining.Value & 1) != 0) return false;
+        var capture = instructions.Where(instruction => instruction.Pc < scan.Pc &&
+            Builder.WritesSavedMask(instruction, remaining)).LastOrDefault();
+        if (capture is not { Sources.Count: 1 } ||
+            !(capture.Opcode == "SMovB64" && capture.Sources[0] == Gen5Operand.Scalar(126) || capture.Opcode == "SAndSaveexecB64") ||
+            !Gen5ExecFullAnalysis.AnalyzeInitializedLanes(plan.Graph.Program, definition.Pc, plan.Graph.WaveSize == 32).Contains(capture.Pc)) return false;
+        var flow = plan.Graph.ControlFlow;
+        bool Dominates(uint first, uint last)
+        {
+            var firstBlock = flow.BlockOf(first); var lastBlock = flow.BlockOf(last);
+            if (firstBlock == lastBlock) return first <= last;
+            var pending = new Stack<int>(); pending.Push(0); var seen = new HashSet<int>();
+            while (pending.TryPop(out var block))
+            {
+                if (block == firstBlock || !seen.Add(block)) continue;
+                if (block == lastBlock) return false;
+                foreach (var next in flow.Successors[block]) pending.Push(next);
+            }
+            return true;
+        }
+        if (!Dominates(definition.Pc, capture.Pc) || !Dominates(capture.Pc, scan.Pc) || !Dominates(scan.Pc, lane.Pc)) return false;
+        var end = lane.Pc;
+        foreach (var edge in instructions.Where(instruction => instruction.Pc > lane.Pc))
+            if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(edge, out var target) && target >= capture.Pc && target <= lane.Pc)
+                end = Math.Max(end, edge.Pc);
+        foreach (var instruction in instructions.Where(instruction => instruction.Pc > capture.Pc && instruction.Pc <= end))
+            if (Builder.WritesSavedMask(instruction, remaining) &&
+                (instruction is not { Opcode: "SAndn2B64", Sources.Count: 2 } || instruction.Sources[0] != remaining)) return false;
+        if (instructions.Any(instruction => instruction.Pc > definition.Pc && instruction.Pc <= end &&
+            Builder.WritesRegister(instruction, lane.Sources[0]))) return false;
+        domain = new(handle, checked((uint)control.OffsetBytes + component * 4), checked((uint)control.OffsetBytes + control.DwordCount * 4));
+        return true;
+    }
+
+    internal sealed record IndexedBufferDomain(ScalarValue Handle, uint Offset, uint RequiredBytes)
+    {
+        internal bool TryEvaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] values)
+        {
+            values = [];
+            var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(inputs.ReadCleanMemory));
+            if (inputs.ReadCleanMemory is null || !PackedPointerDescriptor.EvaluateHandle(Handle, evaluator, out var words)) return false;
+            var stride = (words[1] >> 16) & 0x3FFF;
+            var address = ((ulong)(words[1] & 0xFFFF) << 32) | words[0];
+            var size = (ulong)words[2] * stride;
+            if (stride == 0 || RequiredBytes > stride || (Offset & 3) != 0 || (address & 3) != 0 ||
+                (words[1] & 0x80000000) != 0 || (words[3] & 0xF0800000) != 0 ||
+                words[2] > MaximumCombinations || size > 16 * 1024 * 1024 || address + size > 1ul << 48) return false;
+            var found = new HashSet<uint> { 0 }; // Raw vector loads return zero for out-of-range records.
+            for (uint record = 0; record < words[2]; record++)
+            {
+                if (!inputs.ReadCleanMemory(address + (ulong)record * stride + Offset, out var word) ||
+                    found.Add(word) && found.Count > MaximumValues) return false;
+            }
+            values = found.Order().ToArray();
+            return true;
         }
     }
 

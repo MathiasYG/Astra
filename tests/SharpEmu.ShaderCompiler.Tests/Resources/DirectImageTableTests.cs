@@ -649,6 +649,64 @@ public sealed class DirectImageTableTests
         }
     }
 
+    [Theory]
+    [InlineData(false, false, "", true)]
+    [InlineData(true, false, "", false)]
+    [InlineData(false, true, "", false)]
+    [InlineData(false, false, "capture", false)]
+    [InlineData(false, false, "overwrite", false)]
+    [InlineData(false, false, "write", false)]
+    [InlineData(false, false, "other-stage", false)]
+    public void IndexedBufferDescriptorTableRequiresEverySourceRecord(bool unreadable, bool swizzled, string mutation, bool expected)
+    {
+        var program = Program([
+            new(0, Gen5ShaderEncoding.Vintrp, "VInterpMovF32", [2u], [Gen5Operand.Vector(2)],
+                [Gen5Operand.Vector(1)], new Gen5InterpolationControl(3, 0)),
+            new(4, Gen5ShaderEncoding.Mubuf, "BufferLoadDwordx2", [0u, 0u],
+                [Gen5Operand.Vector(1), Gen5Operand.Scalar(4), Operand(0)], [Gen5Operand.Vector(2), Gen5Operand.Vector(3)],
+                new Gen5BufferMemoryControl(2, 1, 2, 4, 0, true, false, false, false)),
+            Sop1(12, "SMovB64", 6, Gen5Operand.Scalar(126)),
+            Sop1(16, "SFF1I32B64", 9, Gen5Operand.Scalar(6)),
+            new(20, Gen5ShaderEncoding.Vop3, "VReadlaneB32", [0u, 0u],
+                [Gen5Operand.Vector(3), Gen5Operand.Scalar(9), Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(10)], null),
+            Sop2(28, "SMulI32", 9, Gen5Operand.Scalar(10), Operand(64)),
+            ScalarBufferLoad(32, 0, 16, 8, dynamicOffsetRegister: 9),
+            ScalarBufferLoad(40, 0, 24, 4, immediateOffset: 32, dynamicOffsetRegister: 9),
+            Image(48, "ImageSampleLz", 16, samplerRegister: 24, dmask: 1), EndProgram(56),
+        ]);
+        if (mutation == "capture") program = program with { Instructions = program.Instructions.Select(instruction =>
+            instruction.Pc == 12 ? Sop1(12, "SMovB64", 6, Gen5Operand.Scalar(12)) : instruction).ToArray() };
+        if (mutation == "overwrite") program = program with { Instructions = program.Instructions.Select(instruction =>
+            instruction.Pc == 16 ? new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Vop1, "VMovB32", [0u],
+                [Operand(42)], [Gen5Operand.Vector(3)], null) : instruction).ToArray() };
+        if (mutation == "write") program = program with { Instructions = [.. program.Instructions.Where(instruction => instruction.Pc < 56),
+            BufferAccess(56, "BufferStoreDword", 4), EndProgram(64)] };
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, Hash, 0, 8);
+        var original = WorkgroupImageInputs();
+        uint second = 1;
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address == 0x4004) return true;
+            if (address == 0x400C) { word = second; return !unreadable; }
+            return original.ReadMemory!(address, out word);
+        }
+        var inputs = new ResourceRuntimeInputs { UserData = [.. original.UserData.Take(4),
+            0x4000, (8u << 16) | (swizzled ? 0x80000000u : 0), 2, (20u << 12) | 0xFAC],
+            ReadMemory = Read, ReadCleanMemory = Read, OtherStageMayWriteMemory = mutation == "other-stage" };
+        var snapshot = new ResourceSnapshot(); var specialization = new ResourceSpecialization();
+        var cache = new ResourceMaterializationCache();
+        bool Resident(ulong address, Span<byte> bytes, bool clean) => false;
+        Assert.Equal(expected, cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        if (!expected) return;
+        Assert.Equal(2, snapshot.Images.Length);
+        second = 0;
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Single(snapshot.Images);
+        second = 2; // The source is readable, but its selected descriptor is outside the bound heap.
+        Assert.False(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+    }
+
     private static Gen5ShaderProgram RuntimeMemoryBoundProgram(bool writes = false) => Program([
         ScalarLoad(0, 4, 2), MoveScalar(8, 8, 0),
         Sopc(12, "SCmpLtU32", Gen5Operand.Scalar(8), Gen5Operand.Scalar(2)),

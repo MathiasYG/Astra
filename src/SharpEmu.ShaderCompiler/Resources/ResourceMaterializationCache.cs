@@ -78,7 +78,8 @@ public sealed class ResourceMaterializationCache
         // are not reusable until that proof is represented in the cache key.
         if (ResourceMaterializer.RequiresDescriptorWriteProof(plan) ||
             plan.DescriptorSources.Any(source => source.IndirectImage?.PackedTextureDomain is not null ||
-                source.IndirectImage?.Workgroup?.FlatAttribute is not null))
+                source.IndirectImage?.Workgroup?.FlatAttribute is not null ||
+                source.IndirectImage?.Workgroup?.BufferDomain is not null))
             return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
         var key = KeyOf(plan, inputs);
         var found = TryFind(key, plan, inputs, out var cached);
