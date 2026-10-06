@@ -211,7 +211,11 @@ public static class ResourceMaterializer
                     directCandidates = directCandidates.Take(candidateCount).ToArray();
                     if (candidateCount == 0)
                     {
-                        return false;
+                        if (!ProvenUnusedSource(plan, image.Source)) return false;
+                        // The guarded instruction cannot execute. Use the same
+                        // backend null binding as other proven inactive resources.
+                        snapshot.Images[imageIndex] = new uint[8];
+                        continue;
                     }
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
                         cleanInputs, [], evaluateTable: false, out var descriptors, out _))
@@ -312,8 +316,13 @@ public static class ResourceMaterializer
             if (samplerSource.RuntimeSamplerCountSource is { } countSource)
             {
                 if (inputs.ReadCleanMemory is null ||
-                    !TryCandidateCount(plan, countSource, candidates.Count, inputs.WithReader(inputs.ReadCleanMemory), out var count) ||
-                    count == 0) return false;
+                    !TryCandidateCount(plan, countSource, candidates.Count, inputs.WithReader(inputs.ReadCleanMemory), out var count))
+                    return false;
+                if (count == 0)
+                {
+                    if (!ProvenUnusedSource(plan, sampler.Source)) return false;
+                    continue;
+                }
                 candidates = candidates.Take(count).ToArray();
             }
             if (inputs.ReadCleanMemory is null ||
@@ -371,6 +380,37 @@ public static class ResourceMaterializer
 
         snapshot.UserData = inputs.UserData.ToArray();
         if (writeProof is not null && !writeProof.Validate(plan, inputs)) return false;
+        return true;
+    }
+
+    private static bool ProvenUnusedSource(ShaderResourcePlan plan, uint source)
+    {
+        if (plan.DescriptorSources[(int)source].RuntimeZeroCountGuardPc is not { } pc) return false;
+        var flow = plan.Graph.ControlFlow;
+        var instruction = plan.Graph.Program.Instructions.First(instruction => instruction.Pc == pc);
+        var guard = flow.BlockOf(pc);
+        if (guard < 0 || !flow.BlockByStartPc.TryGetValue(pc + (uint)instruction.Words.Count * sizeof(uint), out var admitted))
+            return false;
+        var consumers = new HashSet<int>();
+        foreach (var memory in plan.Memory.Entries)
+        {
+            if (memory.Kind != MemoryResourceKind.Image || memory.PlanningOnly) continue;
+            var imageUses = memory.Resource < plan.Info.Images.Count && plan.Info.Images[(int)memory.Resource].Source == source;
+            var samplerUses = memory.NeedsSampler && memory.Sampler < plan.Info.Samplers.Count &&
+                plan.Info.Samplers[(int)memory.Sampler].Source == source;
+            if (imageUses || samplerUses) consumers.Add(flow.BlockOf(memory.Pc));
+        }
+        if (consumers.Count == 0 || consumers.Contains(-1)) return false;
+        var pending = new Stack<int>();
+        var visited = new HashSet<int>();
+        pending.Push(0);
+        while (pending.TryPop(out var block))
+        {
+            if (!visited.Add(block)) continue;
+            if (consumers.Contains(block)) return false;
+            foreach (var successor in flow.Successors[block])
+                if (block != guard || successor != admitted) pending.Push(successor);
+        }
         return true;
     }
 

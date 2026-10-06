@@ -334,6 +334,7 @@ public sealed partial class ResourceTracker
                         workgroup.Key is not null && !_graph.Equivalent(workgroup.Key, otherWorkgroup.Key!)) ||
                 current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
                 current.RuntimeSamplerCountSource != source.RuntimeSamplerCountSource ||
+                current.RuntimeZeroCountGuardPc != source.RuntimeZeroCountGuardPc ||
                 current.SamplerSelectorMemoryIndex != source.SamplerSelectorMemoryIndex ||
                 (current.FiniteSamplerSources is null) != (source.FiniteSamplerSources is null) ||
                 current.FiniteSamplerSources is { } finiteSources && !finiteSources.SequenceEqual(source.FiniteSamplerSources!) ||

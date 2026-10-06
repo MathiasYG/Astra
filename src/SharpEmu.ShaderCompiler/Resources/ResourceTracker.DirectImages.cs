@@ -55,7 +55,7 @@ public sealed partial class ResourceTracker
         var block = _graph.ControlFlow.Blocks.First(candidate => memory.Pc >= candidate.StartPc && memory.Pc < candidate.EndPc);
         if (reads.Any(word => _plan.Memory[word.MemoryIndex].Pc < block.StartPc ||
                 _plan.Memory[word.MemoryIndex].Pc >= block.EndPc) ||
-            !TryGetBoundedRuntimeSelector(reads[0].Operands[1], memory.Pc, out var selector, out var limit)) return false;
+            !TryGetBoundedRuntimeSelector(reads[0].Operands[1], memory.Pc, out var selector, out var limit, out var guardPc)) return false;
         var candidates = new List<uint>();
         for (uint index = 0; index < ShaderResourceInfo.MaxImages; index++)
         {
@@ -74,6 +74,7 @@ public sealed partial class ResourceTracker
             Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray(),
             EquivalentSamplerSources = candidates,
             RuntimeSamplerCountSource = countSource,
+            RuntimeZeroCountGuardPc = guardPc,
         });
         return true;
     }
@@ -177,12 +178,12 @@ public sealed partial class ResourceTracker
 
         if (TryGetPostTestedLoopSelector(reads[0].Operands[1], keyMemory.Pc, out var loopKey, out var loopValues))
             return MakeCandidates(loopKey, loopValues, out plan);
-        if (TryGetBoundedRuntimeSelector(reads[0].Operands[1], keyMemory.Pc, out var runtimeKey, out var runtimeLimit))
+        if (TryGetBoundedRuntimeSelector(reads[0].Operands[1], keyMemory.Pc, out var runtimeKey, out var runtimeLimit, out var runtimeGuard))
         {
             var countSource = InternSource(new DescriptorSource { Dwords = [runtimeLimit] });
             return MakeCandidates(runtimeKey,
                 Enumerable.Range(0, ShaderResourceInfo.MaxImages).Select(index => (uint)index).ToArray(),
-                out plan, countSource);
+                out plan, countSource, zeroCountGuard: runtimeGuard);
         }
         // Include the all-zero input result unless the scan's incoming edge proves it cannot occur.
         if (TryGetGuardedSelector(reads[0].Operands[1], keyMemory.Pc, out var guarded, out var bound))
@@ -233,7 +234,8 @@ public sealed partial class ResourceTracker
         return madeCandidates;
 
         bool MakeCandidates(ScalarValue selected, uint[]? domain, out IndirectImagePlan candidatePlan,
-            uint? countSource = null, IndirectSelectorValues.GatheredByteSelectorProof? byteSelectorProof = null)
+            uint? countSource = null, IndirectSelectorValues.GatheredByteSelectorProof? byteSelectorProof = null,
+            uint? zeroCountGuard = null)
         {
             candidatePlan = null!;
             var candidates = new List<DirectImageCandidate>();
@@ -261,6 +263,7 @@ public sealed partial class ResourceTracker
             var imageSource = new DescriptorSource
             {
                 Dwords = sources[0].Dwords,
+                RuntimeZeroCountGuardPc = zeroCountGuard,
                 IndirectImage = new IndirectImageSelector(0, 0, 0, 0, 0)
                     {
                         DirectCandidates = candidates,
@@ -282,9 +285,11 @@ public sealed partial class ResourceTracker
         }
     }
 
-    private bool TryGetBoundedRuntimeSelector(ScalarValue offset, uint loadPc, out ScalarValue selector, out ScalarValue limit)
+    private bool TryGetBoundedRuntimeSelector(ScalarValue offset, uint loadPc, out ScalarValue selector, out ScalarValue limit,
+        out uint guardPc)
     {
         selector = limit = null!;
+        guardPc = 0;
         // A constant record-field offset does not change the guarded counter.
         // Candidate construction still evaluates the complete offset expression.
         while (offset.Kind == ScalarValueKind.Operation && offset.Operation == ScalarOperation.IAdd32 &&
@@ -335,6 +340,7 @@ public sealed partial class ResourceTracker
             if (ReachesLoad(0) || ReachesLoad(rejected)) continue;
             selector = key;
             limit = bound;
+            guardPc = pc;
             return true;
 
             bool ReachesLoad(int start)

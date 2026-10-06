@@ -242,6 +242,7 @@ public sealed class DescriptorSource
     // descriptors are identical. Rechecked against clean memory on every draw.
     public IReadOnlyList<uint>? EquivalentSamplerSources { get; init; }
     public uint? RuntimeSamplerCountSource { get; init; }
+    internal uint? RuntimeZeroCountGuardPc { get; init; }
     public IReadOnlyList<DirectImageCandidate>? FiniteSamplerSources { get; init; }
     public int SamplerSelectorMemoryIndex { get; init; } = -1;
     // Scalar loads from an empty buffer return zero regardless of the offset.

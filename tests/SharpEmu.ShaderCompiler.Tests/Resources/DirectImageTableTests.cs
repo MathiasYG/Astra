@@ -12,7 +12,8 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class DirectImageTableTests
 {
     [Theory]
-    [InlineData(0u, false, false, 0)]
+    [InlineData(0u, false, true, 0)]
+    [InlineData(0u, true, true, 0)]
     [InlineData(1u, false, true, 1)]
     [InlineData(6u, false, true, 6)]
     [InlineData(256u, false, true, 256)]
@@ -39,6 +40,7 @@ public sealed class DirectImageTableTests
         Assert.NotNull(source.IndirectImage?.CandidateCountSource);
         bool Read(ulong address, out uint word)
         {
+            Assert.NotEqual(0u, count);
             word = 0;
             if (unreadable || address < 0x1000 || address >= 0x1000 + count * 64UL) return false;
             var record = (uint)(address - 0x1000) / 64;
@@ -65,7 +67,8 @@ public sealed class DirectImageTableTests
             return;
         }
         Assert.Equal(expectedCandidates > 1, specialization.Images[0].IndirectSearchIterations != 0);
-        Assert.Equal(0xFFF000u, snapshot.Samplers[0][1]);
+        Assert.Equal(count == 0 ? 0u : 0xFFF000u, snapshot.Samplers[0][1]);
+        if (count == 0) Assert.All(snapshot.Images[0], word => Assert.Equal(0u, word));
         if (expectedCandidates == 1) Assert.Equal(0x2000u, snapshot.Images[0][0]);
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(resources.Info,
@@ -230,6 +233,12 @@ public sealed class DirectImageTableTests
         count = 2;
         Assert.True(cache.Materialize(plan, Inputs(), Resident, ref snapshot, ref specialization, out _));
         Assert.Equal(2, snapshot.Images.Length);
+        count = 0;
+        Assert.True(cache.Materialize(plan, Inputs(), Resident, ref snapshot, ref specialization, out _));
+        Assert.All(snapshot.Images[0], word => Assert.Equal(0u, word));
+        count = 3;
+        Assert.True(cache.Materialize(plan, Inputs(), Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(3, snapshot.Images.Length);
         var verified = snapshot;
         Assert.False(cache.Materialize(plan, Inputs(true), Resident, ref snapshot, ref specialization, out _));
         Assert.Same(verified, snapshot);
@@ -359,6 +368,30 @@ public sealed class DirectImageTableTests
             Assert.Same(original, snapshot);
             Assert.Equal(0, cache.Hits);
         }
+    }
+
+    [Fact]
+    public void ZeroRuntimeCountCannotHideAnImageConsumerAfterTheLoop()
+    {
+        var instructions = RuntimeMemoryBoundProgram().Instructions;
+        var program = Program([
+            .. instructions.Take(instructions.Count - 1),
+            Image(60, "ImageSampleLz", 16, 24, dmask: 1), EndProgram(68),
+        ]);
+        ShaderResourcePlan plan;
+        try { plan = Extract(program, userDataCount: 6); }
+        catch (ResourcePlanException exception)
+        {
+            Assert.Contains("not a valid runtime value", exception.Message);
+            return;
+        }
+        bool Read(ulong address, out uint word) => ReadRuntimeBoundMemory(address, 0, out word);
+        ResourceSnapshot snapshot = new();
+        ResourceSpecialization specialization = new();
+        var original = snapshot;
+        Assert.False(ResourceMaterializer.Materialize(plan,
+            Inputs([0x1000, 0, 0, 0, 0x8000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        Assert.Same(original, snapshot);
     }
 
     private static Gen5ShaderProgram RuntimeMemoryBoundProgram(bool writes = false) => Program([
