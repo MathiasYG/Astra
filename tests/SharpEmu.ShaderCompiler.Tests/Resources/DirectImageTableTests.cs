@@ -12,6 +12,50 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class DirectImageTableTests
 {
     [Theory]
+    [InlineData(6u, 0u, 1u, true)]
+    [InlineData(1u, 0u, 1u, true)]
+    [InlineData(256u, 0u, 1u, true)]
+    [InlineData(0u, 0u, 1u, false)]
+    [InlineData(257u, 0u, 1u, false)]
+    [InlineData(6u, 1u, 1u, false)]
+    [InlineData(6u, 0u, 2u, false)]
+    public void PostTestedOuterLoopKeepsDescriptorAcrossInnerLoop(uint count, uint start, uint step, bool accepted)
+    {
+        var program = Program([
+            MoveScalar(0, 8, start),
+            Sop2(4, "SLshlB32", 9, Gen5Operand.Scalar(8), Operand(6)),
+            ScalarLoad(8, 0, 16, 8, dynamicOffsetRegister: 9),
+            MoveScalar(16, 10, 0),
+            Image(20, "ImageLoad", 16, dmask: 1),
+            Sop2(28, "SAddI32", 10, Gen5Operand.Scalar(10), Operand(1)),
+            Sopc(32, "SCmpLtI32", Gen5Operand.Scalar(10), Operand(2)),
+            Branch(36, "SCbranchScc1", -5),
+            Sop2(40, "SAddI32", 8, Gen5Operand.Scalar(8), Operand(step)),
+            Sopc(44, "SCmpLtI32", Gen5Operand.Scalar(8), Operand(count)),
+            Branch(48, "SCbranchScc1", -12), EndProgram(52),
+        ]);
+        if (!accepted)
+        {
+            try { var rejected = Extract(program, userDataCount: 2); Assert.Null(rejected.DescriptorSources[(int)rejected.Info.Images[0].Source].IndirectImage); }
+            catch (ResourcePlanException) { }
+            return;
+        }
+        var plan = Extract(program, userDataCount: 2);
+        var indirect = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage;
+        Assert.NotNull(indirect);
+        Assert.Equal(Enumerable.Range(0, (int)count).Select(index => (uint)index * 64), indirect!.DirectCandidates!.Select(candidate => candidate.Offset));
+        bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address < 0x1000 || address >= 0x1000 + count * 64UL) return false;
+            var component = (address - 0x1000) % 64 / 4;
+            word = component switch { 0 => 0x2000u, 1 => 20u << 20, 3 => 0xFACu | (9u << 28), _ => 0u };
+            return true;
+        }
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+    }
+    [Theory]
     [InlineData(0x80000000u, true)]
     [InlineData(0x10000000u, false)]
     public void ImageCandidatesDistinguishResourceLevelFromReservedBits(uint bit, bool valid)

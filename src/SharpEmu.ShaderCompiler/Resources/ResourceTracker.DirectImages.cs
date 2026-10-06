@@ -110,7 +110,7 @@ public sealed partial class ResourceTracker
         if (handle.Kind != ScalarValueKind.ImageHandle || handle.Operands.Length != 8)
             return false;
 
-        var reads = handle.Operands;
+        var reads = handle.Operands.Select(value => _graph.ResolveInvariantPhi(value) ?? value).ToArray();
         var memoryIndices = new int[8];
         var canSuppressMemoryReads = true;
         for (var component = 0; component < reads.Length; component++)
@@ -119,13 +119,13 @@ public sealed partial class ResourceTracker
             if (read.Kind is not (ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord) ||
                 read.Kind != reads[0].Kind || read.MemoryIndex < 0 ||
                 read.MemoryIndex >= _plan.Memory.Count || !MemoryIndexBelongsTo(read.MemoryIndex, read) ||
-                !UsesOnly(read, [handle])) return false;
+                !UsesOnlyThroughInvariantPhis(read, handle)) return false;
             var memory = _plan.Memory[read.MemoryIndex];
             if (memory.Kind != (read.Kind == ScalarValueKind.ScalarBufferWord
                     ? MemoryResourceKind.ScalarBuffer : MemoryResourceKind.ScalarAddress) ||
                 memory.DataBits != 32 || memory.DataDwords != 1)
                 return false;
-            canSuppressMemoryReads &= HasOnlyImageConsumers(memory, handle);
+            canSuppressMemoryReads &= ReferenceEquals(handle.Operands[component], read) && HasOnlyImageConsumers(memory, handle);
             memoryIndices[component] = read.MemoryIndex;
         }
 
@@ -140,6 +140,8 @@ public sealed partial class ResourceTracker
         if (memoryIndices.Any(index => _plan.Memory[index].Pc < block.StartPc || _plan.Memory[index].Pc >= block.EndPc))
             return false;
 
+        if (TryGetPostTestedLoopSelector(reads[0].Operands[1], keyMemory.Pc, out var loopKey, out var loopValues))
+            return MakeCandidates(loopKey, loopValues, out plan);
         // Include the all-zero input result unless the scan's incoming edge proves it cannot occur.
         if (TryGetGuardedSelector(reads[0].Operands[1], keyMemory.Pc, out var guarded, out var bound))
         {
@@ -222,6 +224,84 @@ public sealed partial class ResourceTracker
         }
     }
 
+    private bool UsesOnlyThroughInvariantPhis(ScalarValue value, ScalarValue handle)
+    {
+        var pending = new Stack<ScalarValue>(); pending.Push(value);
+        var visited = new HashSet<ScalarValue>();
+        var foundHandle = false;
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current)) continue;
+            if (!_uses.TryGetValue(current, out var users)) return false;
+            foreach (var user in users)
+            {
+                if (ReferenceEquals(user, handle)) { foundHandle = true; continue; }
+                if (user.Kind != ScalarValueKind.Phi || !ReferenceEquals(_graph.ResolveInvariantPhi(user), value)) return false;
+                pending.Push(user);
+            }
+        }
+        return foundHandle;
+    }
+
+    private static bool IsInvariantPhiOf(ScalarValue value, ScalarValue root)
+    {
+        var pending = new Stack<ScalarValue>(); pending.Push(value);
+        var visited = new HashSet<ScalarValue>(); var found = false;
+        while (pending.TryPop(out var current))
+        {
+            if (ReferenceEquals(current, root)) { found = true; continue; }
+            if (!visited.Add(current)) continue;
+            if (current.Kind != ScalarValueKind.Phi) return false;
+            foreach (var operand in current.Operands) pending.Push(operand);
+        }
+        return found;
+    }
+    private bool TryGetPostTestedLoopSelector(ScalarValue offset, uint loadPc, out ScalarValue selector, out uint[] values)
+    {
+        selector = null!; values = [];
+        if (offset.Kind != ScalarValueKind.Operation || offset.Operation is not (ScalarOperation.ShiftLeft32 or ScalarOperation.IMul32) ||
+            offset.Operands.Length != 2 || !offset.Operands[1].IsConstant) return false;
+        var key = offset.Operands[0];
+        if (key.Kind != ScalarValueKind.Phi || key.Type != ScalarValueType.U32) return false;
+        var alternatives = new HashSet<ScalarValue>();
+        var pending = new Stack<ScalarValue>(); pending.Push(key); var visited = new HashSet<ScalarValue>();
+        while (pending.TryPop(out var value))
+        {
+            if (!visited.Add(value)) continue;
+            if (value.Kind == ScalarValueKind.Phi) foreach (var operand in value.Operands) pending.Push(operand);
+            else alternatives.Add(value);
+        }
+        if (alternatives.Count != 2 || !alternatives.Any(value => value.IsConstant && value.Payload == 0)) return false;
+        var increment = alternatives.SingleOrDefault(value => !value.IsConstant);
+        if (increment is null || increment.Kind != ScalarValueKind.Operation || increment.Operation != ScalarOperation.IAdd32 || increment.Operands.Length != 2 ||
+            !increment.Operands[1].IsConstant || increment.Operands[1].Payload != 1 || !IsInvariantPhiOf(increment.Operands[0], key)) return false;
+        var flow = _graph.ControlFlow;
+        var header = key.PhiBlock;
+        var loadBlock = flow.BlockOf(loadPc);
+        foreach (var (pc, condition) in _plan.FlattenedBranchConditions)
+        {
+            if (condition.Kind != ScalarValueKind.Operation || condition.Operation != ScalarOperation.SLessThan32 || condition.Operands.Length != 2 ||
+                !_graph.Equivalent(condition.Operands[0], increment) || !condition.Operands[1].IsConstant ||
+                condition.Operands[1].Payload is 0 or > ShaderResourceInfo.MaxImages) continue;
+            var branch = _graph.Program.Instructions.First(instruction => instruction.Pc == pc);
+            if (branch.Opcode != "SCbranchScc1" || !SharpEmu.ShaderCompiler.Ir.Gen5IrBranchResolver.Instance.TryGetBranchTarget(branch, out var target) ||
+                !flow.BlockByStartPc.TryGetValue(target, out var backedgeHeader) || backedgeHeader != header) continue;
+            var latch = flow.BlockOf(pc);
+            // No path may enter the descriptor load without the counter's defining header.
+            var queue = new Stack<int>(); queue.Push(0); var seen = new HashSet<int>(); var bypass = false;
+            while (queue.TryPop(out var block))
+            {
+                if (block == header || !seen.Add(block)) continue;
+                if (block == loadBlock) { bypass = true; break; }
+                foreach (var next in flow.Successors[block]) queue.Push(next);
+            }
+            if (bypass || flow.Predecessors[header].Count(parent => parent >= header && parent != latch) != 0) continue;
+            selector = key;
+            values = Enumerable.Range(0, (int)condition.Operands[1].Payload).Select(index => (uint)index).ToArray();
+            return true;
+        }
+        return false;
+    }
     private bool TryGetGuardedSelector(ScalarValue offset, uint loadPc, out ScalarValue selector, out uint[] values)
     {
         selector = null!;
