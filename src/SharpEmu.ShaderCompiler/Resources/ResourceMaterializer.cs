@@ -531,21 +531,6 @@ public static class ResourceMaterializer
         }
     }
 
-    private static readonly HashSet<(uint Pc, uint Stride)> ReportedRecordAlignedFallbacks = new();
-
-    // Once per image and material stride, so a table probed every draw does not flood the log.
-    private static void ReportRecordAlignedFallback(uint pc, uint stride, ulong exhaustiveCount, ulong alignedCount)
-    {
-        lock (ReportedRecordAlignedFallbacks)
-        {
-            if (ReportedRecordAlignedFallbacks.Add((pc, stride)))
-            {
-                Console.Error.WriteLine($"[GPU][WARN] indirect image {Hex(pc)}: {exhaustiveCount} unbounded selector probes exceed {MaxIndirectImageProbes}; " +
-                    $"probing the {alignedCount} record-aligned offsets (selectors assumed below 2^32/stride)");
-            }
-        }
-    }
-
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>
         descriptor[0] == 0 && (descriptor[1] & 0xFF) == 0;
 
@@ -712,38 +697,18 @@ public static class ResourceMaterializer
             }
         }
         // Without a proven selector set every offset residue + k * step is reachable, because
-        // selector * stride + offset wraps modulo 2^32 for an unbounded 32-bit selector. A
-        // table whose exhaustive probe count fits the cap keeps that enumeration unchanged.
-        // Past the cap, a non-multiple of the stride needs a selector >= 2^32 / stride, which
-        // no real table index reaches (the hardware reads selector * stride + offset), so the
-        // probe falls back to the record-aligned offsets offset + k * stride inside the table.
-        var probeStart = residue;
-        var probeStep = step;
-        var probeTotal = probeCount;
+        // selector * stride + offset wraps modulo 2^32 for an unbounded 32-bit selector.
+        // Material-table size alone does not bound the selector before this arithmetic.
+        // Require a proven selector set when exhaustive enumeration exceeds the cap.
         if (provenOffsets is null && probeCount > MaxIndirectImageProbes)
         {
-            var alignedCount = indirect.SelectorStride != 0 && indirect.SelectorOffset <= limit ?
-                (limit - indirect.SelectorOffset) / indirect.SelectorStride + 1 : 0;
-            if (indirect.SelectorStride == 0 || alignedCount > MaxIndirectImageProbes)
-            {
-                return Detail($"indirect image {Hex(image.FirstUsePc)}: {probeCount} unbounded selector probes exceed {MaxIndirectImageProbes} (material V# {Words(material.Dwords)} stride={indirect.SelectorStride} offset={indirect.SelectorOffset})");
-            }
-
-            ReportRecordAlignedFallback(image.FirstUsePc, indirect.SelectorStride, probeCount, alignedCount);
-            if (diagnostic is not null)
-            {
-                diagnostic.SelectionMode = "record_aligned_fallback";
-            }
-
-            probeStart = indirect.SelectorOffset;
-            probeStep = indirect.SelectorStride;
-            probeTotal = alignedCount;
+            return Detail($"indirect image {Hex(image.FirstUsePc)}: {probeCount} unbounded selector probes exceed {MaxIndirectImageProbes} (material V# {Words(material.Dwords)} stride={indirect.SelectorStride} offset={indirect.SelectorOffset})");
         }
 
         var keys = new List<uint> { 0 };
         var seen = new HashSet<uint> { 0 };
         var offsets = provenOffsets is not null ? provenOffsets.Select(offset => (ulong)offset) :
-            Enumerable.Range(0, (int)probeTotal).Select(index => probeStart + (ulong)index * probeStep);
+            Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
         foreach (var offset in offsets)
         {
             if (!ReadScalarBufferWord(material.Dwords, (uint)offset, indirect.MaterialImmediate, inputs, out var key))
