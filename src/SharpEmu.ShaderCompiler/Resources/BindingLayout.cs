@@ -371,6 +371,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     // onto host texels, its reciprocal, the mask of scaled image resources and the factor
     // the pixel position is divided by.
     public bool UsesRenderScale { get; init; }
+
+    // The pixel module writes an object/primitive ID target and reads the draw's object ID.
+    public bool UsesObjectId { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
@@ -387,7 +390,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint TessellationDataDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
     public uint RenderScaleDword => TessellationDataDword + (UsesTessellationData ? Gen5TessellationData.DwordCount : 0u);
 
-    public uint ShaderDataDwordCount => RenderScaleDword + (UsesRenderScale ? RenderScaleDwordCount : 0u);
+    public uint ObjectIdDword => RenderScaleDword + (UsesRenderScale ? RenderScaleDwordCount : 0u);
+
+    public uint ShaderDataDwordCount => ObjectIdDword + (UsesObjectId ? 1u : 0u);
 
     public static uint ImageSlotTableDwordCount(ShaderResourceInfo info)
     {
@@ -623,7 +628,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesRenderScale = false,
         bool usesBindlessImages = false,
         bool usesRuntimeBufferStrides = false,
-        bool usesTessellationData = false)
+        bool usesTessellationData = false,
+        bool usesObjectId = false)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
@@ -631,7 +637,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         usesRuntimeBufferStrides &= memoryOffsetCount != 0;
         var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 +
             (usesRuntimeBufferStrides ? (memoryOffsetCount + 1) / 2 : 0u) + (usesDispatchThreadLimits ? 3u : 0u) +
-            (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + (usesRenderScale ? RenderScaleDwordCount : 0u);
+            (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + (usesRenderScale ? RenderScaleDwordCount : 0u) +
+            (usesObjectId ? 1u : 0u);
         // The fixed-function control bridge shares the domain stage's runtime
         // buffer. Keep that ABI independent of per-stage push-data packing.
         var pushStart = usesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataStartDword, shaderDataDwords);
@@ -730,6 +737,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             // the persistent image heap.
             UsesBindlessImages = usesBindlessImages,
             UsesRenderScale = usesRenderScale,
+            UsesObjectId = usesObjectId,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
         };
@@ -747,6 +755,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         UsesRuntimeBufferStrides == other.UsesRuntimeBufferStrides &&
         UsesBindlessImages == other.UsesBindlessImages &&
         UsesRenderScale == other.UsesRenderScale &&
+        UsesObjectId == other.UsesObjectId &&
         UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
         Descriptors.Count == other.Descriptors.Count &&
         Descriptors.Zip(other.Descriptors).All(pair => pair.First.Kind == pair.Second.Kind && pair.First.Resources.SequenceEqual(pair.Second.Resources));
@@ -775,7 +784,7 @@ public static class BindingLayoutValidator
             throw new ResourcePlanException("Only a compute shader can use dispatch thread limits.");
         }
 
-        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits, layout.UsesRenderScale, layout.UsesBindlessImages, layout.UsesRuntimeBufferStrides, layout.UsesTessellationData);
+        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits, layout.UsesRenderScale, layout.UsesBindlessImages, layout.UsesRuntimeBufferStrides, layout.UsesTessellationData, layout.UsesObjectId);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(

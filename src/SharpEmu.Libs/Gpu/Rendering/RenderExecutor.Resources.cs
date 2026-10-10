@@ -243,7 +243,7 @@ public sealed partial class RenderExecutor
             var attachmentScale = AttachmentRenderScale(in state);
             vertexBindings = PrepareBindings(vertexInput.Stage with { AttachmentRenderScale = attachmentScale });
             pixelBindings = state.PixelActive
-                ? PrepareBindings(pixelInput.Stage with { AttachmentRenderScale = attachmentScale })
+                ? PrepareBindings(pixelInput.Stage with { AttachmentRenderScale = attachmentScale, ObjectId = banks.UserConfig.ObjectId })
                 : null;
         }
         catch (DrawImageTypeMismatchException rejection)
