@@ -445,28 +445,6 @@ public sealed unsafe class SharedBackingViews : IDisposable
         return true;
     }
 
-    // How many bytes from address, up to size, lie in views without a gap; Contains is true
-    // exactly for the sizes up to this.
-    public ulong ContiguousLength(ulong address, ulong size)
-    {
-        if (size == 0)
-        {
-            return 0;
-        }
-
-        var end = ulong.MaxValue - address < size ? ulong.MaxValue : address + size;
-        lock (_lock)
-        {
-            var current = address;
-            while (current < end && TryFindRecord(current, 1, out var record))
-            {
-                current = Math.Min(end, record.Address + record.Size);
-            }
-
-            return current - address;
-        }
-    }
-
     public bool Contains(ulong address, ulong size)
     {
         if (size == 0 || ulong.MaxValue - address < size)

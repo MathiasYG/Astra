@@ -79,8 +79,6 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool IsBacked(ulong address, ulong size) => _views.Contains(address, size);
 
-    public ulong BackedLength(ulong address, ulong size) => _views.ContiguousLength(address, size);
-
     public bool IsBackedWithoutLock(ulong address, ulong size) => _views.ContainsWithoutLock(address, size);
 
     public bool IsRestoredView(ulong address) => _views.IsRestoredView(address);

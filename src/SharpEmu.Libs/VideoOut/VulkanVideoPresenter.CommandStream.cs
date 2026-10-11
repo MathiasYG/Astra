@@ -352,8 +352,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             public bool CanRead(ulong address, ulong size) => inner.CanRead(address, size);
 
-            public ulong ReadableLength(ulong address, ulong size) => inner.ReadableLength(address, size);
-
             public string DescribeReadRange(ulong address, ulong size) => inner.DescribeReadRange(address, size);
         }
 
