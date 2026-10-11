@@ -832,7 +832,7 @@ internal static unsafe partial class VulkanVideoPresenter
             return new BufferView(buffer.Handle, alignedOffset, range);
         }
 
-        private BufferView UploadDwords(uint[] data, string label, ShaderProgramInfo program)
+        private BufferView UploadDwords(ReadOnlySpan<uint> data, string label, ShaderProgramInfo program)
         {
             if (data.Length == 0)
             {
@@ -890,6 +890,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private uint[] _slotTableScratch = [];
+        private uint[] _slotOccurrenceScratch = [];
+
         private void BindFlattenedResourceTable(PreparedStageBindings prepared)
         {
             var layout = prepared.Layout;
@@ -907,7 +910,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var slotCount = (int)BindingLayout.ImageSlotTableDwordCount(prepared.Resources.Info);
-            var table = new uint[checked(slotCount + snapshot.FlattenedResourceTable.Length)];
+            // The table is copied into transient memory before this returns, so per-draw scratch serves.
+            var tableLength = checked(slotCount + snapshot.FlattenedResourceTable.Length);
+            if (_slotTableScratch.Length < tableLength)
+            {
+                _slotTableScratch = new uint[Math.Max(tableLength, _slotTableScratch.Length * 2)];
+            }
+
+            var imageCount = prepared.Descriptors.Images.Length;
+            if (_slotOccurrenceScratch.Length < imageCount)
+            {
+                _slotOccurrenceScratch = new uint[Math.Max(imageCount, _slotOccurrenceScratch.Length * 2)];
+            }
+
+            var table = _slotTableScratch.AsSpan(0, tableLength);
             var slot = 0;
             foreach (var binding in layout.Descriptors)
             {
@@ -916,11 +932,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
-                var occurrences = new uint[prepared.Descriptors.Images.Length];
+                var occurrences = _slotOccurrenceScratch.AsSpan(0, imageCount);
+                occurrences.Clear();
                 foreach (var resource in binding.Resources)
                 {
                     var texture = prepared.Descriptors.Images[resource];
-                    var occurrence = occurrences[resource]++;
+                    var occurrence = occurrences[(int)resource]++;
                     if (!texture.IsResident)
                     {
                         table[slot++] = 0;
@@ -940,7 +957,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            snapshot.FlattenedResourceTable.AsSpan().CopyTo(table.AsSpan(slotCount));
+            snapshot.FlattenedResourceTable.AsSpan().CopyTo(table[slotCount..]);
             prepared.Descriptors.FlattenedTable = UploadDwords(table, "bindless image slot table", program);
         }
 
@@ -1089,6 +1106,16 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             // CommitBindings copies texture references into submission-owned
             // storage. These CPU descriptions are no longer referenced by GPU work.
+            // A pooled binding goes back to the pool here: only bindings that own a staging
+            // buffer stay with the submission, which returns them when it retires.
+            foreach (var texture in stage.Descriptors.Images)
+            {
+                if (texture is { StagingBuffer.Handle: 0 })
+                {
+                    ReturnTextureResource(texture);
+                }
+            }
+
             Scratch.Images.Return(stage.Descriptors.Images);
             Scratch.Samplers.Return(stage.Descriptors.Samplers);
             Scratch.Buffers.Return(stage.Descriptors.Buffers);
