@@ -19,6 +19,23 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 {
     private const uint Format32x4Float = 77;
 
+    // The graphics lookup key is reused across draws: a reset must leave it equal to a new one,
+    // or a draw without depth or with fewer samples misses every cached pipeline.
+    [Fact]
+    public void RenderingStateReset_ClearsSamplesAndSampleLocations()
+    {
+        var state = new PipelineRenderingState { ColorCount = 2, DepthFormat = Format.D32Sfloat, DepthSamples = 4 };
+        state.ColorFormats[1] = Format.R8G8B8A8Unorm;
+        state.ColorSamples[1] = 4;
+        state.SampleLocationWords[3] = 0x1234;
+
+        state.Reset();
+
+        var fresh = new PipelineRenderingState();
+        Assert.Equal(fresh, state);
+        Assert.Equal(fresh.GetHashCode(), state.GetHashCode());
+    }
+
     [Theory]
     [InlineData(6u)]
     [InlineData(32u)]

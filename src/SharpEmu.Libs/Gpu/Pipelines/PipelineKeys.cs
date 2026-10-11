@@ -154,8 +154,11 @@ public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
     public void Reset()
     {
         Array.Clear(ColorFormats);
+        Array.Clear(ColorSamples);
+        Array.Clear(SampleLocationWords);
         DepthFormat = Format.Undefined;
         StencilFormat = Format.Undefined;
+        DepthSamples = 0;
         ColorCount = 0;
     }
 
