@@ -119,9 +119,18 @@ internal static unsafe partial class VulkanVideoPresenter
             DepthCompare: image.DepthCompare,
             Atomic: image.Atomic);
 
-        private static bool[] FindResidentBindlessImages(ShaderResourceInfo info, uint[] flattenedTable)
+        // Read only while the draw's images are resolved, so one array serves every draw.
+        private bool[] _residentImageScratch = [];
+
+        private bool[] FindResidentBindlessImages(ShaderResourceInfo info, uint[] flattenedTable)
         {
-            var resident = new bool[info.Images.Count];
+            if (_residentImageScratch.Length < info.Images.Count)
+            {
+                _residentImageScratch = new bool[Math.Max(info.Images.Count, _residentImageScratch.Length * 2)];
+            }
+
+            var resident = _residentImageScratch;
+            Array.Clear(resident, 0, info.Images.Count);
             for (var index = 0; index < info.Images.Count; index++)
             {
                 if (info.Images[index].IndirectRoot == DescriptorConstants.NoIndex)
@@ -146,7 +155,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     // descriptor: preserve the old eager behavior for this table.
                     foreach (var candidate in candidates)
                     {
-                        if (candidate < resident.Length)
+                        if (candidate < info.Images.Count)
                         {
                             resident[(int)candidate] = true;
                         }
@@ -165,7 +174,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     foreach (var candidate in candidates)
                     {
-                        if (candidate < resident.Length)
+                        if (candidate < info.Images.Count)
                         {
                             resident[(int)candidate] = true;
                         }
@@ -180,7 +189,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     if (candidate < candidates.Count)
                     {
                         var resource = candidates[(int)candidate];
-                        if (resource < resident.Length)
+                        if (resource < info.Images.Count)
                         {
                             resident[(int)resource] = true;
                         }
@@ -201,17 +210,16 @@ internal static unsafe partial class VulkanVideoPresenter
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             BindImage(imageIdentifier, image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage);
-            return new TextureResource
-            {
-                Address = descriptor.BaseAddress,
-                ImageIdentifier = imageIdentifier,
-                Request = request,
-                IsStorage = image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage,
-                IsResident = true,
-                Width = descriptor.Width,
-                Height = descriptor.Height,
-                DestinationSelect = resolution.Swizzle,
-            };
+            var texture = RentTextureResource();
+            texture.Address = descriptor.BaseAddress;
+            texture.ImageIdentifier = imageIdentifier;
+            texture.Request = request;
+            texture.IsStorage = image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage;
+            texture.IsResident = true;
+            texture.Width = descriptor.Width;
+            texture.Height = descriptor.Height;
+            texture.DestinationSelect = resolution.Swizzle;
+            return texture;
         }
 
         // The last lookup of one image of one program. A draw binds the same descriptor as the
@@ -1115,6 +1123,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     ReturnTextureResource(texture);
                 }
             }
+
+            foreach (var texture in stage.RuntimeImages)
+            {
+                if (texture is { StagingBuffer.Handle: 0 })
+                {
+                    ReturnTextureResource(texture);
+                }
+            }
+
+            stage.RuntimeImages.Clear();
 
             Scratch.Images.Return(stage.Descriptors.Images);
             Scratch.Samplers.Return(stage.Descriptors.Samplers);

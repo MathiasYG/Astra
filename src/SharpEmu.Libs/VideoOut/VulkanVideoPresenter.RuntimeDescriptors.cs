@@ -159,18 +159,21 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
-        // The resolved part of a binding; the acquisition fields belong to one draw.
-        private static TextureResource CopyRuntimeBinding(TextureResource resolved) => new()
+        // The resolved part of a binding; the acquisition fields belong to one draw, so the copy is
+        // a per-draw binding from the pool, returned with the draw's other images.
+        private TextureResource CopyRuntimeBinding(TextureResource resolved)
         {
-            Address = resolved.Address,
-            ImageIdentifier = resolved.ImageIdentifier,
-            Request = resolved.Request,
-            IsStorage = resolved.IsStorage,
-            IsResident = resolved.IsResident,
-            DestinationSelect = resolved.DestinationSelect,
-            Width = resolved.Width,
-            Height = resolved.Height,
-        };
+            var binding = RentTextureResource();
+            binding.Address = resolved.Address;
+            binding.ImageIdentifier = resolved.ImageIdentifier;
+            binding.Request = resolved.Request;
+            binding.IsStorage = resolved.IsStorage;
+            binding.IsResident = resolved.IsResident;
+            binding.DestinationSelect = resolved.DestinationSelect;
+            binding.Width = resolved.Width;
+            binding.Height = resolved.Height;
+            return binding;
+        }
 
         // Called with the stage's other images: acquires each registered view, refreshes its heap
         // slot and binds the current table and the miss buffer.
