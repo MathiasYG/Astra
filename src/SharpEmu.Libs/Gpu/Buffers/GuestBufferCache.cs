@@ -1035,9 +1035,14 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     // A page the CPU dirtied before its first shader write was reported: shadowed from the GPU copy.
     private void AdoptLateSharedPage(ulong page, GpuBuffer owner)
     {
-        var adopted = owner.MappedPointer != null && owner.IsCoherent &&
-            _sharedPages.Adopt(page, owner, new ReadOnlySpan<byte>(owner.MappedPointer + owner.Offset(page), (int)TrackerLayout.PageBytes),
-                _scheduler.CurrentTick);
+        var adopted = false;
+        if (owner.MappedPointer != null && owner.IsCoherent)
+        {
+            Span<byte> gpu = stackalloc byte[(int)TrackerLayout.PageBytes];
+            MappedMemoryReader.Copy(owner.MappedPointer + owner.Offset(page), gpu);
+            adopted = _sharedPages.Adopt(page, owner, gpu, _scheduler.CurrentTick);
+        }
+
         if (!adopted && _sharedPages.Count >= SharedPageCapacity && Interlocked.Exchange(ref _reportedSharedPageCapacity, 1) == 0)
         {
             Console.Error.WriteLine("[GPU][WARN] The shared page shadows are full; CPU writes to further shader-written pages may lose shader bytes.");
@@ -1110,7 +1115,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         // The GPU may still write the page: merge one snapshot of it.
         Span<byte> gpu = stackalloc byte[(int)TrackerLayout.PageBytes];
-        new ReadOnlySpan<byte>(owner.MappedPointer + owner.Offset(page), gpu.Length).CopyTo(gpu);
+        MappedMemoryReader.Copy(owner.MappedPointer + owner.Offset(page), gpu);
         var guest = new byte[TrackerLayout.PageBytes];
         if (!_backing.TryReadBacking(page, guest))
         {
@@ -2229,12 +2234,22 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         return true;
     }
 
+    private byte[] _mappedReadScratch = [];
+
     private void ApplyMappedRead(List<DownloadPiece> copies, ulong windowBegin, ulong windowEnd, ulong guestAddress, ulong size,
         bool isWrite, long started, GuestMemoryProfile.ReadbackSource source)
     {
         foreach (var copy in copies)
         {
-            var bytes = new ReadOnlySpan<byte>(copy.Buffer.MappedPointer + copy.SourceOffset, checked((int)copy.Size));
+            // Out of the device-local mapping with streaming loads, then into guest memory.
+            var length = checked((int)copy.Size);
+            if (_mappedReadScratch.Length < length)
+            {
+                _mappedReadScratch = new byte[Math.Max(length, _mappedReadScratch.Length * 2)];
+            }
+
+            var bytes = _mappedReadScratch.AsSpan(0, length);
+            MappedMemoryReader.Copy(copy.Buffer.MappedPointer + copy.SourceOffset, bytes);
             if (!WriteDownloaded(copy.Address, bytes))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{copy.Size:X16}");
