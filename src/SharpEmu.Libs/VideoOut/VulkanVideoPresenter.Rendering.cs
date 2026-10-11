@@ -247,12 +247,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The buffer range starts in unmapped memory: address=0x{address:X16} size=0x{size:X16}.{context}");
             }
 
-            // Keep the readable prefix only; a later mapping must not hide a gap.
-            var clamped = _guestMemory.ReadableLength(address, size);
-            if (clamped == size)
+            // Almost every range is mapped whole, which CanRead confirms without a lock.
+            if (_guestMemory.CanRead(address, size))
             {
                 return size;
             }
+
+            // Keep the readable prefix only; a later mapping must not hide a gap.
+            var clamped = _guestMemory.ReadableLength(address, size);
 
             if (RenderTrace.Enabled)
             {
