@@ -880,6 +880,18 @@ public sealed class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        // Most draws of a plan whose user data points at per-draw constants never repeat their
+        // inputs; recording their reads, storing entries and learning rebases then costs more
+        // than a plain walk. Such a plan materializes directly and probes the cache again on
+        // every 64th draw, which also keeps learning its rebases.
+        var lookups = ++plan.CacheLookups;
+        if (lookups > ProbationLookups && plan.CacheHits * MinimumHitShare < lookups && (lookups & 63) != 0)
+        {
+            Bypassed++;
+            Interlocked.Increment(ref _totalBypassed);
+            return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
+        }
+
         var drawKey = DrawKeyOf(plan, inputs);
         _learnedUserData.TryGetValue(drawKey, out var learned);
         var rebase = RebaseOf(drawKey, plan);
@@ -952,6 +964,7 @@ public sealed class ResourceMaterializationCache
                     }
 
                     Hits++;
+                    plan.CacheHits++;
                     Interlocked.Increment(ref _totalHits);
                     snapshot = rebased;
                     specialization = refreshedFrom.Specialization;
