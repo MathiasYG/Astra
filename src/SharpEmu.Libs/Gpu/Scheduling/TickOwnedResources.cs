@@ -4,10 +4,16 @@
 namespace SharpEmu.Libs.Gpu.Scheduling;
 
 // A GPU feedback resource belongs to one submission until its completion callback
-// has consumed it. Later submissions must never reuse its mapped storage.
-internal sealed class TickOwnedResources<T> : IDisposable where T : class, IDisposable
+// has consumed it. Later submissions must never reuse its mapped storage before then.
+//
+// With a reset, a consumed resource is returned to its new state and kept for a later
+// submission instead of being destroyed: one per submission was created and destroyed
+// a thousand times a second. A failed read still destroys it.
+internal sealed class TickOwnedResources<T>(Action<T>? reset = null) : IDisposable where T : class, IDisposable
 {
+    private const int MaxSpare = 8;
     private readonly Dictionary<ulong, T> _resources = [];
+    private readonly Stack<T> _spare = new();
     private readonly object _gate = new();
 
     public T Acquire(ulong tick, Func<T> create)
@@ -16,7 +22,7 @@ internal sealed class TickOwnedResources<T> : IDisposable where T : class, IDisp
         {
             if (!_resources.TryGetValue(tick, out var resource))
             {
-                resource = create();
+                resource = _spare.TryPop(out var spare) ? spare : create();
                 _resources.Add(tick, resource);
             }
             return resource;
@@ -28,8 +34,24 @@ internal sealed class TickOwnedResources<T> : IDisposable where T : class, IDisp
         lock (_gate)
         {
             if (!_resources.Remove(tick, out var resource)) return;
-            try { consume(resource); }
-            finally { resource.Dispose(); }
+            var consumed = false;
+            try
+            {
+                consume(resource);
+                consumed = true;
+            }
+            finally
+            {
+                if (consumed && reset is not null && _spare.Count < MaxSpare)
+                {
+                    reset(resource);
+                    _spare.Push(resource);
+                }
+                else
+                {
+                    resource.Dispose();
+                }
+            }
         }
     }
 
@@ -40,6 +62,7 @@ internal sealed class TickOwnedResources<T> : IDisposable where T : class, IDisp
         {
             foreach (var resource in _resources.Values) resource.Dispose();
             _resources.Clear();
+            while (_spare.TryPop(out var spare)) spare.Dispose();
         }
     }
 }

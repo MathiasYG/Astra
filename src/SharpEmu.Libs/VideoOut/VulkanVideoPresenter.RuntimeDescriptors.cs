@@ -60,7 +60,8 @@ internal static unsafe partial class VulkanVideoPresenter
             public readonly Dictionary<RuntimeDescriptorKey, RuntimeImageEntry> Images = new();
             public readonly Dictionary<RuntimeDescriptorKey, RuntimeSamplerEntry> Samplers = new();
             public readonly ConcurrentQueue<(bool Image, uint[] Key)> Misses = new();
-            public readonly TickOwnedResources<GpuBuffer> MissBuffers = new();
+            // A completed miss buffer is cleared, as a new one is, and kept for a later tick.
+            public readonly TickOwnedResources<GpuBuffer> MissBuffers = new(ClearMissBuffer);
             public GpuBuffer? Table;
             public bool TableDirty = true;
             public ulong MissScanTick = ulong.MaxValue;
@@ -291,6 +292,15 @@ internal static unsafe partial class VulkanVideoPresenter
         private GpuBuffer RuntimeDescriptorMissBuffer(RuntimeDescriptorSet descriptors)
         {
             return descriptors.MissBuffers.Acquire(_scheduler.CurrentTick, CreateRuntimeDescriptorMissBuffer);
+        }
+
+        private static void ClearMissBuffer(GpuBuffer buffer)
+        {
+            buffer.Mapped.Clear();
+            if (!buffer.IsCoherent)
+            {
+                buffer.Flush(0, buffer.Size);
+            }
         }
 
         private GpuBuffer CreateRuntimeDescriptorMissBuffer()

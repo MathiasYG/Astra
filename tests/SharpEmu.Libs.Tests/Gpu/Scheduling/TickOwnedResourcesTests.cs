@@ -46,4 +46,28 @@ public sealed class TickOwnedResourcesTests
         Assert.Throws<InvalidOperationException>(() => resources.Complete(1, _ => throw new InvalidOperationException()));
         Assert.Equal(1, feedback.Disposals);
     }
+
+    // A consumed resource comes back reset for a later tick instead of being destroyed; one whose
+    // read failed is destroyed, and a resource is never handed to a second tick while owned.
+    [Fact]
+    public void ResetResource_IsReusedOnlyAfterItsTickCompletes()
+    {
+        var created = 0;
+        using var resources = new TickOwnedResources<Feedback>(feedback => feedback.Value = 0);
+        var first = resources.Acquire(1, () => { created++; return new Feedback(); });
+        first.Value = 7;
+        var second = resources.Acquire(2, () => { created++; return new Feedback(); });
+        Assert.NotSame(first, second);
+
+        resources.Complete(1, feedback => Assert.Equal(7, feedback.Value));
+        Assert.Equal(0, first.Disposals);
+        var third = resources.Acquire(3, () => { created++; return new Feedback(); });
+        Assert.Same(first, third);
+        Assert.Equal(0, third.Value);
+        Assert.Equal(2, created);
+
+        Assert.Throws<InvalidOperationException>(() => resources.Complete(3, _ => throw new InvalidOperationException()));
+        Assert.Equal(1, first.Disposals);
+        Assert.NotSame(first, resources.Acquire(4, () => { created++; return new Feedback(); }));
+    }
 }
