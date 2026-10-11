@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.Intrinsics;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
@@ -28,6 +29,8 @@ internal sealed class SharedPageShadows(ulong pageBytes, int capacity)
 
     private readonly Dictionary<ulong, Shadow> _pages = new();
     private readonly object _gate = new();
+    // The narrowed copies of one upload, reused under the gate.
+    private readonly List<BufferCopy> _filtered = new();
     private int _count;
     private long _mergedBytes;
     private long _skippedUploadBytes;
@@ -156,11 +159,7 @@ internal sealed class SharedPageShadows(ulong pageBytes, int capacity)
             while ((index += gpuPage[index..].CommonPrefixLength(bytes[index..])) < bytes.Length)
             {
                 // A run of GPU changes; within it, the bytes the CPU left alone go to guest memory.
-                var runEnd = index;
-                while (runEnd < bytes.Length && gpuPage[runEnd] != bytes[runEnd])
-                {
-                    runEnd++;
-                }
+                var runEnd = index + DifferingPrefixLength(gpuPage[index..], bytes[index..]);
 
                 var write = -1;
                 for (var at = index; at <= runEnd; at++)
@@ -221,7 +220,8 @@ internal sealed class SharedPageShadows(ulong pageBytes, int capacity)
 
                     if (filtered is null)
                     {
-                        filtered = new List<BufferCopy>(copies.Count + 8);
+                        filtered = _filtered;
+                        filtered.Clear();
                         for (var earlier = 0; earlier < index; earlier++)
                         {
                             filtered.Add(copies[earlier]);
@@ -251,11 +251,7 @@ internal sealed class SharedPageShadows(ulong pageBytes, int capacity)
                     var at = 0;
                     while ((at += source[at..].CommonPrefixLength(shadowBytes[at..])) < source.Length)
                     {
-                        var runEnd = at;
-                        while (runEnd < source.Length && source[runEnd] != shadowBytes[runEnd])
-                        {
-                            runEnd++;
-                        }
+                        var runEnd = at + DifferingPrefixLength(source[at..], shadowBytes[at..]);
 
                         filtered.Add(Slice(copy, begin, from + (ulong)at, (ulong)(runEnd - at)));
                         // Only a copy that survives filtering can leave staged bytes missing
@@ -284,8 +280,39 @@ internal sealed class SharedPageShadows(ulong pageBytes, int capacity)
             {
                 copies.Clear();
                 copies.AddRange(filtered);
+                filtered.Clear();
             }
         }
+    }
+
+    // The number of leading positions where the spans differ, 32 bytes at a time: CPU-written pages
+    // are mostly changed bytes, and a byte loop over them was most of the upload filter's time.
+    internal static int DifferingPrefixLength(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
+    {
+        var length = Math.Min(left.Length, right.Length);
+        var index = 0;
+        if (Vector256.IsHardwareAccelerated)
+        {
+            ref var leftStart = ref System.Runtime.InteropServices.MemoryMarshal.GetReference(left);
+            ref var rightStart = ref System.Runtime.InteropServices.MemoryMarshal.GetReference(right);
+            for (; index + 32 <= length; index += 32)
+            {
+                var equal = Vector256.Equals(
+                    Vector256.LoadUnsafe(ref leftStart, (nuint)index),
+                    Vector256.LoadUnsafe(ref rightStart, (nuint)index)).ExtractMostSignificantBits();
+                if (equal != 0)
+                {
+                    return index + System.Numerics.BitOperations.TrailingZeroCount(equal);
+                }
+            }
+        }
+
+        while (index < length && left[index] != right[index])
+        {
+            index++;
+        }
+
+        return index;
     }
 
     private static BufferCopy Slice(BufferCopy copy, ulong begin, ulong address, ulong size) =>
