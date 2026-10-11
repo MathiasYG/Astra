@@ -153,7 +153,14 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
         Current = null;
         WaitFor(job);
-        if (job.State != 1 || !job.Inputs.Equals(inputs) || !_concurrent.IsStillCurrent(job.Assumptions!))
+        var taken = job.State == 1 && job.Inputs.Equals(inputs) && _concurrent.IsStillCurrent(job.Assumptions!);
+        if (job.Assumptions is { } assumptions)
+        {
+            job.Assumptions = null;
+            _concurrent.ReleaseAssumptions(assumptions);
+        }
+
+        if (!taken)
         {
             return false;
         }

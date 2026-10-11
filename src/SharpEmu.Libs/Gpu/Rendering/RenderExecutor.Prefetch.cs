@@ -61,6 +61,12 @@ public interface IConcurrentResolveHost
 
     // On the render thread.
     bool IsStillCurrent(object assumptions);
+
+    // On the render thread, once the job that recorded them is taken or rejected; they are not
+    // read again and may be reused for a later resolution.
+    void ReleaseAssumptions(object assumptions)
+    {
+    }
 }
 
 // Program resolutions computed ahead of their draws. A draw takes one only when it was resolved
