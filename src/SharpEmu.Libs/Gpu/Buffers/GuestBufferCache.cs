@@ -1728,17 +1728,13 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             if (_hotWindows.TryGetValue(key, out var hot) && _batchSerial - hot.LastHit <= HotWindowLifetime)
             {
                 _eagerCandidates.Add(key);
-                HotWritePending = true;
             }
         }
     }
 
-    public bool HotWritePending { get; private set; }
-
     public void OnBatchSubmitted()
     {
         _batchSerial++;
-        HotWritePending = false;
         if (AsyncReadback is not { } readback)
         {
             return;
@@ -1984,8 +1980,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
             if (allowPending && writer < _scheduler.CurrentTick)
             {
-                // A guest thread had to wait for this writer: submit later writes to the window right
-                // after their command, so the next wait ends with them instead of with their whole batch.
+                // A guest thread had to wait for this writer: read the window ahead after later writes.
+                // Later writes are not submitted early: a reader submits the batch when it needs it,
+                // and submitting after every write to a read window split the frames of a title whose
+                // command thread reads its own compute output into ~750 submissions, ~11 % of the frame.
                 NoteHotReadback(guestAddress, size);
 
                 // The writer is already submitted: wait for it alone, not for the work queued after it.

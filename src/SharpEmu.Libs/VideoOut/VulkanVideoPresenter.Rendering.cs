@@ -215,11 +215,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             RunPendingCommands();
-            if (_batchOpen && _preparation is null && _bufferCache?.HotWritePending == true)
-            {
-                EndRendering();
-                FlushBatchedGuestCommands();
-            }
         }
 
         public void SetDebugInformation(RecordedOperation operation, ulong submitId, uint argument0, uint argument1, uint argument2, uint argument3, ulong argument4) =>
