@@ -5645,6 +5645,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		out ulong mappedBase,
 		out string? error)
 	{
+		lock (GuestThreadRegionGate)
+		{
+			return TryMapGuestThreadRegionLocked(virtualMemory, baseAddress, size, protection, out mappedBase, out error);
+		}
+	}
+
+	private static bool TryMapGuestThreadRegionLocked(
+		IVirtualMemory virtualMemory,
+		ulong baseAddress,
+		ulong size,
+		ProgramHeaderFlags protection,
+		out ulong mappedBase,
+		out string? error)
+	{
 		for (int i = 0; i < GuestThreadRegionSlots; i++)
 		{
 			var candidateBase = baseAddress - ((ulong)i * GuestThreadRegionStride);

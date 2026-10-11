@@ -622,6 +622,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 subgroupSizeControl.MinSubgroupSize <= RdnaSubgroupSize &&
                 subgroupSizeControl.MaxSubgroupSize >= RdnaSubgroupSize &&
                 (subgroupSizeControl.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0;
+            _canRequireComputeSubgroup64 =
+                subgroupSizeControl.MinSubgroupSize <= Wave64SubgroupSize &&
+                subgroupSizeControl.MaxSubgroupSize >= Wave64SubgroupSize &&
+                (subgroupSizeControl.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0;
             _maxComputeWorkgroupSubgroups = subgroupSizeControl.MaxComputeWorkgroupSubgroups;
 
             _maxPerStageSampledImages = properties.Limits.MaxPerStageDescriptorSampledImages;
@@ -1127,6 +1131,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsNullDescriptor = robustness2Features.NullDescriptor;
             var supportsRobustness2 = supportsRobustImageAccess2 || supportsNullDescriptor;
             _canRequireComputeSubgroup32 &= vulkan13Features.SubgroupSizeControl;
+            _canRequireComputeSubgroup64 &= vulkan13Features.SubgroupSizeControl;
             SetSharedInt64AtomicsCapability(supportsSharedInt64Atomics);
             var supportsExactFloat16 = VulkanFloat16Support.SupportsExactConversions(_vk, _physicalDevice);
             SetExactFloat16ConversionsCapability(supportsExactFloat16);
@@ -1420,7 +1425,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     SType = StructureType.PhysicalDeviceVulkan13Features,
                     DynamicRendering = true,
                     Synchronization2 = true,
-                    SubgroupSizeControl = _canRequireComputeSubgroup32,
+                    SubgroupSizeControl = _canRequireComputeSubgroup32 || _canRequireComputeSubgroup64,
                     PNext = renderingChain,
                 };
                 var features2 = new PhysicalDeviceFeatures2

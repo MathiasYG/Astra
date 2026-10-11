@@ -124,7 +124,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 // Drain accepted submissions before closing the relay.
                 // Cancel blocked submissions if a full retry cycle makes no progress.
                 _commandStream.StopAccepting();
-                // The runtime may tear down guest memory while this drains; stop executing then.
+                // The command stream thread ends after its slice; the rest drains here. The runtime may
+                // tear down guest memory while this drains; stop executing then.
+                _commandThread?.Stop(() => RunCommandStreamSlices(long.MaxValue));
                 var outcome = _commandStream.DrainForShutdown(
                     cancelBlockedOnNoProgress: true,
                     abandon: static () => GuestGpuMemoryHook.Current is null);
