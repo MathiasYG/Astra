@@ -2380,6 +2380,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool CanRead(ulong address, ulong size) => size != 0 && (IsBackedRange(address, size) || IsAccessible(address, size));
 
+    // CanRead holds for a size when the views back the whole range or one region holds it, so the
+    // longest readable prefix is the longer of the two, found under one lock.
+    public ulong ReadableLength(ulong address, ulong size)
+    {
+        if (size == 0)
+        {
+            return 0;
+        }
+
+        _gate.EnterReadLock();
+        try
+        {
+            var backed = _backedSpace?.BackedLength(address, size) ?? 0;
+            var region = FindRegion(address, 1);
+            var inRegion = region is null ? 0 : Math.Min(size, region.Size - (address - region.VirtualAddress));
+            return Math.Max(backed, inRegion);
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
     public bool IsAccessible(ulong virtualAddress, ulong size)
     {
         _gate.EnterReadLock();

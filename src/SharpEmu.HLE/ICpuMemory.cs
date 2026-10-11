@@ -36,5 +36,38 @@ public interface ICpuMemory
     // True when the whole range is mapped guest memory; no bytes are copied.
     bool CanRead(ulong address, ulong size) => false;
 
+    // The longest prefix of the range, at most size bytes, for which CanRead holds; 0 when its
+    // first byte is unreadable. This default searches with CanRead; memory that knows its
+    // mappings answers in one query.
+    ulong ReadableLength(ulong address, ulong size)
+    {
+        if (size == 0 || !CanRead(address, 1))
+        {
+            return 0;
+        }
+
+        if (CanRead(address, size))
+        {
+            return size;
+        }
+
+        var readable = 1UL;
+        var rejected = size;
+        while (rejected - readable > 1)
+        {
+            var candidate = readable + (rejected - readable) / 2;
+            if (CanRead(address, candidate))
+            {
+                readable = candidate;
+            }
+            else
+            {
+                rejected = candidate;
+            }
+        }
+
+        return readable;
+    }
+
     string DescribeReadRange(ulong address, ulong size) => "Memory mapping details are unavailable.";
 }

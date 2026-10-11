@@ -53,6 +53,8 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
 
     public bool CanRead(ulong address, ulong size) => _inner.CanRead(address, size);
 
+    public ulong ReadableLength(ulong address, ulong size) => _inner.ReadableLength(address, size);
+
     public bool TryScanCString(ulong address, byte needle, bool findLast, ulong maxLength, out ulong match) =>
         _inner.TryScanCString(address, needle, findLast, maxLength, out match);
 
