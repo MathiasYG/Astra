@@ -1688,11 +1688,16 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly Dictionary<ulong, HotWindow> _hotWindows = new();
     private readonly HashSet<ulong> _eagerCandidates = new();
     private readonly List<PendingDownload> _eagerDownloads = new();
-    // Consecutive eager readbacks of a window the GPU rewrote before the CPU read them.
-    // A window that keeps wasting its copies stops getting them until the counts reset.
-    private readonly Dictionary<ulong, int> _eagerMisses = new();
+    // Consecutive eager readbacks of a window the GPU rewrote before the CPU read them, and the
+    // batch before which the window gets no further one. A window that keeps wasting its copies
+    // waits twice as long after each further miss; a used copy clears its record. Forgetting all
+    // records every 256 batches instead kept retrying windows the GPU always rewrites first: in
+    // one title 1,500 eager copies per 10 s, of which 4 were used.
+    private readonly Dictionary<ulong, (int Misses, long RetryBatch)> _eagerMisses = new();
     private const int MaxEagerMisses = 2;
     private const long EagerMissResetBatches = 256;
+    private const int MaxEagerBackoffShift = 10;
+    private const int MaxEagerMissRecords = 4096;
     private static long _reportedEagerSkipped;
     private long _batchSerial;
     private static long _reportedEagerStarted;
@@ -1753,7 +1758,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             }
         }
 
-        if (_batchSerial % EagerMissResetBatches == 0)
+        if (_eagerMisses.Count > MaxEagerMissRecords)
         {
             _eagerMisses.Clear();
         }
@@ -1778,7 +1783,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 break;
             }
 
-            if (_eagerMisses.TryGetValue(key, out var misses) && misses >= MaxEagerMisses)
+            if (_eagerMisses.TryGetValue(key, out var missed) && missed.Misses >= MaxEagerMisses && _batchSerial < missed.RetryBatch)
             {
                 Interlocked.Increment(ref _reportedEagerSkipped);
                 continue;
@@ -1868,7 +1873,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private void NoteEagerMiss(ulong guestAddress)
     {
         var key = guestAddress & ~(ReadbackWindowBytes - 1);
-        _eagerMisses[key] = _eagerMisses.TryGetValue(key, out var misses) ? misses + 1 : 1;
+        var misses = (_eagerMisses.TryGetValue(key, out var missed) ? missed.Misses : 0) + 1;
+        var shift = Math.Clamp(misses - MaxEagerMisses, 0, MaxEagerBackoffShift);
+        _eagerMisses[key] = (misses, _batchSerial + (EagerMissResetBatches << shift));
     }
 
     private void AbandonEagerReadbacks()
