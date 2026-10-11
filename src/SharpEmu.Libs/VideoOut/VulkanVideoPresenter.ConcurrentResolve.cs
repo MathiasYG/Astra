@@ -51,16 +51,22 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // A resolution records one answer per guest read, so a new list per resolution regrew to
         // thousands of entries every draw. Released sets keep their capacity for the next one.
+        // Slots rather than a locked stack: the resolving thread takes and the render thread
+        // returns a set per draw, and the lock between them was contended (~1.5 % of the render
+        // thread at ~6,000 draws per frame).
         private const int MaxSpareAssumptions = 16;
         private const int MaxRetainedAnswers = 1 << 16;
-        private readonly Stack<ConcurrentAssumptions> _spareAssumptions = new();
+        private readonly ConcurrentAssumptions?[] _spareAssumptions = new ConcurrentAssumptions?[MaxSpareAssumptions];
 
         void IConcurrentResolveHost.BeginConcurrentResolve()
         {
-            ConcurrentAssumptions? assumptions;
-            lock (_spareAssumptions)
+            ConcurrentAssumptions? assumptions = null;
+            for (var slot = 0; slot < _spareAssumptions.Length && assumptions is null; slot++)
             {
-                _spareAssumptions.TryPop(out assumptions);
+                if (Volatile.Read(ref _spareAssumptions[slot]) is not null)
+                {
+                    assumptions = Interlocked.Exchange(ref _spareAssumptions[slot], null);
+                }
             }
 
             assumptions ??= new ConcurrentAssumptions();
@@ -77,11 +83,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             assumptions.Answers.Clear();
-            lock (_spareAssumptions)
+            for (var slot = 0; slot < _spareAssumptions.Length; slot++)
             {
-                if (_spareAssumptions.Count < MaxSpareAssumptions)
+                if (Volatile.Read(ref _spareAssumptions[slot]) is null &&
+                    Interlocked.CompareExchange(ref _spareAssumptions[slot], assumptions, null) is null)
                 {
-                    _spareAssumptions.Push(assumptions);
+                    return;
                 }
             }
         }

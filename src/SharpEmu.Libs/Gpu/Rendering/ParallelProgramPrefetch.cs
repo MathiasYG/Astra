@@ -194,6 +194,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private void Run()
     {
         SubmissionScheduler.ThrowOnFatal = true;
+        Pipelines.ShaderPipelineCache.YieldsResolveGate = true;
         while (true)
         {
             Job job;

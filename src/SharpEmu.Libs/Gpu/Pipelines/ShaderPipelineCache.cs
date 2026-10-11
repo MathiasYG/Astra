@@ -78,6 +78,46 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // the program, decode and materialization caches it updates are used under this lock only.
     // A pipeline lookup takes _pipelineGate instead, so it does not wait for a resolution.
     private readonly object _resolveGate = new();
+    // Threads waiting for the gate that do not yield it; a yielding thread lets them in first.
+    private int _gateWaiters;
+
+    // Set on a thread resolving ahead of the render thread: the render thread needs the gate for
+    // the draw it records now, and a resolution ahead of it can wait. Without the yield the
+    // render thread lost the gate to the resolving thread's next job, ~5 % of its time when a
+    // tenth of the prefetched draws went stale.
+    [ThreadStatic]
+    internal static bool YieldsResolveGate;
+
+    private void EnterResolveGate()
+    {
+        // A thread that holds the gate already must not wait for the threads waiting on it.
+        if (YieldsResolveGate && !Monitor.IsEntered(_resolveGate))
+        {
+            var spinner = new SpinWait();
+            while (Volatile.Read(ref _gateWaiters) != 0)
+            {
+                spinner.SpinOnce(sleep1Threshold: -1);
+            }
+
+            Monitor.Enter(_resolveGate);
+            return;
+        }
+
+        if (Monitor.TryEnter(_resolveGate))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _gateWaiters);
+        try
+        {
+            Monitor.Enter(_resolveGate);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _gateWaiters);
+        }
+    }
 
     public GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
@@ -88,9 +128,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool pixelActive,
         bool depthBound)
     {
-        lock (_resolveGate)
+        EnterResolveGate();
+        try
         {
             return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound);
+        }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
         }
     }
 
@@ -441,9 +486,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ)
     {
-        lock (_resolveGate)
+        EnterResolveGate();
+        try
         {
             return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+        }
+        finally
+        {
+            Monitor.Exit(_resolveGate);
         }
     }
 
