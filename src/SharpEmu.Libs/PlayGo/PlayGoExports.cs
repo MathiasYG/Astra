@@ -855,7 +855,7 @@ public static class PlayGoExports
         Span<byte> header = stackalloc byte[0x14];
         try
         {
-            using var stream = File.OpenRead(playGoPgm);
+            using var stream = App0Archive.OpenReadOrFile(playGoPgm);
             if (stream.Length < header.Length)
             {
                 return Array.Empty<ushort>();
