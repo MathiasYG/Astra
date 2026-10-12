@@ -45,6 +45,13 @@ internal sealed partial class ShaderPipelineCache
             !_context.TryReadUInt64(frontHeader + 0x20, out var shRegisters) ||
             !_context.TryReadUInt32(frontHeader + 0x5C, out var shCount))
             throw SubmissionScheduler.Fatal("The merged hull front has an unreadable register header.");
+        if (YieldsResolveGate)
+        {
+            // Read directly, like the code: a later store into them voids a resolution ahead.
+            _host.NoteConcurrentRead(frontHeader + 0x20, 0x40);
+            _host.NoteConcurrentRead(shRegisters, (shCount & 0xFF) * 8UL);
+        }
+
         for (uint index = 0; index < (shCount & 0xFF); index++)
         {
             if (!_context.TryReadUInt32(shRegisters + index * 8, out var offset) ||
