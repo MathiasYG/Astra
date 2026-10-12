@@ -327,7 +327,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private const ulong CleanReadPageBytes = 0x1000;
         private const int CleanReadPageSlots = 64;
-        private CleanReadPages? _cleanReadPages;
+        // Per resolving thread: the threads that resolve programs each fill their own.
+        [ThreadStatic]
+        private static CleanReadPages? _cleanReadPages;
         private bool _backingAliasAccess;
 
         private sealed class CleanReadPages

@@ -137,15 +137,29 @@ internal sealed class ShaderProgramCache
     private readonly CpuContext _context;
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
+    // Programs resolve on several threads at once. A lookup takes _lookupLock for the maps and
+    // permutation lists below; creating an entry or compiling a permutation takes _compileLock
+    // too, so every change to them happens under both and a reader under either sees it whole.
+    private readonly object _lookupLock = new();
+    private readonly object _compileLock = new();
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
     private readonly Dictionary<(ulong Hash, uint CodeSize), Gen5ShaderProgram> _decoded = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize), ShaderCodeCapture> _codeCaptures = new();
-    private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
-    // Draws that re-bind unchanged resources reuse the last materialization.
+    // The static key a lookup builds, per resolving thread.
+    [ThreadStatic]
+    private static List<uint>? _threadStaticState;
+
+    private static List<uint> _staticState => _threadStaticState ??= new List<uint>(StageStaticKey.MaxWords);
+
+    // Draws that re-bind unchanged resources reuse the last materialization. Each resolving thread
+    // keeps its own cache: its entries and learned rebases change on every lookup.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
-    private readonly ResourceMaterializationCache? _materializations =
-        Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") == "0" ? null : new();
+    private static readonly bool ResourceCacheEnabled = Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_CACHE") != "0";
+    private readonly ThreadLocal<ResourceMaterializationCache?> _threadMaterializations =
+        new(() => ResourceCacheEnabled ? new ResourceMaterializationCache() : null);
     private ulong _nextProgramId;
+
+    private ResourceMaterializationCache? _materializations => _threadMaterializations.Value;
 
     public ResourceMaterializationCache? Materializations => _materializations;
 
@@ -174,12 +188,38 @@ internal sealed class ShaderProgramCache
         _prefetchResidentGuestBytes = PrefetchEnabled ? _readResidentGuestBytes : null;
     }
 
-    public int ProgramCount => _programs.Count;
+    public int ProgramCount
+    {
+        get
+        {
+            lock (_lookupLock)
+            {
+                return _programs.Count;
+            }
+        }
+    }
 
-    public IEnumerable<ProgramSourceEntry> Entries => _programs.Values;
+    public IEnumerable<ProgramSourceEntry> Entries
+    {
+        get
+        {
+            lock (_lookupLock)
+            {
+                return _programs.Values.ToArray();
+            }
+        }
+    }
     private readonly Dictionary<(BindingLayout Layout, Gen5TessellationDomain Domain), (ShaderProgram Vertex, ShaderProgram Control)> _tessellationBridges = [];
 
     public (ShaderProgram Vertex, ShaderProgram Control) GetTessellationBridge(BindingLayout layout, Gen5TessellationDomain domain)
+    {
+        lock (_compileLock)
+        {
+            return GetTessellationBridgeLocked(layout, domain);
+        }
+    }
+
+    private (ShaderProgram Vertex, ShaderProgram Control) GetTessellationBridgeLocked(BindingLayout layout, Gen5TessellationDomain domain)
     {
         if (_tessellationBridges.TryGetValue((layout, domain), out var bridge)) return bridge;
         var shaders = _compiler.CompileTessellationBridge(layout, domain);
@@ -197,19 +237,42 @@ internal sealed class ShaderProgramCache
     public Gen5ShaderProgram Decode(ShaderSource source)
     {
         var key = (source.Hash, source.CodeSize);
-        if (_decoded.TryGetValue(key, out var program))
+        lock (_lookupLock)
         {
-            return program;
+            if (_decoded.TryGetValue(key, out var decoded))
+            {
+                return decoded;
+            }
+        }
+
+        lock (_compileLock)
+        {
+            return DecodeLocked(source, key);
+        }
+    }
+
+    private Gen5ShaderProgram DecodeLocked(ShaderSource source, (ulong Hash, uint CodeSize) key)
+    {
+        lock (_lookupLock)
+        {
+            if (_decoded.TryGetValue(key, out var decoded))
+            {
+                return decoded;
+            }
         }
 
         var recording = _host.ShaderPrewarm is not null ? new RecordingCpuMemory(_context.Memory) : null;
         var context = recording is null ? _context : new CpuContext(recording, _context.TargetGeneration);
-        if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out program, out var error))
+        if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out var program, out var error))
         {
             throw SubmissionScheduler.Fatal($"The shader program cannot be decoded: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
         }
 
-        _decoded.Add(key, program);
+        lock (_lookupLock)
+        {
+            _decoded.Add(key, program);
+        }
+
         if (recording is not null)
         {
             _codeCaptures[key] = new ShaderCodeCapture
@@ -276,7 +339,10 @@ internal sealed class ShaderProgramCache
             BuildStaticState(source.Stage, options);
             var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
                 CollectionsMarshal.AsSpan(_staticState));
-            _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out entry);
+            lock (_lookupLock)
+            {
+                _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out entry);
+            }
         }
         var sourceWasCached = entry is not null;
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -300,10 +366,27 @@ internal sealed class ShaderProgramCache
         };
         if (entry is null)
         {
-            entry = CreateEntry(source, options);
-            key = BuildProgramKey(source);
-            _programs.Add(key, entry);
-            ShaderCacheCounters.CountProgram();
+            lock (_compileLock)
+            {
+                var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
+                    CollectionsMarshal.AsSpan(_staticState));
+                lock (_lookupLock)
+                {
+                    _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out entry);
+                }
+
+                if (entry is null)
+                {
+                    entry = CreateEntry(source, options);
+                    key = BuildProgramKey(source);
+                    lock (_lookupLock)
+                    {
+                        _programs.Add(key, entry);
+                    }
+
+                    ShaderCacheCounters.CountProgram();
+                }
+            }
         }
 
         // Both are assigned by the materialization that follows; a failed one throws.
@@ -346,26 +429,38 @@ internal sealed class ShaderProgramCache
 
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {
-            foreach (var candidate in entry.Permutations)
+            if (FindPermutation(entry, specialization, pushDataCursor) is { } candidate)
             {
-                var layout = candidate.Bindings;
-                if (layout.PushDataStartDword == (layout.UsesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount)) && candidate.Specialization.Equals(specialization))
+                stage = CreateStageResources(candidate.Program, snapshot, source, options);
+                candidate.Bindings.AdvancePushData(ref pushDataCursor);
+                if (RenderTrace.Enabled && RenderTrace.Pipeline())
                 {
-                    stage = CreateStageResources(candidate.Program, snapshot, source, options);
-                    layout.AdvancePushData(ref pushDataCursor);
-                    if (RenderTrace.Enabled && RenderTrace.Pipeline())
-                    {
-                        RenderTrace.Write($"ProgramCache hit stage={source.Label} hash=0x{source.Hash:X16} id=0x{candidate.Handle.Id:X16}");
-                    }
-
-                    return candidate.Handle;
+                    RenderTrace.Write($"ProgramCache hit stage={source.Label} hash=0x{source.Hash:X16} id=0x{candidate.Handle.Id:X16}");
                 }
+
+                return candidate.Handle;
             }
         }
 
-        var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached);
-        entry.Permutations.Add(permutation);
-        ShaderCacheCounters.CountPermutation();
+        ProgramPermutation permutation;
+        lock (_compileLock)
+        {
+            if (FindPermutation(entry, specialization, pushDataCursor) is { } compiled)
+            {
+                permutation = compiled;
+            }
+            else
+            {
+                permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached);
+                lock (_lookupLock)
+                {
+                    entry.Permutations.Add(permutation);
+                }
+
+                ShaderCacheCounters.CountPermutation();
+            }
+        }
+
         stage = CreateStageResources(permutation.Program, snapshot, source, options);
         permutation.Bindings.AdvancePushData(ref pushDataCursor);
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -374,6 +469,24 @@ internal sealed class ShaderProgramCache
         }
 
         return permutation.Handle;
+    }
+
+    private ProgramPermutation? FindPermutation(ProgramSourceEntry entry, ResourceSpecialization specialization, uint pushDataCursor)
+    {
+        lock (_lookupLock)
+        {
+            foreach (var candidate in entry.Permutations)
+            {
+                var layout = candidate.Bindings;
+                if (layout.PushDataStartDword == (layout.UsesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount)) &&
+                    candidate.Specialization.Equals(specialization))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
     }
 
     // The key of the entry the static state was just built for.

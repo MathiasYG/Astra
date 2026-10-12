@@ -10,6 +10,33 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 // thread interprets and records. The render thread takes a result for the draw it runs only when
 // the resolution completed, used the inputs the draw derives and still matches the host's
 // GPU-ownership state; otherwise it resolves the draw itself.
+// The count of items finished from the first on, without a gap, when they finish in any order.
+// Complete is called under a lock; Count may be read without one.
+public sealed class CompletionPrefix
+{
+    private readonly HashSet<long> _ahead = new();
+    private long _count;
+
+    public long Count => Volatile.Read(ref _count);
+
+    public void Complete(long sequence)
+    {
+        if (sequence != _count)
+        {
+            _ahead.Add(sequence);
+            return;
+        }
+
+        var count = _count + 1;
+        while (_ahead.Remove(count))
+        {
+            count++;
+        }
+
+        Volatile.Write(ref _count, count);
+    }
+}
+
 public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 {
     public sealed class Job(RegisterBanks banks, long gate)
@@ -17,6 +44,8 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         internal readonly RegisterBanks Banks = banks;
         // The count of stream items other than draws that must have run before the job resolves.
         internal readonly long Gate = gate;
+        // The job's place in submission order, from zero.
+        internal long Sequence;
         internal GraphicsProgramInputs Inputs;
         internal GraphicsPrograms? Programs;
         internal object? Assumptions;
@@ -29,23 +58,36 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private readonly IConcurrentResolveHost _concurrent;
     private readonly object _lock = new();
     private readonly Queue<Job> _queue = new();
-    private readonly Thread _thread;
+    private readonly Thread[] _threads;
     private int _outstanding;
-    private long _finished;
+    private readonly CompletionPrefix _finished = new();
     private long _executedGate;
     // The gate the worker sleeps on; long.MaxValue while it does not.
     private long _sleepingOnGate = long.MaxValue;
     private bool _paused;
-    private bool _running;
+    private int _running;
     private bool _stopping;
+
+    // One worker resolved a draw-dense stretch slower than the render thread recorded it: jobs
+    // waited ~2 ms behind ~40 others and the render thread waited for them. Resolutions are
+    // independent, so several workers take jobs in order and finish them in any order.
+    // SHARPEMU_PREFETCH_WORKERS overrides the count.
+    private static readonly int WorkerCount =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_WORKERS"), out var workers) && workers > 0
+            ? Math.Min(workers, 8)
+            : Math.Clamp(Environment.ProcessorCount / 6, 1, 3);
 
     public ParallelProgramPrefetch(RenderExecutor executor, IRenderHost host, IConcurrentResolveHost concurrent)
     {
         _executor = executor;
         _host = host;
         _concurrent = concurrent;
-        _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu program resolve" };
-        _thread.Start();
+        _threads = new Thread[WorkerCount];
+        for (var index = 0; index < _threads.Length; index++)
+        {
+            _threads[index] = new Thread(Run) { IsBackground = true, Name = $"SharpEmu program resolve {index}" };
+            _threads[index].Start();
+        }
     }
 
     // The job of the draw the render thread runs now; set around each deferred draw.
@@ -60,6 +102,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         var job = new Job(banks, gate);
         lock (_lock)
         {
+            job.Sequence = Submitted;
             _queue.Enqueue(job);
             Submitted++;
             _outstanding++;
@@ -106,14 +149,14 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // with no resolution of the draws before it still reading.
     public void WaitFinished(long count)
     {
-        if (Volatile.Read(ref _finished) >= count)
+        if (_finished.Count >= count)
         {
             return;
         }
 
         lock (_lock)
         {
-            while (_finished < count)
+            while (_finished.Count < count)
             {
                 Monitor.Wait(_lock);
             }
@@ -126,7 +169,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         lock (_lock)
         {
             _paused = true;
-            while (_running)
+            while (_running != 0)
             {
                 Monitor.Wait(_lock);
             }
@@ -194,7 +237,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     private void Run()
     {
         SubmissionScheduler.ThrowOnFatal = true;
-        Pipelines.ShaderPipelineCache.YieldsResolveGate = true;
+        Pipelines.ShaderPipelineCache.ResolvesAhead = true;
         while (true)
         {
             Job job;
@@ -246,16 +289,23 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
                     return;
                 }
 
+                // Another worker may have taken the job while this one waited: look again.
+                if (_queue.Count == 0 || !ReferenceEquals(_queue.Peek(), job))
+                {
+                    continue;
+                }
+
                 _queue.Dequeue();
-                _running = true;
+                _running++;
             }
 
             Resolve(job);
             lock (_lock)
             {
                 _outstanding--;
-                _finished++;
-                _running = false;
+                _finished.Complete(job.Sequence);
+
+                _running--;
                 Monitor.PulseAll(_lock);
             }
         }

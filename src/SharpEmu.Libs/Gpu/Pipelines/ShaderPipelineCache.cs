@@ -70,7 +70,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
         var registered = _registry.Require(codeAddress, label);
         var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, registered.CodeRanges, label);
-        if (YieldsResolveGate)
+        if (ResolvesAhead)
         {
             foreach (var (address, size) in registered.CodeRanges)
             {
@@ -81,50 +81,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return new ShaderSource(registered, hash, userData, userDataBase, stage);
     }
 
-    // Program resolution runs on the render thread and on a thread resolving draws ahead of it;
-    // the program, decode and materialization caches it updates are used under this lock only.
-    // A pipeline lookup takes _pipelineGate instead, so it does not wait for a resolution.
-    private readonly object _resolveGate = new();
-    // Threads waiting for the gate that do not yield it; a yielding thread lets them in first.
-    private int _gateWaiters;
-
-    // Set on a thread resolving ahead of the render thread: the render thread needs the gate for
-    // the draw it records now, and a resolution ahead of it can wait. Without the yield the
-    // render thread lost the gate to the resolving thread's next job, ~5 % of its time when a
-    // tenth of the prefetched draws went stale.
+    // Program resolution runs on the render thread and on threads resolving draws ahead of it,
+    // at the same time: the program cache locks its own maps, and the materialization caches
+    // and scratch it uses are per thread. A pipeline lookup takes _pipelineGate.
+    // Set on a thread resolving ahead of the render thread: it records the guest bytes it reads
+    // directly, so a later store into them voids its result.
     [ThreadStatic]
-    internal static bool YieldsResolveGate;
-
-    private void EnterResolveGate()
-    {
-        // A thread that holds the gate already must not wait for the threads waiting on it.
-        if (YieldsResolveGate && !Monitor.IsEntered(_resolveGate))
-        {
-            var spinner = new SpinWait();
-            while (Volatile.Read(ref _gateWaiters) != 0)
-            {
-                spinner.SpinOnce(sleep1Threshold: -1);
-            }
-
-            Monitor.Enter(_resolveGate);
-            return;
-        }
-
-        if (Monitor.TryEnter(_resolveGate))
-        {
-            return;
-        }
-
-        Interlocked.Increment(ref _gateWaiters);
-        try
-        {
-            Monitor.Enter(_resolveGate);
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _gateWaiters);
-        }
-    }
+    internal static bool ResolvesAhead;
 
     public GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
@@ -135,15 +98,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool pixelActive,
         bool depthBound)
     {
-        EnterResolveGate();
-        try
-        {
-            return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound);
-        }
-        finally
-        {
-            Monitor.Exit(_resolveGate);
-        }
+        return GetGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound);
     }
 
     private GraphicsPrograms GetGraphicsProgramsCore(
@@ -222,7 +177,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram pixelProgramHandle = default;
         ShaderStageResources vertexStage;
         ShaderStageResources pixelStage = default;
-        lock (_gate)
+        // Program preparation is safe on several threads.
         {
             var pushDataCursor = 0u;
             if (pixelSource is not null)
@@ -259,7 +214,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         TessellationDrawPrograms? tessellationPrograms = null;
         if (tessellated)
         {
-            lock (_gate)
+            // Program preparation is safe on several threads.
             {
                 tessellationPrograms = PrepareTessellationHull(vertex, shaderInterface, tessellation!.Value);
                 var bridge = _programs.GetTessellationBridge(vertexStage.Program!.Bindings!, tessellation.Value.Domain);
@@ -493,15 +448,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ)
     {
-        EnterResolveGate();
-        try
-        {
-            return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
-        }
-        finally
-        {
-            Monitor.Exit(_resolveGate);
-        }
+        return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
     }
 
     private ComputeProgram GetComputeProgramCore(
@@ -529,7 +476,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         ShaderProgram handle;
         ShaderStageResources stage;
-        lock (_gate)
+        // Program preparation is safe on several threads.
         {
             var pushDataCursor = 0u;
             if (!TryPrepareProgram(
@@ -553,7 +500,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (_programs.TryGetProgram(source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
             return true;
 
-        if (_reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize)))
+        bool firstSkip;
+        lock (_reportedShaderSkips)
+        {
+            firstSkip = _reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize));
+        }
+
+        if (firstSkip)
         {
             var tag = source.Stage == ShaderStage.Compute ? "COMPUTE_SKIPPED" : "DRAW_SKIPPED";
             Console.Error.WriteLine($"[GPU][WARN][{tag}] {rejection} " +
