@@ -190,7 +190,8 @@ public unsafe class GpuBuffer : IDisposable
     // A readback of it only has to wait for that tick, not for all queued work.
     public ulong LastGpuWriteTick { get; private set; }
 
-    // Called by every path that records a GPU write into this buffer.
+    // Called by every path that records a GPU write into this buffer. Without a range the write
+    // may touch any byte, so every range waits for it.
     public void NoteGpuWrite()
     {
         var tick = _scheduler.CurrentTick;
@@ -198,7 +199,62 @@ public unsafe class GpuBuffer : IDisposable
         {
             LastGpuWriteTick = tick;
         }
+
+        if (tick > _unrangedGpuWriteTick)
+        {
+            _unrangedGpuWriteTick = tick;
+        }
     }
+
+    // A GPU write of these bytes. A large buffer that many passes write keeps a recent
+    // LastGpuWriteTick; a readback of bytes written long ago waits only for their chunks.
+    public void NoteGpuWrite(ulong offset, ulong size)
+    {
+        var tick = _scheduler.CurrentTick;
+        if (tick > LastGpuWriteTick)
+        {
+            LastGpuWriteTick = tick;
+        }
+
+        if (size == 0)
+        {
+            return;
+        }
+
+        var ticks = _chunkGpuWriteTicks ??= new ulong[(Size + GpuWriteChunkBytes - 1) / GpuWriteChunkBytes];
+        var first = (int)Math.Min(offset / GpuWriteChunkBytes, (ulong)ticks.Length - 1);
+        var last = (int)Math.Min((offset + size - 1) / GpuWriteChunkBytes, (ulong)ticks.Length - 1);
+        for (var chunk = first; chunk <= last; chunk++)
+        {
+            if (tick > ticks[chunk])
+            {
+                ticks[chunk] = tick;
+            }
+        }
+    }
+
+    // The highest tick whose command buffer may write these bytes on the GPU.
+    public ulong LastGpuWriteTickIn(ulong offset, ulong size)
+    {
+        var tick = _unrangedGpuWriteTick;
+        if (_chunkGpuWriteTicks is not { } ticks || size == 0)
+        {
+            return tick;
+        }
+
+        var first = (int)Math.Min(offset / GpuWriteChunkBytes, (ulong)ticks.Length - 1);
+        var last = (int)Math.Min((offset + size - 1) / GpuWriteChunkBytes, (ulong)ticks.Length - 1);
+        for (var chunk = first; chunk <= last; chunk++)
+        {
+            tick = Math.Max(tick, ticks[chunk]);
+        }
+
+        return tick;
+    }
+
+    private const ulong GpuWriteChunkBytes = 64 * 1024;
+    private ulong _unrangedGpuWriteTick;
+    private ulong[]? _chunkGpuWriteTicks;
 
     public void Write(ulong offset, ReadOnlySpan<byte> source)
     {
@@ -261,7 +317,7 @@ public unsafe class GpuBuffer : IDisposable
         }
 
         command.EndRendering();
-        NoteGpuWrite();
+        NoteGpuWrite(destinationOffset, size);
         var vk = _device.Vk;
         var native = new CommandBuffer(command.Handle);
         var before = stackalloc BufferMemoryBarrier2[2];
@@ -289,7 +345,7 @@ public unsafe class GpuBuffer : IDisposable
 
         var command = _scheduler.Current;
         command.EndRendering();
-        NoteGpuWrite();
+        NoteGpuWrite(offset, size);
         var vk = _device.Vk;
         var native = new CommandBuffer(command.Handle);
         var before = CreateBarrier(offset, size, MemoryAccess, AccessFlags.TransferWriteBit);

@@ -415,7 +415,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _ = SynchronizeBuffer(buffer, guestAddress, size, isWritten, isTexelBuffer, preserveCpuWriteHotPages: false);
         if (isWritten)
         {
-            buffer.NoteGpuWrite();
+            buffer.NoteGpuWrite(buffer.Offset(guestAddress), size);
             if (Diagnostics.DccWriterTrace.Enabled)
             {
                 Diagnostics.DccWriterTrace.Record(RequireImageCache(), guestAddress, size);
@@ -1008,7 +1008,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 Interlocked.Increment(ref _gpuModifiedVersion);
             }
 
-            owner.NoteGpuWrite();
+            owner.NoteGpuWrite(owner.Offset(page), TrackerLayout.PageBytes);
             marked = true;
             if (GuestGpuMemoryHook.Traces(page, TrackerLayout.PageBytes))
                 GuestGpuMemoryHook.Trace(page, TrackerLayout.PageBytes, $"device-address-write-reported submission_tick={_scheduler.CurrentTick}");
@@ -1972,6 +1972,13 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             // The mapping is device-local memory the CPU reads uncached across the bus, so a
             // mapped read copies only the pages around the request, not the whole window.
             copies = CollectReadbackWindow(copies[0].Buffer, guestAddress, size, MappedReadbackWindowBytes, out windowBegin, out windowEnd);
+            // The pages read wait only for their own writers, not for those of the whole window:
+            // the wider window's writer is often a later pass over other pages.
+            writer = 0;
+            foreach (var copy in copies)
+            {
+                writer = Math.Max(writer, copy.Buffer.LastGpuWriteTickIn(copy.SourceOffset, copy.Size));
+            }
             if (writer == 0 || _scheduler.IsTickComplete(writer))
             {
                 ApplyMappedRead(copies, windowBegin, windowEnd, guestAddress, size, isWrite, readbackStarted, source);
@@ -1990,7 +1997,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 var mappedTicks = new ulong[copies.Count];
                 for (var index = 0; index < copies.Count; index++)
                 {
-                    mappedTicks[index] = copies[index].Buffer.LastGpuWriteTick;
+                    mappedTicks[index] = copies[index].Buffer.LastGpuWriteTickIn(copies[index].SourceOffset, copies[index].Size);
                     copies[index].Buffer.RetainForeignRead();
                 }
 
@@ -2233,7 +2240,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 return false;
             }
 
-            writer = Math.Max(writer, copy.Buffer.LastGpuWriteTick);
+            writer = Math.Max(writer, copy.Buffer.LastGpuWriteTickIn(copy.SourceOffset, copy.Size));
         }
 
         return true;
@@ -2367,7 +2374,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         for (var index = 0; index < pending.Copies.Count; index++)
         {
             var copy = pending.Copies[index];
-            if (copy.Buffer.LastGpuWriteTick != pending.WriteTicks[index] ||
+            var written = pending.Mapped
+                ? copy.Buffer.LastGpuWriteTickIn(copy.SourceOffset, copy.Size)
+                : copy.Buffer.LastGpuWriteTick;
+            if (written != pending.WriteTicks[index] ||
                 !_gpuModifiedRanges.Contains(copy.Address, copy.Size) ||
                 !ReferenceEquals(FindOwner(copy.Address, copy.Size), copy.Buffer))
             {
@@ -2879,7 +2889,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                     WatchEvent(buffer.CpuAddress + copy.DstOffset, copy.Size, "upload");
             }
 
-            buffer.NoteGpuWrite();
+            foreach (var copy in copies)
+            {
+                buffer.NoteGpuWrite(copy.DstOffset, copy.Size);
+            }
+
             var command = _scheduler.Current;
             command.EndRendering();
             var native = new CommandBuffer(command.Handle);
@@ -2938,7 +2952,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             var copiedFromImage = RequireImageCache().TrySynchronizeBufferFromImage(buffer, guestAddress, size);
             if (copiedFromImage)
             {
-                buffer.NoteGpuWrite();
+                buffer.NoteGpuWrite(buffer.Offset(guestAddress), size);
             }
 
             return copiedFromImage;

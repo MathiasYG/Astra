@@ -104,6 +104,35 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
 
     // A read while the writer is submitted but still running waits for that submission only, then
     // reads the mapping; a write recorded after the read was issued is picked up by the next read.
+    // A read of a page waits for that page's writer only: a later pass that writes elsewhere in the
+    // same buffer, still recording, is neither submitted nor waited for.
+    [Fact]
+    public void AReadDoesNotWaitForAWriteElsewhereInItsBuffer()
+    {
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        if (!harness.Cache.UnifiedBuffers)
+        {
+            harness.Shutdown();
+            return;
+        }
+
+        var address = harness.MapBacked(0x400000, ReadWrite);
+        harness.Worker.Run(() => _ = harness.Cache.ObtainBuffer(address, 0x400000, isWritten: false));
+        GpuWrite(harness, address, 0x12345678);
+        harness.Worker.Run(() => harness.Scheduler.Finish());
+        GpuWrite(harness, address + 0x200000, 0x9ABCDEF0);
+        var recording = harness.Worker.Run(() => harness.Scheduler.CurrentTick);
+
+        QueueRead(harness, address);
+
+        Assert.Equal(0x12345678u, BitConverter.ToUInt32(harness.Read(address + 0x40, 4)));
+        Assert.Equal(recording, harness.Worker.Run(() => harness.Scheduler.CurrentTick));
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x200000, 0x100));
+        harness.Shutdown();
+    }
+
     [Fact]
     public void AReadOfASubmittedWriteWaitsForItAndReadsTheUnifiedMapping()
     {
