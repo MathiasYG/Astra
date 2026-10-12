@@ -221,6 +221,7 @@ internal static unsafe partial class VulkanVideoPresenter
             word = 0;
             if (!_bufferCache.HasGpuDirtyPages(address, sizeof(uint)) && IsCleanReadPage(address, sizeof(uint), clean: true))
             {
+                _concurrentAssumptions?.Record(ConcurrentQuery.Read, address, sizeof(uint), false);
                 if (TryGetAliasPointer(address, sizeof(uint), out var alias))
                 {
                     word = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(alias);

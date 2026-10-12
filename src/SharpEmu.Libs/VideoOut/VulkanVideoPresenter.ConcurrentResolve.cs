@@ -21,6 +21,8 @@ internal static unsafe partial class VulkanVideoPresenter
             CleanWord,
             Resident,
             ResidentClean,
+            // Bytes read without an ownership question: checked only against later GPU stores.
+            Read,
         }
 
         private sealed class ConcurrentAssumptions
@@ -100,12 +102,14 @@ internal static unsafe partial class VulkanVideoPresenter
             return assumptions;
         }
 
-        // GPU data stored into guest memory since the resolution may have changed what it read;
-        // otherwise the answers stand while the ownership they came from has not changed.
+        // GPU data stored since into what the resolution read may have changed it; otherwise the
+        // answers stand while the ownership they came from has not changed. Any store used to
+        // void every resolution in flight: with a few dozen readbacks a frame, ~6 % of the
+        // prefetched draws were resolved again, none of them because of what they had read.
         bool IConcurrentResolveHost.IsStillCurrent(object assumptionsObject)
         {
             var assumptions = (ConcurrentAssumptions)assumptionsObject;
-            if (assumptions.WritebackEpoch != GpuWritebackEpoch.Value)
+            if (assumptions.WritebackEpoch != GpuWritebackEpoch.Value && !MissesWritebacksSince(assumptions))
             {
                 return false;
             }
@@ -117,6 +121,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var (query, address, size, answer) in assumptions.Answers)
             {
+                if (query == ConcurrentQuery.Read)
+                {
+                    continue;
+                }
+
                 var now = query switch
                 {
                     ConcurrentQuery.DirtyBytes => _bufferCache.HasGpuDirtyBytes(address, size),
@@ -132,6 +141,34 @@ internal static unsafe partial class VulkanVideoPresenter
 
             return true;
         }
+
+        private readonly List<(ulong Address, ulong Size)> _writebacksSince = new();
+
+        private bool MissesWritebacksSince(ConcurrentAssumptions assumptions)
+        {
+            _writebacksSince.Clear();
+            if (!GpuWritebackEpoch.TryCollectSince(assumptions.WritebackEpoch, _writebacksSince))
+            {
+                return false;
+            }
+
+            foreach (var (store, storeSize) in _writebacksSince)
+            {
+                foreach (var (_, address, size, _) in assumptions.Answers)
+                {
+                    if (address < store + storeSize && store < address + size)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        // Shader code the resolution hashed; a later store into it voids the resolution.
+        void SharpEmu.Libs.Gpu.Pipelines.IShaderPipelineHost.NoteConcurrentRead(ulong address, ulong size) =>
+            _concurrentAssumptions?.Record(ConcurrentQuery.Read, address, size, false);
 
         // An image whose contents went to its buffer view is caught by the buffer checks.
         private bool IsGpuOwnedForCleanRead(ulong address, ulong size) =>
