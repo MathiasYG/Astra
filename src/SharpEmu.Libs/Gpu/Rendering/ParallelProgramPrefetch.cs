@@ -71,11 +71,12 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // One worker resolved a draw-dense stretch slower than the render thread recorded it: jobs
     // waited ~2 ms behind ~40 others and the render thread waited for them. Resolutions are
     // independent, so several workers take jobs in order and finish them in any order.
-    // SHARPEMU_PREFETCH_WORKERS overrides the count.
+    // SHARPEMU_PREFETCH_WORKERS overrides the count; on 12 logical processors three workers
+    // resolved ~1.8 % more draws per second than two.
     private static readonly int WorkerCount =
         int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_PREFETCH_WORKERS"), out var workers) && workers > 0
             ? Math.Min(workers, 8)
-            : Math.Clamp(Environment.ProcessorCount / 6, 1, 3);
+            : Math.Clamp(Environment.ProcessorCount / 4, 1, 3);
 
     public ParallelProgramPrefetch(RenderExecutor executor, IRenderHost host, IConcurrentResolveHost concurrent)
     {
