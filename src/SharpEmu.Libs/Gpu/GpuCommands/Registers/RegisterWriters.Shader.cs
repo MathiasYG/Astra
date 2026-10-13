@@ -23,7 +23,6 @@ internal static partial class RegisterWriters
     [
         SpiShaderPaceIdPs, SpiGraphicsShaderControlPs, SpiShaderPaceIdGs, SpiShaderPgmRsrc4Gs, SpiGraphicsShaderControlGs,
         SpiShaderUserDataAddrLoGs, SpiShaderUserDataAddrHiGs, SpiShaderPgmChksumHs, SpiShaderPgmRsrc4Hs, SpiGraphicsShaderControlHs,
-        SpiShaderUserDataAddrLoHs, SpiShaderUserDataAddrHiHs,
     ];
 
     public static void FillShader(RegisterPacketWriter?[] direct, RegisterWriter?[] indirect)
@@ -75,6 +74,13 @@ internal static partial class RegisterWriters
         direct[SpiShaderUserDataAddrLoHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrHiHs] = ForwardShaderPacket;
 
+        // Unlike program addresses, these registers contain byte-address
+        // bits 0..31 and 32..47, consumed directly by merged LS/HS s0:s1.
+        indirect[SpiShaderUserDataAddrLoHs] = static (banks, _, value) =>
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & 0xFFFF_0000_0000ul) | value;
+        indirect[SpiShaderUserDataAddrHiHs] = static (banks, _, value) =>
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & uint.MaxValue) | ((ulong)(value & 0xFFFFu) << 32);
+
         indirect[SpiShaderPgmLoHs] = static (banks, _, value) => banks.Shader.Vertex.HullAddress = RegisterField.WithLowAddress(banks.Shader.Vertex.HullAddress, value);
         indirect[SpiShaderPgmHiHs] = static (banks, _, value) => banks.Shader.Vertex.HullAddress = RegisterField.WithHighAddress(banks.Shader.Vertex.HullAddress, value);
         indirect[SpiShaderPgmRsrc1Hs] = static (banks, _, value) => banks.Shader.Vertex.HullResource1 = HullResource1.Decode(value);
@@ -98,7 +104,6 @@ internal static partial class RegisterWriters
         indirect[SpiShaderPgmRsrc1Vs] = static (banks, _, value) => banks.Shader.Vertex.LegacyVertexResource1 = value;
         indirect[SpiShaderPgmRsrc2Vs] = static (banks, _, value) => banks.Shader.Vertex.LegacyVertexResource2 = value;
     }
-
     private static uint PixelUserScalarsPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         UserScalarsPacket(banks, in packet, offset, values, banks.Shader.Pixel.UserScalars, SpiShaderUserDataPs0, GraphicsUserScalarCount);
 
