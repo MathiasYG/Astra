@@ -226,6 +226,7 @@ public static class ShaderRegisterOffset
 // User-config bank offsets the write table covers.
 public static class UserConfigRegisterOffset
 {
+    // Below the primitive-assembly block, where gfx10 to gfx12 document no register. Ghost of
     public const uint VgtPrimitiveType = 0x242;
     public const uint VgtIndexType = 0x243;
     public const uint VgtObjectId = 0x248;

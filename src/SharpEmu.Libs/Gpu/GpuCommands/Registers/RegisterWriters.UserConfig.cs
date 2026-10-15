@@ -51,7 +51,6 @@ internal static partial class RegisterWriters
         indirect[GdsOaAddress] = OrderedAppendEntry;
         indirect[GeStereoCntl] = IgnoreEntry;
     }
-
     private static uint PrimitiveTypePacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         SingleValue(banks, in packet, offset, values, PrimitiveTypeEntry);
 
